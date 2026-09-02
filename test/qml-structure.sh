@@ -61,7 +61,7 @@ grep_stripped_all() {
 
 # 1 -- no PATH-resolved interpreter anywhere, in either quote style QML
 #      accepts (single or double).
-interp_pat="[\"'](bash|sh|timeout|hyprctl|head|jq)[\"']"
+interp_pat="[\"'](bash|sh|timeout|hyprctl|head|jq|setsid)[\"']"
 hits="$(grep_stripped_all "$interp_pat" || true)"
 [[ -z "$hits" ]] && ok "no PATH-resolved interpreter in any qml file" \
                  || bad "no PATH-resolved interpreter in any qml file" "$hits"
@@ -383,6 +383,52 @@ hits="$(sed '/^$/d' <<<"$hits")"
 #      lines), scanned for "generation += 1" or "generation++" -- either
 #      spelling counts, since both retire the run before any queued signal
 #      from it can be delivered.
+#
+#      BINDING THE PLACEMENT, not only the enclosing block: this check
+#      stayed green when the bump was moved out of onTriggered into a
+#      SIBLING handler of the same Timer -- `onIntervalChanged`, which never
+#      fires -- because the bump was still, textually, inside the watchdog's
+#      block. The watchdog then reported an error and stopped the four
+#      Processes without retiring the run, which is round 1's defect exactly.
+#      So the bump is now required inside the onTriggered HANDLER BODY, via
+#      handler_body() below, and a watchdog with no locatable onTriggered
+#      handler is a FAIL, not a pass: a handler this script cannot read is a
+#      handler it cannot verify the bump is in.
+#
+#      The block extraction now ends where the ENCLOSING component's brace
+#      closes (depth going negative), not at the first handler's own closing
+#      brace -- otherwise a legitimate reordering that puts another braced
+#      handler before onTriggered would push onTriggered out of view and
+#      fail for the wrong reason.
+
+# The text of one "onXxx:" handler, brace-aware. A handler is either a
+# braced block over however many lines ("onTriggered: {" ... "}") or a
+# single statement on the same line ("onTriggered: root.generation += 1");
+# both are ordinary QML, so both are recognised -- the single-statement form
+# ends at its own line, since it has no brace to close.
+handler_body() {
+  # $1 = block text, $2 = handler name
+  awk -v h="$2" '
+      BEGIN { capturing = 0; depth = 0; opened = 0 }
+      {
+          if (!capturing) {
+              if ($0 !~ "(^|[^A-Za-z0-9_])" h "[[:space:]]*:") next
+              capturing = 1; depth = 0; opened = 0
+          }
+          print
+          n = length($0)
+          for (i = 1; i <= n; i++) {
+              c = substr($0, i, 1)
+              if (c == "{") { depth++; opened = 1 }
+              else if (c == "}") {
+                  depth--
+                  if (opened && depth <= 0) { capturing = 0; i = n + 1 }
+              }
+          }
+          if (capturing && !opened) capturing = 0
+      }
+  ' <<<"$1"
+}
 for file in $(qml_files); do
   clean="$(strip_comments "$file")"
   grep -qE '(^|[^A-Za-z0-9_])id:[[:space:]]*watchdog([^A-Za-z0-9_]|$)' <<<"$clean" || continue
@@ -402,17 +448,47 @@ for file in $(qml_files); do
               if (c == "{") depth++
               else if (c == "}") {
                   depth--
-                  if (depth <= 0 && depth != "") { capturing = 0; i = n + 1 }
+                  if (depth < 0) { capturing = 0; i = n + 1 }
               }
           }
       }
   ' <<<"$clean")"
+  triggered="$(handler_body "$block" onTriggered)"
   gen_bump_pat='(^|[^A-Za-z0-9_.])(root\.)?generation[[:space:]]*(\+=[[:space:]]*1|\+\+)([^A-Za-z0-9_]|$)'
-  if grep -qE "$gen_bump_pat" <<<"$block"; then
-    ok "$file: the watchdog retires its own run (bumps generation) before stopping it"
+  if [[ -z "$triggered" ]]; then
+    bad "$file: the watchdog retires its own run (bumps generation) inside onTriggered" \
+        "no onTriggered handler found in the watchdog's block -- a handler this script cannot locate is one it cannot verify the generation bump is in"
+  elif grep -qE "$gen_bump_pat" <<<"$triggered"; then
+    ok "$file: the watchdog retires its own run (bumps generation) inside onTriggered"
   else
-    bad "$file: the watchdog retires its own run (bumps generation) before stopping it" \
-        "no 'generation += 1' (or '++') found inside the watchdog's block -- a killed Process's own terminal signal would still match ctx.gen and resume the sequence"
+    bad "$file: the watchdog retires its own run (bumps generation) inside onTriggered" \
+        "no 'generation += 1' (or '++') inside the watchdog's onTriggered body -- in a sibling handler that never fires it is not a retirement, and a killed Process's own terminal signal would still match ctx.gen and resume the sequence"
+  fi
+
+  # 8b -- the watchdog is the ONLY release path for a Process that never
+  #       emits `exited`, which is the whole reason the Timer exists (Qt
+  #       emits no finished() on a failed start, and Quickshell.Io exposes no
+  #       error signal). Both busy flags are otherwise cleared only by their
+  #       own onExited, so a watchdog that stops the Processes without
+  #       clearing them latches both queues for the rest of the session:
+  #       every later load() returns at the busy branch and the
+  #       configuration is never read again -- permanent, silent and total.
+  #       Bound to the onTriggered body for the same reason as check 8: in a
+  #       sibling handler these statements never run.
+  missing=""
+  for release in \
+      'readBusy[[:space:]]*=[[:space:]]*false' \
+      'evalBusy[[:space:]]*=[[:space:]]*false' \
+      'pendingLoad[[:space:]]*=[[:space:]]*null' \
+      'pendingChunkRun[[:space:]]*=[[:space:]]*null'; do
+    grep -qE "(^|[^A-Za-z0-9_.])(root\.)?${release}([^A-Za-z0-9_]|$)" <<<"$triggered" \
+      || missing="$missing ${release%%[*}"
+  done
+  if [[ -z "$missing" ]]; then
+    ok "$file: the watchdog releases both busy flags and both pending slots"
+  else
+    bad "$file: the watchdog releases both busy flags and both pending slots" \
+        "not released inside the watchdog's onTriggered body:$missing -- a Process that never emits 'exited' would latch its queue for the whole session"
   fi
 done
 
@@ -433,6 +509,27 @@ done
 hits="$(grep_stripped_all 'Process\.[A-Z][A-Za-z0-9_]*' || true)"
 [[ -z "$hits" ]] && ok "no bare Process.<CapitalisedName> enum reference in any qml file" \
                  || bad "no bare Process.<CapitalisedName> enum reference in any qml file" "$hits"
+
+# 9b -- and the constant that REPLACED that enum reference must still hold
+#       the right value. Check 9 above only forbids the old spelling: it
+#       stayed green when `normalExit: 0` was changed to `1`, which
+#       recreates round 3's defect exactly -- `exitStatus !== root.normalExit`
+#       then rejects every NORMAL exit, sessionStartOwed never comes down,
+#       launchAll() is never called, and the autostart silently never runs in
+#       any session, with every shell/QML/structural assertion green.
+#       QProcess::ExitStatus::NormalExit is fixed at 0 by Qt, so 0 is the only
+#       admissible binding, and every declaration of the property is checked
+#       -- not merely the first, and not merely that one exists.
+norm_decl_pat='property[[:space:]]+int[[:space:]]+normalExit[[:space:]]*:'
+norm_hits="$(grep_stripped_all "$norm_decl_pat" || true)"
+if [[ -z "$norm_hits" ]]; then
+  bad "normalExit is declared as 0 (QProcess::ExitStatus::NormalExit)" \
+      "no 'property int normalExit:' declaration found in any qml file -- the exitStatus comparison in markerProc has nothing vetted to read"
+else
+  norm_bad="$(grep -vE "${norm_decl_pat}[[:space:]]*0[[:space:]]*$" <<<"$norm_hits" || true)"
+  [[ -z "$norm_bad" ]] && ok "normalExit is declared as 0 (QProcess::ExitStatus::NormalExit)" \
+                       || bad "normalExit is declared as 0 (QProcess::ExitStatus::NormalExit)" "$norm_bad"
+fi
 
 printf '\nqml structure: total=%d failed=%d\n' "$run" "$failed"
 (( failed == 0 ))

@@ -54,6 +54,29 @@ Item {
     // the run in flight and reports once. Restarted on every load() and
     // cancelled at every point a run actually finishes, below.
     //
+    // THE WATCHDOG IS THE SECOND RELEASE PATH for both busy flags and both
+    // pending slots -- onExited is the other, and the invariant below no
+    // longer implies it is the only one. It has to be: a Process that never
+    // emits `exited` is precisely the case this Timer exists for (Qt emits
+    // no `finished()` on a FAILED START, and quickshell-io.qmltypes exposes
+    // no error signal, so this is reachable, not theoretical), and a busy
+    // flag that only its own onExited can clear would then stay true for the
+    // rest of the session: every later load() would return at the readBusy
+    // branch and the configuration would never be read again -- a permanent,
+    // silent, total failure. So onTriggered clears readBusy/evalBusy and
+    // discards pendingLoad/pendingChunkRun alongside the generation bump.
+    //
+    // Accepted residual, recorded rather than left implied: a Process that
+    // was merely SLOW (not failed-to-start) does eventually emit `exited`
+    // after `running = false` here. If a fresh load() re-dispatches that same
+    // Process in the window before that queued signal is delivered, the stale
+    // onExited clears the NEW dispatch's busy flag early -- narrowly
+    // re-opening the reassignment window the flag exists to close. No
+    // per-dispatch token can close it, because a QML signal handler can only
+    // read the Process's CURRENT runCtx, never the one its own dispatch
+    // carried. The trade is deliberate: a one-tick window for a reassignment
+    // race, against a session-long total failure.
+    //
     // The kill itself must ALSO retire the run it just killed: bumping
     // generation first means every one of these four Processes' OWN
     // `onExited`/`onStreamFinished` -- which WILL still fire once each
@@ -74,6 +97,12 @@ Item {
             root.generation += 1
             root.lastError = "the apply sequence did not finish within "
                             + root.watchdogSeconds + "s -- a Process may be stuck"
+            // Release both queues. See the block comment above for why the
+            // watchdog has to be a release path and what that costs.
+            root.readBusy = false
+            root.pendingLoad = null
+            root.evalBusy = false
+            root.pendingChunkRun = null
             readProc.running = false
             evalProc.running = false
             markerProc.running = false
@@ -97,7 +126,10 @@ Item {
     // the ctx.gen check meant to catch it. Two Processes enforce this
     // MECHANICALLY, with a busy flag plus a one-slot pending-request queue
     // that only the Process's own terminal signal (onExited, never merely
-    // "we asked it to stop") is allowed to consume:
+    // "we asked it to stop") is allowed to consume -- with exactly one other
+    // release path, the watchdog's onTriggered, for the Process that never
+    // emits that signal at all; see the watchdog comment above for why that
+    // path exists and what it costs:
     //   - readProc: readBusy / pendingLoad, below.
     //   - evalProc: evalBusy / pendingChunkRun, near nextChunk() -- made
     //     mechanical in round 3 because it carries pendingIndex across a
@@ -124,6 +156,9 @@ Item {
     // A load() that arrived while readBusy is true. readProc.onExited
     // consumes this once the in-flight dispatch has genuinely finished, so
     // the newer request is never dropped and never reassigned early.
+    // requestedAtGen is a RECORD of which run queued it, for diagnosis only
+    // -- never the generation the retry is dispatched under; see
+    // readProc.onExited for why the retry re-enters through load() instead.
     property var pendingLoad: null
 
     function load() {
@@ -139,7 +174,7 @@ Item {
             // reassigning now is exactly the F3(a) race. Ask it to stop and
             // let its own onExited hand off to this request once it is
             // genuinely free.
-            root.pendingLoad = { gen: gen }
+            root.pendingLoad = { requestedAtGen: gen }
             readProc.running = false
             return
         }
@@ -223,12 +258,19 @@ Item {
             // has, in fact, already finished.
             root.readBusy = false
             if (root.pendingLoad) {
-                var p = root.pendingLoad
+                // Re-enter through load(), NOT dispatchRead(pendingLoad's own
+                // generation): a read dispatched under a RETIRED generation
+                // runs, is thrown away by its own ctx.gen check, and leaves
+                // the slot empty with nothing retrying it -- the queued
+                // request silently lost. load() re-stamps the generation,
+                // clears lastError, restarts the watchdog (so the queued run
+                // gets a full window instead of inheriting the nearly-spent
+                // remainder of the one that queued it) and stops the other
+                // three Processes, which is exactly what this branch used to
+                // do by hand. It cannot recurse: readBusy is false one line
+                // above, so load() takes its dispatch path, not this one.
                 root.pendingLoad = null
-                evalProc.running = false
-                markerProc.running = false
-                launchProc.running = false
-                root.dispatchRead(p.gen)
+                root.load()
             }
         }
     }
@@ -370,6 +412,22 @@ Item {
         property var runCtx: null
         onExited: function(exitCode, exitStatus) {
             var ctx = markerProc.runCtx
+            // ACCEPTED, DOCUMENTED, DELIBERATELY NOT FIXED. If this run was
+            // superseded between the claim being GRANTED and this handler
+            // running, the early return below leaves sessionStartOwed true.
+            // The successor run then claims again, the marker refuses it
+            // (the claim it does not know is already held), and the outcome
+            // is: rules applied, programs never started. Closing this would
+            // require the marker to record WHO holds the claim so a
+            // successor could recognise its own predecessor's grant.
+            //
+            // It stays open on purpose. When the claim's outcome is
+            // genuinely unknown to this side, the only two available errors
+            // are a DOUBLED session and a session that DID NOT START, and
+            // this project's rule -- stated in bin/omarchy-autostart-marker
+            // itself -- is that a doubled session is worse. Leaving the
+            // obligation owed picks the cheaper error every time, rather
+            // than picking the cheaper error only when the guess is right.
             if (!ctx || ctx.gen !== root.generation) return
             // Qt documents exitCode as meaningful only when exitStatus is a
             // NORMAL exit -- a process killed by a signal (the watchdog, or
@@ -395,18 +453,29 @@ Item {
 
     function launchAll(ctx) {
         var programs = root.model.programs || []
-        var commands = []
+        // The entry's own shell line and the name to report it by, kept
+        // together: the name is what makes a reported failure identifiable as
+        // ONE program's rather than "something in the autostart". Whitespace
+        // is folded because launchProc's stderr reader keeps only the LAST
+        // line of the stream, and a name containing a newline would otherwise
+        // push its own tail into that position.
+        var entries = []
         for (var i = 0; i < programs.length; i++) {
-            if (programs[i].enabled) commands.push(Model.launchCommand(programs[i].command))
+            if (!programs[i].enabled) continue
+            entries.push({ name: String(programs[i].name).replace(/\s+/g, " "),
+                           line: Model.launchCommand(programs[i].command) })
         }
-        if (commands.length === 0) { watchdog.stop(); return }
+        if (entries.length === 0) { watchdog.stop(); return }
         // Each entry gets its own `bash -c`, and that is not a stylistic
         // choice. bash parses a whole line before it runs any of it, so with
         // every entry on one line a single malformed command would stop the
         // ENTIRE autostart -- the user logs in to an empty desktop and a
         // syntax error on stderr. Measured:
         //   all entries on one line:  syntax error -> nothing ran
-        //   one bash -c per entry:    the good ones ran, only the bad reported
+        //   one bash -c per entry:    the good ones ran
+        // Whether the bad one is REPORTED is a separate question, answered by
+        // the `bash -n` pre-check below -- not by this split, and not by the
+        // detached entry itself, whose stdio is closed.
         //
         // Each entry is ALSO detached with `setsid -f`, and the outer shell
         // is launched through Runners.launcher(), not Runners.runner(): a
@@ -453,10 +522,45 @@ Item {
         // construction, not the entry's inner group) still reaches stderr
         // unaffected, because that redirection is per-entry, not on the
         // outer `bash -c '... & ... & wait'` this wrapper itself runs.
+        // THE `bash -n` PRE-CHECK, and why the detached entry cannot report
+        // its own parse error. Closing the detached entry's stdio (the
+        // paragraph above) also closes the channel the entry `bash` uses to
+        // report a SYNTAX error in the command field -- and Model.validate
+        // accepts an unbalanced quote, because that is a shell-syntax error,
+        // not a field-shape error. Measured in this exact wrapper shape: with
+        // the entry's stdio closed and no pre-check, a malformed command left
+        // stderr EMPTY and the program simply never started, with nothing
+        // told to the user.
+        //
+        // `bash -n -c '<entry>'` restores the report without reopening the
+        // stream problem. Measured, same shape:
+        //   unbalanced quote  -> exit 2, the syntax error on stderr
+        //   valid command     -> exit 0, silent
+        //   `touch <file>`    -> executes NOTHING (canary file never created)
+        //   an 8 s program    -> wrapper exit 0 ms, stderr EOF 0 ms: `-n`
+        //                        execs nothing, so it holds no pipe open and
+        //                        the N3 hang cannot come back through it
+        // Its stderr is deliberately NOT redirected -- that is the whole
+        // point -- and it is bounded and closed by the time `-n` returns.
+        // One extra short-lived process per entry.
+        //
+        // The identifying line after it is what launchProc's reader keeps
+        // (that reader takes the LAST line), so lastError names the program
+        // instead of quoting a bare `bash: -c: line 1: ...` whose wording is
+        // locale-dependent; bash's own diagnostic still reaches the stream
+        // ahead of it. The launch is gated on the check: an entry that does
+        // not parse would not have run anyway (`bash -c` on it execs nothing
+        // and exits 2), so gating costs no behaviour and keeps the two
+        // outcomes -- reported, or launched -- mutually exclusive.
         var isolated = []
-        for (var j = 0; j < commands.length; j++) {
-            isolated.push(run.binSetsid + " -f " + run.binBash + " -c "
-                        + Model.shellQuote(commands[j]) + " </dev/null >/dev/null 2>&1")
+        for (var j = 0; j < entries.length; j++) {
+            var quoted = Model.shellQuote(entries[j].line)
+            isolated.push("if " + run.binBash + " -n -c " + quoted + "; then "
+                        + run.binSetsid + " -f " + run.binBash + " -c " + quoted
+                        + " </dev/null >/dev/null 2>&1; else echo "
+                        + Model.shellQuote("autostart: " + entries[j].name
+                            + ": the command is malformed and was not started")
+                        + " >&2; fi")
         }
         launchProc.runCtx = ctx
         launchProc.command = run.launcher(isolated.join(" & ") + " & wait")
@@ -472,14 +576,33 @@ Item {
         // measured at 0 s, not gated on any launched program's lifetime any
         // more -- so this still reliably captures a genuine error from the
         // wrapper's OWN construction (a bad isolated.join(), a shellQuote
-        // bug) without re-introducing the hang N3 fixed. What a user can
-        // still see on this stream: any such outer-wrapper-level error.
-        // What stays dropped, unchanged from before this round and by
-        // launchCommand's own explicit design: each entry's OWN command's
-        // stdout/stderr (the launched application's own output), which
-        // launchCommand redirects to /dev/null on purpose so that
-        // Quickshell tearing down ITS pipes can never reach the
-        // application through them.
+        // bug) without re-introducing the hang N3 fixed.
+        //
+        // WHAT A USER CAN SEE on this stream, exactly:
+        //   - an error from the outer wrapper's own construction;
+        //   - each entry's `bash -n` PARSE diagnostic, plus the identifying
+        //     "autostart: <name>: the command is malformed and was not
+        //     started" line that follows it (see launchAll). Since only the
+        //     LAST line survives into lastError, that identifying line is
+        //     what lastError ends up holding; the rest is on the stream.
+        // WHAT STAYS DROPPED -- this is NOT "unchanged from before this
+        // round": the parse error above used to be dropped too, and the
+        // pre-check is what recovered it. Still dropped, all of it silently:
+        //   - the launched application's own stdout/stderr, by
+        //     launchCommand's explicit design (redirected to /dev/null so
+        //     that Quickshell tearing down ITS pipes can never reach the
+        //     running application through them);
+        //   - EVERYTHING THE ENTRY SHELL REPORTS AFTER THE PARSE. `bash -n`
+        //     parses, it does not run: a command that does not exist
+        //     ("command not found", exit 127), a program that starts and
+        //     then fails, a redirection that fails at runtime -- measured
+        //     silent, empty stderr, in this same wrapper shape. So a typo in
+        //     a PROGRAM NAME is still invisible; only a typo in the shell
+        //     SYNTAX is now reported;
+        //   - `setsid`'s own failure to exec, whose diagnostic goes to the
+        //     same per-entry /dev/null;
+        //   - every entry's exit status: the `if` returns 0 whichever branch
+        //     it takes, and `wait` reports only the last job's anyway.
         stderr: StdioCollector {
             waitForEnd: true
             onStreamFinished: {
