@@ -2769,6 +2769,14 @@ cmd_match_file() {
     local windows; windows="$(cmd_list_json)"
     local classes; classes="$(jq -r '.[] | .class' <<<"$windows")"
 
+    # The hand-over file carries `id<TAB>class-regex` per line. That is only
+    # unambiguous because the class allowlist in Model.js contains no tab --
+    # anyone widening it must revisit this, or a tab in a class would split a
+    # line into the wrong fields. Task 6 was bitten by exactly that shape when
+    # a value from /usr/share/applications contained a tab. The id side is
+    # ours ([a-z0-9]{1,16}), and `read` assigns the remainder of the line to
+    # the last variable, so a tab surviving into the regex would stay intact
+    # rather than shift a field.
     local lines=0
     {
         while IFS=$'\t' read -r id regex; do
