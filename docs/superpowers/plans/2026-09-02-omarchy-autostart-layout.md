@@ -274,6 +274,11 @@ QtObject {
             }
         }
 
+        // The whole body sits in a try/catch. Without it an unexpected throw
+        // never reaches Qt.exit and the process hangs forever -- a suite that
+        // hangs is worse than one that fails, because nothing says which.
+        var currentTestName = "";
+        try {
         // --- luaBytes: every value that reaches Lua is encoded as bytes ---
         check("luaBytes encodes ascii",
               Model.luaBytes("ab"), "string.char(97,98)");
@@ -288,9 +293,17 @@ QtObject {
 
         console.warn("total=" + total + " failed=" + failed);
         Qt.exit(failed === 0 ? 0 : 1);
+        } catch (e) {
+            var brokeWith = String((e && e.message) || e);
+            console.warn("ERROR: harness broke in test '" + currentTestName + "': " + brokeWith);
+            Qt.exit(3);
+        }
     }
 }
 ```
+
+Beide Prüf-Hilfen setzen `currentTestName = name` als erstes, damit die
+Fehlermeldung sagt, *wo* es gebrochen ist.
 
 `test/run-qml-tests.sh`:
 
@@ -298,9 +311,24 @@ QtObject {
 #!/usr/bin/env bash
 # Runs the Model.js tests headless in the same engine that runs the plugin.
 #
-# /usr/bin/qml on Arch is Qt 5.15 and fails SILENTLY with status 1 -- no output
-# on stdout or stderr at all. Never fall back to it: a silent exit 1 looks
-# exactly like a failing test suite. Resolve the Qt6 binary or refuse to run.
+# Exit codes:
+#   0 = all tests passed
+#   1 = tests failed (one or more check or checkThrows failed)
+#   2 = cannot run (no Qt6 qml binary found)
+#   3 = harness broke (unexpected exception in test code)
+#
+# Three distinct failure codes on purpose: a runner that answers the same
+# number for "a test failed", "I cannot start" and "the harness itself broke"
+# cannot be diagnosed.
+#
+# /usr/bin/qml on Arch is Qt 5.15 and does not load this harness at all: it
+# rejects the versionless `import QtQml` and exits 2 with an error about
+# loading no objects. Never fall back to it -- that failure reads like a
+# tooling problem rather than "the logic under test is wrong", and its exit
+# code collides with our own "cannot run". Resolve the Qt6 binary or refuse.
+#
+# The tool that fails SILENTLY with status 1 -- nothing on either stream --
+# is /usr/bin/qmltestrunner, which is why it is not used here.
 set -euo pipefail
 
 QML=""
@@ -311,13 +339,16 @@ done
 
 if [[ -z "$QML" ]]; then
   echo "error: no Qt6 qml runtime found." >&2
-  echo "       /usr/bin/qml is Qt 5.15 here and exits 1 without a word." >&2
+  echo "       /usr/bin/qml here is Qt 5.15 and cannot load the harness." >&2
   echo "       install qt6-declarative or point QT6_QML at the Qt6 binary." >&2
   exit 2
 fi
 
 cd "$(dirname "$0")"
-QT_FORCE_STDERR_LOGGING=1 QT_QPA_PLATFORM=offscreen exec "$QML" harness.qml
+# A wall-clock limit as well as the harness's own try/catch: the catch cannot
+# see a failure in which the engine never reaches our code at all.
+QT_FORCE_STDERR_LOGGING=1 QT_QPA_PLATFORM=offscreen \
+  exec /usr/bin/timeout -k 5 120 "$QML" harness.qml
 ```
 
 - [ ] **Step 2: Laufen lassen und den Fehlschlag sehen**
@@ -360,7 +391,7 @@ function luaBytes(s) {
 - [ ] **Step 4: Laufen lassen und Grün sehen**
 
 Run: `./test/run-qml-tests.sh`
-Expected: fünf `ok`-Zeilen, `total=5 failed=0`, Status 0.
+Expected: acht `ok`-Zeilen, `total=8 failed=0`, Status 0.
 
 - [ ] **Step 5: Beweisen, dass der Läufer auch Rot kann**
 
