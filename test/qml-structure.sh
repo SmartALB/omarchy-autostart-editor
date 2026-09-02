@@ -850,5 +850,48 @@ for fn in $lifecycle_fns; do
   fi
 done
 
+# ---------------------------------------------------------------------------
+# Panel.qml (task 15).
+#
+# All three checks below read through strip_comments, like every other check
+# in this file. The task brief spelled them against the RAW file; that is
+# exactly the evasion round 1 already found and closed for the BarWidget
+# checks (finding F2), where replacing closeForPopoutSwitch()'s body with a
+# comment carrying the same literal text left them green. The positive check
+# gains the guarantee the rest of this file has, and the two negative checks
+# lose nothing: stripping removes comments, never code.
+stripped_panel="$(strip_comments Panel.qml)"
+
+# 13 -- the panel declares the same lifecycle contract as the bar widget.
+#       DECLARED only, like check 8 does for BarWidget -- what the bodies do
+#       is not asserted here. BarWidget.qml calls all four functions and
+#       reads both properties off the loaded panel, so a rename on this side
+#       breaks the handoff silently: the Loader's item simply has no such
+#       member and the call is a runtime TypeError nothing in this project
+#       can execute to discover.
+for needed in "function open()" "function close()" "function toggle()" \
+              "function closeForPopoutSwitch()" \
+              "readonly property bool opened" \
+              "readonly property bool popoutSwitchClosing" \
+              "signal counted("; do
+  grep -qF "$needed" <<<"$stripped_panel" \
+    && ok "Panel declares $needed" \
+    || bad "Panel declares $needed" "not found"
+done
+
+# 14 -- applying is explicit. Moving real windows across real screens must not
+#       be a side effect of a keystroke, so no field may write straight
+#       through to disk.
+hits="$(grep -nE 'onTextChanged:.*(writeProc|applyRules|config-write)' <<<"$stripped_panel" || true)"
+[[ -z "$hits" ]] && ok "Panel: no field writes through on change" \
+                 || bad "Panel: no field writes through on change" "$hits"
+
+# 15 -- the class field is never handed to a JavaScript RegExp. The allowlist
+#       permits nested quantifiers and QML gives JavaScript no timeout.
+hits="$(grep -nE 'new RegExp|\.match\(|\.test\(' <<<"$stripped_panel" \
+        | grep -vE 'WORKSPACE_RE|MONITOR_RE|ADDRESS_RE|ID_RE' || true)"
+[[ -z "$hits" ]] && ok "Panel: no JavaScript RegExp over user patterns" \
+                 || bad "Panel: no JavaScript RegExp over user patterns" "$hits"
+
 printf '\nqml structure: total=%d failed=%d\n' "$run" "$failed"
 (( failed == 0 ))
