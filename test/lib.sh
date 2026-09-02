@@ -4,7 +4,8 @@ TESTS_FAILED=0
 SANDBOX=""
 
 setup_sandbox() {
-    SANDBOX="$(mktemp -d)"
+    SANDBOX="$(mktemp -d)" || { echo "setup_sandbox: mktemp -d failed" >&2; return 1; }
+    [[ -n "$SANDBOX" && "$SANDBOX" == /tmp/?* ]] || { echo "setup_sandbox: implausible sandbox path ${SANDBOX@Q}" >&2; SANDBOX=""; return 1; }
     export HOME="$SANDBOX/home"
     export XDG_CONFIG_HOME="$SANDBOX/config"
     export XDG_STATE_HOME="$SANDBOX/state"
@@ -17,7 +18,20 @@ setup_sandbox() {
 }
 
 teardown_sandbox() {
-    [[ -n "$SANDBOX" && "$SANDBOX" == /tmp/* ]] && rm -rf "$SANDBOX"
+    local resolved
+    if [[ -z "${SANDBOX:-}" ]]; then
+        SANDBOX=""
+        return 0
+    fi
+    # A glob does not resolve "..": "/tmp/.." matches /tmp/* and would make
+    # this line "rm -rf /". Resolve first, then require the resolved path to
+    # be unchanged and genuinely under /tmp.
+    resolved="$(realpath -m -- "$SANDBOX")"
+    if [[ "$resolved" == "$SANDBOX" && "$resolved" == /tmp/?* && "$resolved" != */../* && "$resolved" != */.. ]]; then
+        rm -rf -- "$SANDBOX"
+    else
+        printf 'teardown_sandbox: refusing to delete %q -- not a plain path under /tmp\n' "$SANDBOX" >&2
+    fi
     SANDBOX=""
 }
 
@@ -41,7 +55,10 @@ assert_status() {
 assert_contains() {
     local name="$1" haystack="$2" needle="$3"
     TESTS_RUN=$((TESTS_RUN + 1))
-    if [[ "$haystack" == *"$needle"* ]]; then
+    if [[ -z "$needle" ]]; then
+        TESTS_FAILED=$((TESTS_FAILED + 1))
+        printf 'FAIL %s\n       needle is empty (every string contains the empty string)\n' "$name"
+    elif [[ "$haystack" == *"$needle"* ]]; then
         printf 'ok   %s\n' "$name"
     else
         TESTS_FAILED=$((TESTS_FAILED + 1))
