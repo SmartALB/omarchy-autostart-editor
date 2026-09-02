@@ -1,0 +1,73 @@
+#!/usr/bin/env bash
+# Reads and writes the Autostart Layout configuration file.
+#
+# This script owns every byte-level boundary of the configuration: the size
+# limit, the permission refusal, the atomic write and the staleness check. It
+# lives in bin/ rather than inside QML because that puts the security-bearing
+# parts in the most testable file of the project instead of the least.
+#
+# It never runs a program and never talks to hyprctl.
+set -uo pipefail
+
+CONFIG_DIR="${XDG_CONFIG_HOME:-$HOME/.config}/omarchy"
+CONFIG="$CONFIG_DIR/autostart-layout.json"
+MAX_BYTES=262144          # 256 KiB
+SCHEMA_VERSION=1
+
+# Every outcome leaves through one of these two, so a caller parses one shape.
+ok()  { jq -nc "$@"; exit 0; }
+err() { jq -nc --arg e "$1" --arg d "${2:-}" '{ok:false,error:$e,detail:$d}'; exit 0; }
+
+# Refuse when anyone but the owner can write the file or its directory. The
+# command field is a shell command line executed at login, so a foreign writer
+# here is a foreign writer in the user's session. A writable directory is
+# enough -- the file can simply be replaced.
+check_permissions() {
+    local path="$1" kind="$2" mode
+    mode="$(stat -c %a "$path" 2>/dev/null)" || return 0
+    if (( 8#$mode & 8#22 )); then
+        err "insecure-permissions" \
+            "$kind $path is writable by group or others (mode $mode); run: chmod g-w,o-w $path"
+    fi
+}
+
+# Read at most MAX+1 bytes and reject when the extra byte arrived. Checking the
+# size first and reading afterwards would be a different program: the file can
+# change between the two.
+read_bounded() {
+    local src="$1" dst="$2" size
+    head -c $((MAX_BYTES + 1)) "$src" > "$dst"
+    size="$(wc -c < "$dst")"
+    if (( size > MAX_BYTES )); then
+        err "too-large" "configuration exceeds $MAX_BYTES bytes"
+    fi
+}
+
+check_shape() {
+    local path="$1" version
+    jq -e . "$path" >/dev/null 2>&1 || err "not-json" "$CONFIG is not valid JSON"
+    version="$(jq -r '.schemaVersion // "missing"' "$path")"
+    [[ "$version" == "$SCHEMA_VERSION" ]] \
+        || err "bad-schema" "schemaVersion is $version, expected $SCHEMA_VERSION"
+}
+
+cmd_read() {
+    check_permissions "$CONFIG_DIR" "directory"
+
+    if [[ ! -e "$CONFIG" ]]; then
+        ok --argjson v "$SCHEMA_VERSION" \
+           '{ok:true,mtime:0,config:{schemaVersion:$v,programs:[],workspaces:[]}}'
+    fi
+    [[ -f "$CONFIG" ]] || err "not-a-file" "$CONFIG is not a plain file"
+    check_permissions "$CONFIG" "file"
+
+    local tmp; tmp="$(mktemp)"; trap 'rm -f "$tmp"' EXIT
+    read_bounded "$CONFIG" "$tmp"
+    check_shape "$tmp"
+    jq -c --argjson m "$(stat -c %Y "$CONFIG")" '{ok:true,mtime:$m,config:.}' "$tmp"
+}
+
+case "${1:-}" in
+    read) cmd_read ;;
+    *)    echo "usage: ${0##*/} read" >&2; exit 2 ;;
+esac

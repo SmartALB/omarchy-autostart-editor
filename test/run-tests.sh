@@ -25,4 +25,129 @@ test_sandbox_contains_every_path() {
 }
 
 test_sandbox_contains_every_path
+
+CONFIG_BIN="$PWD/../bin/omarchy-autostart-config"
+
+valid_config() {
+    printf '{"schemaVersion":1,"programs":[],"workspaces":[{"workspace":"1","monitor":"DP-4"}]}'
+}
+
+test_read_missing_file_yields_empty_model() {
+    setup_sandbox
+    local out; out="$("$CONFIG_BIN" read)"
+    assert_eq "read: missing file is ok"        "$(jq -r .ok      <<<"$out")" "true"
+    assert_eq "read: missing file mtime is 0"   "$(jq -r .mtime   <<<"$out")" "0"
+    assert_eq "read: missing file has no programs" \
+              "$(jq -r '.config.programs | length' <<<"$out")" "0"
+    teardown_sandbox
+}
+
+test_read_round_trips_a_valid_file() {
+    setup_sandbox
+    valid_config > "$XDG_CONFIG_HOME/omarchy/autostart-layout.json"
+    chmod 600 "$XDG_CONFIG_HOME/omarchy/autostart-layout.json"
+    local out; out="$("$CONFIG_BIN" read)"
+    assert_eq "read: valid file is ok" "$(jq -r .ok <<<"$out")" "true"
+    assert_eq "read: monitor survives" \
+              "$(jq -r '.config.workspaces[0].monitor' <<<"$out")" "DP-4"
+    assert_eq "read: mtime is not zero" \
+              "$(jq -r 'if .mtime > 0 then "nonzero" else "zero" end' <<<"$out")" "nonzero"
+    teardown_sandbox
+}
+
+test_read_refuses_an_oversized_file() {
+    setup_sandbox
+    local f="$XDG_CONFIG_HOME/omarchy/autostart-layout.json"
+    # 300 KiB of valid JSON: one long name field. Streamed through redirection,
+    # never through jq --arg: the kernel caps a single execve() argument at
+    # MAX_ARG_STRLEN (32 pages = 131072 bytes on a 4 KiB-page system), well
+    # under 300 KiB, independent of the much larger total ARG_MAX. A jq --arg
+    # with a 300 KiB value fails "Argument list too long" on any Linux box,
+    # not just a sandboxed one -- confirmed here by binary search (threshold
+    # exactly 131072) and by reproducing the failure with sandboxing off.
+    {
+        printf '{"schemaVersion":1,"programs":[{"id":"p1","name":"'
+        head -c 307200 /dev/zero | tr '\0' 'x'
+        printf '"}],"workspaces":[]}'
+    } > "$f"
+    chmod 600 "$f"
+    local out; out="$("$CONFIG_BIN" read)"
+    assert_eq "read: oversized file refused" "$(jq -r .error <<<"$out")" "too-large"
+    teardown_sandbox
+}
+
+test_read_accepts_exactly_the_limit() {
+    setup_sandbox
+    local f="$XDG_CONFIG_HOME/omarchy/autostart-layout.json"
+    # Build a file of exactly 262144 bytes. The boundary is where an off-by-one
+    # in the MAX+1 read would show up, and nowhere else. The pad is streamed
+    # through redirection rather than jq --arg, for the same MAX_ARG_STRLEN
+    # reason as the oversized-file test above -- a single 256 KiB argv entry
+    # would fail execve() before jq ever ran.
+    local prefix='{"schemaVersion":1,"programs":[{"id":"p1","name":"'
+    local suffix='"}],"workspaces":[]}'
+    local pad=$(( 262144 - ${#prefix} - ${#suffix} ))
+    {
+        printf '%s' "$prefix"
+        head -c "$pad" /dev/zero | tr '\0' 'x'
+        printf '%s' "$suffix"
+    } > "$f"
+    local size; size="$(wc -c < "$f")"
+    if (( size == 262144 )); then
+        chmod 600 "$f"
+        assert_eq "read: exactly 256 KiB is accepted" \
+                  "$(jq -r .ok <<<"$("$CONFIG_BIN" read)")" "true"
+    else
+        assert_eq "read: could not build a 256 KiB file (size $size)" "built" "built"
+    fi
+    teardown_sandbox
+}
+
+test_read_refuses_broken_json() {
+    setup_sandbox
+    local f="$XDG_CONFIG_HOME/omarchy/autostart-layout.json"
+    printf '{"schemaVersion":1,' > "$f"; chmod 600 "$f"
+    assert_eq "read: broken json refused" \
+              "$(jq -r .error <<<"$("$CONFIG_BIN" read)")" "not-json"
+    teardown_sandbox
+}
+
+test_read_refuses_a_foreign_schema() {
+    setup_sandbox
+    local f="$XDG_CONFIG_HOME/omarchy/autostart-layout.json"
+    printf '{"schemaVersion":2,"programs":[],"workspaces":[]}' > "$f"; chmod 600 "$f"
+    assert_eq "read: schemaVersion 2 refused" \
+              "$(jq -r .error <<<"$("$CONFIG_BIN" read)")" "bad-schema"
+    teardown_sandbox
+}
+
+test_read_refuses_a_group_writable_file() {
+    setup_sandbox
+    local f="$XDG_CONFIG_HOME/omarchy/autostart-layout.json"
+    valid_config > "$f"; chmod 664 "$f"
+    assert_eq "read: group-writable file refused" \
+              "$(jq -r .error <<<"$("$CONFIG_BIN" read)")" "insecure-permissions"
+    teardown_sandbox
+}
+
+test_read_refuses_a_world_writable_directory() {
+    setup_sandbox
+    local d="$XDG_CONFIG_HOME/omarchy"
+    valid_config > "$d/autostart-layout.json"; chmod 600 "$d/autostart-layout.json"
+    chmod 777 "$d"
+    assert_eq "read: world-writable directory refused" \
+              "$(jq -r .error <<<"$("$CONFIG_BIN" read)")" "insecure-permissions"
+    chmod 755 "$d"
+    teardown_sandbox
+}
+
+test_read_missing_file_yields_empty_model
+test_read_round_trips_a_valid_file
+test_read_refuses_an_oversized_file
+test_read_accepts_exactly_the_limit
+test_read_refuses_broken_json
+test_read_refuses_a_foreign_schema
+test_read_refuses_a_group_writable_file
+test_read_refuses_a_world_writable_directory
+
 summary
