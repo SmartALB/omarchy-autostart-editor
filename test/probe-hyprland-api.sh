@@ -21,10 +21,24 @@
 # The one form already known to be dangerous (dispatch + hl.get_window()
 # object for window.move -- see the notes file, measured 2026-09-02) is
 # skipped by default; set PROBE_INCLUDE_DANGEROUS_FORM=1 to run it anyway.
+#
+# Every Q3 form also gets a NEGATIVE CONTROL: the same call, once more, with
+# an address that certainly does not exist. A correct form must then do
+# nothing at all. This is not a formality -- in production the address always
+# comes from a match taken moments earlier and the window may have closed in
+# between, so a form that acts on *something* when its selector resolves to
+# nothing is unsafe however well it scores on live addresses.
+#
+# Q3 forms run in ascending order of known/predicted hazard, so that the
+# abort-on-first-collateral rule cannot starve the untested candidates of
+# measurement the way it did in the previous round.
 set -uo pipefail
 
 PROBE_CLASS="omarchy-autostart-probe"
 TRIALS="${PROBE_TRIALS:-7}"
+# An address no window can have: 0xdeadbeef is far too short to be a real
+# Hyprland window pointer, and it is verified below to resolve to nothing.
+BOGUS_ADDR="0xdeadbeef"
 OUT="$(mktemp -d)"
 trap 'rm -rf "$OUT"' EXIT
 
@@ -36,6 +50,8 @@ warn()   { printf '  !!  %s\n' "$1" >&2; }
 
 snapshot_client_ws() { hyprctl -j clients | jq -c '[.[] | {addr: .address, ws: .workspace.id}]'; }
 snapshot_ws_mon()    { hyprctl -j workspaces | jq -c '[.[] | {id: .id, mon: .monitor}]'; }
+probe_ws()    { hyprctl -j clients | jq -r --arg a "$addr" '.[] | select(.address == $a) | .workspace.id'; }
+active_addr() { hyprctl -j activewindow | jq -r '.address // empty'; }
 
 # Restores one window's workspace using get_windows()+filter rather than
 # get_window(addr) -- get_window(addr) proved flaky on this machine (nil for
@@ -207,12 +223,58 @@ if [[ "$q2_measurable" == "yes" ]]; then
 fi
 
 echo
+echo "=== Q3 preamble: what does each selector form actually RESOLVE to? ==="
+# Read-only. No dispatcher is called in this section, so nothing here can
+# move anything. HL.WindowSelector is declared "string|integer|HL.Window" in
+# /usr/share/hypr/stubs/hl.meta.lua without saying what a valid *string*
+# looks like, and the earlier rounds' collateral moves were never explained.
+# So resolve each candidate selector and write back what came out, before
+# asking any of them to move a window.
+rm -f "$OUT/resolve"
+act_at_resolve="$(active_addr)"
+hyprctl eval "
+local f = io.open('$OUT/resolve','w')
+if not f then return end
+local function rep(tag, w)
+  if w == nil then f:write(tag..'\t<nil>\n')
+  else f:write(tag..'\t'..tostring(w.address)..'\t'..tostring(w.class)..'\n') end
+end
+local function try(tag, fn)
+  local ok, err = pcall(function() rep(tag, fn()) end)
+  if not ok then f:write(tag..'\tERROR: '..tostring(err)..'\n') end
+end
+try('bare-string          ', function() return hl.get_window('$addr') end)
+try('prefixed-string      ', function() return hl.get_window('address:$addr') end)
+try('bare-string-bogus    ', function() return hl.get_window('$BOGUS_ADDR') end)
+try('prefixed-string-bogus', function() return hl.get_window('address:$BOGUS_ADDR') end)
+local ok, err = pcall(function()
+  local n, hit = 0, nil
+  for _, w in ipairs(hl.get_windows({})) do
+    n = n + 1
+    if w.address == '$addr' then hit = w end
+  end
+  rep('enumerated-match     ', hit)
+  f:write('enumerated-count     \t'..n..'\n')
+end)
+if not ok then f:write('enumerate\tERROR: '..tostring(err)..'\n') end
+f:close()
+" >/dev/null 2>&1
+if [[ ! -s "$OUT/resolve" ]]; then
+  inconc "Q3 preamble: the resolution diagnostic wrote nothing -- the instrument is broken"
+else
+  info "probe window is $addr; the window that was ACTIVE during this diagnostic was ${act_at_resolve:-<none>}"
+  while IFS= read -r line; do info "resolve  $line"; done < "$OUT/resolve"
+fi
+
+echo
 # Q3: move this specific window, not the active one. Each form below is
 # tried $TRIALS times so flakiness is measured, not guessed; each trial
 # alternates its target between two disposable workspaces (target_ws and
 # alt_ws) based on where the window currently is, so a form that does
 # nothing can never be scored as a pass by finding the window already
-# there. The known-dangerous dispatch+object form is skipped unless
+# there. Every form that ever moved the window then gets its negative
+# control (same call, non-existent address, must do nothing).
+# The known-dangerous dispatch+object form is skipped unless
 # PROBE_INCLUDE_DANGEROUS_FORM=1 (see header comment and the notes file).
 target_ws=50
 # alt_ws must be genuinely unused, not just "probably" -- 51 turned out to
@@ -228,18 +290,63 @@ info "using workspace $alt_ws as the disposable alternate target (verified not c
 q3_any_ok="no"
 LAST_WORKING_Q3_VERB=""
 LAST_WORKING_Q3_TEMPLATE=""
+NC_LABEL=""
+NC_RESULT=""
+
+# Negative control for one form: the same call with $BOGUS_ADDR substituted
+# for the probe window's address. Three possible outcomes, all measured by
+# readback, never assumed:
+#   clean    -- nothing moved at all. The only acceptable result.
+#   UNSAFE   -- it moved some other window (collateral: guard restores and
+#               the run aborts, same rule as everywhere else).
+#   UNSAFE   -- it moved the probe window. Not a collateral event (the probe
+#               window is ours to move), so it does not abort the run, but
+#               it condemns the form just as hard: the selector resolved to
+#               nothing and the call acted anyway.
+# Whether the window that moved was the one that happened to be ACTIVE is
+# recorded too -- that turns "nil selector probably means active window"
+# from an inference into a measurement.
+run_negative_control() {
+  local verb="$1" template="$2"
+  local nc_target probe_before probe_after form before_snap act_before restore who
+  probe_before="$(probe_ws)"
+  if [[ "$probe_before" == "$target_ws" ]]; then nc_target="$alt_ws"; else nc_target="$target_ws"; fi
+  form="${template//__ADDR__/$BOGUS_ADDR}"
+  form="${form//__WS__/$nc_target}"
+  act_before="$(active_addr)"
+  before_snap="$(snapshot_client_ws)"
+  hyprctl "$verb" "$form" >/dev/null 2>&1
+  sleep 0.4
+  probe_after="$(probe_ws)"
+  guard_clients "$addr" "$before_snap"
+  if [[ "$GUARD_COLLATERAL" == "yes" ]]; then
+    who="a window that was not active at the time"
+    [[ -n "$act_before" && "$GUARD_DETAIL" == *"$act_before"* ]] && who="the window that was ACTIVE at the time ($act_before)"
+    NC_RESULT="UNSAFE -- a non-existent address moved $who: $GUARD_DETAIL"
+    ABORT="yes"
+    ABORT_REASON="negative control of Q3 form '$NC_LABEL': $GUARD_DETAIL"
+  elif [[ "$probe_after" != "$probe_before" ]]; then
+    if [[ "$act_before" == "$addr" ]]; then who="and the probe window WAS the active window at the time"
+    else who="and the probe window was NOT the active window at the time (active was ${act_before:-<none>})"; fi
+    restore="$(restore_window_ws "$addr" "$probe_before")"
+    NC_RESULT="UNSAFE -- a non-existent address moved the probe window (workspace $probe_before -> $probe_after) $who; probe window restore readback: $restore"
+  else
+    NC_RESULT="clean -- nothing moved (probe window still on workspace $probe_before, no other window changed workspace)"
+  fi
+}
 
 # Runs one Q3 form up to $TRIALS times (fewer if the run aborts partway),
-# tallies worked/no-op/collateral, and prints the tally. Aborts the whole
-# run immediately on the first collateral event.
+# tallies worked/no-op/collateral, prints the tally, then runs the form's
+# negative control unless the run has already aborted.
 run_q3_form() {
   local label="$1" verb="$2" template="$3"
   local worked=0 noop=0 collateral=0 trial cur want form before_snap now
   for (( trial=1; trial<=TRIALS; trial++ )); do
     [[ "$ABORT" == "yes" ]] && break
-    cur="$(hyprctl -j clients | jq -r --arg a "$addr" '.[] | select(.address == $a) | .workspace.id')"
+    cur="$(probe_ws)"
     if [[ "$cur" == "$target_ws" ]]; then want="$alt_ws"; else want="$target_ws"; fi
-    form="${template//__WS__/$want}"
+    form="${template//__ADDR__/$addr}"
+    form="${form//__WS__/$want}"
     before_snap="$(snapshot_client_ws)"
     hyprctl "$verb" "$form" >/dev/null 2>&1
     sleep 0.4
@@ -250,7 +357,7 @@ run_q3_form() {
       ABORT_REASON="Q3 form '$label', trial $trial: $GUARD_DETAIL"
       break
     fi
-    now="$(hyprctl -j clients | jq -r --arg a "$addr" '.[] | select(.address == $a) | .workspace.id')"
+    now="$(probe_ws)"
     if [[ "$now" == "$want" ]]; then
       worked=$((worked + 1))
       LAST_WORKING_Q3_VERB="$verb"
@@ -261,22 +368,73 @@ run_q3_form() {
     fi
   done
   local ran=$((worked + noop + collateral))
-  printf '      %-58s %d/%d worked, %d no-op, %d collateral\n' "$label" "$worked" "$ran" "$noop" "$collateral"
+  printf '      %-52s %d/%d worked, %d no-op, %d collateral\n' "$label" "$worked" "$ran" "$noop" "$collateral"
+  if [[ "$ABORT" == "yes" ]]; then
+    printf '        -> negative control (%s): not run -- the run aborted during this form'"'"'s trials\n' "$BOGUS_ADDR"
+    return
+  fi
+  NC_LABEL="$label"
+  run_negative_control "$verb" "$template"
+  printf '        -> negative control (%s): %s\n' "$BOGUS_ADDR" "$NC_RESULT"
 }
 
-echo "Q3 -- per-form tallies, up to $TRIALS trials each (target alternates $target_ws/$alt_ws so a hit can't be a leftover):"
-run_q3_form "eval + plain address string" \
-  eval "hl.dispatch(hl.dsp.window.move({ workspace = '__WS__', window = '$addr', follow = false }))"
-[[ "$ABORT" == "no" ]] && run_q3_form "eval + hl.get_window() object" \
-  eval "hl.dispatch(hl.dsp.window.move({ workspace = '__WS__', window = hl.get_window('$addr'), follow = false }))"
+echo "Q3 -- per-form tallies, up to $TRIALS trials each (target alternates $target_ws/$alt_ws so a hit can't be a leftover),"
+echo "      each followed by its negative control. Forms run least-dangerous-first:"
+
+# 1. Enumerate the compositor's own window list and compare on the object's
+#    own address field. "No match" is a no-op by construction, not by a
+#    guard -- there is no dispatcher call on the miss path at all.
+run_q3_form "eval + get_windows() enumerate, match w.address" \
+  eval 'do for _, w in ipairs(hl.get_windows({})) do if w.address == "__ADDR__" then hl.dispatch(hl.dsp.window.move({ workspace = "__WS__", window = w, follow = false })) end end end'
+
+# 2. The address: prefix (Hyprland's classic non-Lua selector syntax), with
+#    a resolution guard so a miss cannot reach the dispatcher.
+[[ "$ABORT" == "no" ]] && run_q3_form "eval + get_window('address:..') + if-w-then guard" \
+  eval 'do local w = hl.get_window("address:__ADDR__") if w then hl.dispatch(hl.dsp.window.move({ workspace = "__WS__", window = w, follow = false })) end end'
+
+# 3-4. The address: prefix handed STRAIGHT to the window field, with no
+#    get_window() and no enumeration at all. HL.WindowSelector accepts a
+#    string, the preamble shows "address:<hex>" is the string form that
+#    resolves, and an unresolvable string in this field has measured as a
+#    consistent no-op (unlike nil) -- so this could be the simplest safe
+#    form of all, if its negative control holds up.
+[[ "$ABORT" == "no" ]] && run_q3_form "eval + plain 'address:<hex>' string in window field" \
+  eval "hl.dispatch(hl.dsp.window.move({ workspace = '__WS__', window = 'address:__ADDR__', follow = false }))"
+[[ "$ABORT" == "no" ]] && run_q3_form "dispatch + plain 'address:<hex>' string in window field" \
+  dispatch "hl.dsp.window.move({ workspace = '__WS__', window = 'address:__ADDR__', follow = false })"
+
+# 5-6. The two plain-BARE-address-string forms. Inert: 0/35 worked and
+#      35/35 no-op each, measured 2026-09-02, and their negative controls
+#      are clean only because the forms never do anything at all. Kept so
+#      the comparison stays visible.
+[[ "$ABORT" == "no" ]] && run_q3_form "eval + plain address string" \
+  eval "hl.dispatch(hl.dsp.window.move({ workspace = '__WS__', window = '__ADDR__', follow = false }))"
 [[ "$ABORT" == "no" ]] && run_q3_form "dispatch + plain address string" \
-  dispatch "hl.dsp.window.move({ workspace = '__WS__', window = '$addr', follow = false })"
+  dispatch "hl.dsp.window.move({ workspace = '__WS__', window = '__ADDR__', follow = false })"
+
+# 7-9. The three forms that hand the dispatcher a selector which can resolve
+#      to nothing. All three are now measured dangerous, all three for the
+#      same reason the preamble above shows: an unresolved selector leaves
+#      the "window" key nil, and hl.dsp.window.move then acts on whatever
+#      window is ACTIVE. They are therefore off by default -- re-confirming
+#      a known hazard on the user's live desktop buys no new information --
+#      and run only under PROBE_INCLUDE_DANGEROUS_FORM=1.
 if [[ "$ABORT" == "no" ]]; then
   if [[ "${PROBE_INCLUDE_DANGEROUS_FORM:-0}" == "1" ]]; then
-    run_q3_form "dispatch + hl.get_window() object [OPT-IN, KNOWN DANGEROUS]" \
-      dispatch "hl.dsp.window.move({ workspace = '__WS__', window = hl.get_window('$addr'), follow = false })"
+    # 7. address: prefix without a resolution guard. Measured 2026-09-02:
+    #    7/7 worked on the live address, then its negative control moved the
+    #    active window (Signal, workspace 9 -> 51; restored and verified).
+    run_q3_form "eval + get_window('address:..') unguarded [OPT-IN, DANGEROUS]" \
+      eval 'hl.dispatch(hl.dsp.window.move({ workspace = "__WS__", window = hl.get_window("address:__ADDR__"), follow = false }))'
+    # 8. bare string into get_window. Measured 2026-09-02 (three runs):
+    #    worked on trial 1, moved a different real window on trial 2.
+    [[ "$ABORT" == "no" ]] && run_q3_form "eval + get_window(bare string) [OPT-IN, DANGEROUS]" \
+      eval "hl.dispatch(hl.dsp.window.move({ workspace = '__WS__', window = hl.get_window('__ADDR__'), follow = false }))"
+    # 9. the same, via the dispatch verb. Measured dangerous 2026-09-02.
+    [[ "$ABORT" == "no" ]] && run_q3_form "dispatch + get_window(bare) [OPT-IN, DANGEROUS]" \
+      dispatch "hl.dsp.window.move({ workspace = '__WS__', window = hl.get_window('__ADDR__'), follow = false })"
   else
-    info "skipping dispatch + hl.get_window() object for window.move: measured dangerous on 2026-09-02 (silently moved a real, unrelated window on at least one trial -- see the notes file). Set PROBE_INCLUDE_DANGEROUS_FORM=1 to re-run it deliberately."
+    info "skipping the three unresolved-selector forms (address:-prefix unguarded, and hl.get_window(bare string) via eval and via dispatch): all measured dangerous on 2026-09-02 -- each moved a real, unrelated window once its selector failed to resolve, because a nil window field makes window.move act on the ACTIVE window (see the resolve table above and the notes file). Set PROBE_INCLUDE_DANGEROUS_FORM=1 to re-run them deliberately."
   fi
 fi
 
@@ -284,7 +442,7 @@ if [[ "$ABORT" == "yes" ]]; then
   fail "Q3: ABORTED after a collateral-movement event -- $ABORT_REASON"
   info "no further trials or forms will run this session"
 elif [[ "$q3_any_ok" == "yes" ]]; then
-  pass "Q3: at least one form moves a specific window (see tally above)"
+  pass "Q3: at least one form moves a specific window (see tally above -- a form is only usable if its negative control is also clean)"
 else
   fail "Q3: no form moved it -- fall back to focus-then-move"
   info "fallback to try by hand: hl.dsp.focus({ window = '<addr>' }) then hl.dsp.window.move({ workspace = 'N' })"
@@ -296,7 +454,8 @@ fi
 if [[ "$ABORT" == "no" && "$q3_any_ok" == "yes" ]]; then
   cur="$(hyprctl -j clients | jq -r --arg a "$addr" '.[] | select(.address == $a) | .workspace.id')"
   if [[ "$cur" != "$target_ws" ]]; then
-    form="${LAST_WORKING_Q3_TEMPLATE//__WS__/$target_ws}"
+    form="${LAST_WORKING_Q3_TEMPLATE//__ADDR__/$addr}"
+    form="${form//__WS__/$target_ws}"
     before_snap="$(snapshot_client_ws)"
     hyprctl "$LAST_WORKING_Q3_VERB" "$form" >/dev/null 2>&1
     sleep 0.4
