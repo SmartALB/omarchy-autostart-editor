@@ -155,6 +155,31 @@ QtObject {
                                       prog({ id: "b", name: "B", placement: { kind: "monitor", value: "DP-4" } })])).blocked[0] || {}).labels.length,
                   2);
 
+            // A plain {} used as a map turns the class string "__proto__" into
+            // Object.prototype instead of undefined -- the allowlist permits
+            // "_", so this is a legal class value, and the map has to survive
+            // it rather than the allowlist forbid it.
+            check("validate survives a class named __proto__",
+                  (function() {
+                      try {
+                          var r = Model.validate(cfg([prog({ id: "a", "class": "__proto__" }),
+                                                      prog({ id: "b", "class": "__proto__" })]));
+                          return "survived, blocked=" + r.blocked.length;
+                      } catch (e) {
+                          return "threw: " + ((e && e.message) || e);
+                      }
+                  })(), "survived, blocked=0");
+            check("validate blocks a class conflict named __proto__",
+                  (function() {
+                      try {
+                          var r = Model.validate(cfg([prog({ id: "a", "class": "__proto__", placement: { kind: "workspace", value: "6" } }),
+                                                      prog({ id: "b", "class": "__proto__", placement: { kind: "workspace", value: "7" } })]));
+                          return "survived, blocked=" + r.blocked.length;
+                      } catch (e) {
+                          return "threw: " + ((e && e.message) || e);
+                      }
+                  })(), "survived, blocked=1");
+
             console.warn("total=" + total + " failed=" + failed);
             Qt.exit(failed === 0 ? 0 : 1);
         } catch (e) {

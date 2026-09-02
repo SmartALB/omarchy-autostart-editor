@@ -135,7 +135,14 @@ function validate(config) {
     // Two programs matching the same class but wanting different places is a
     // contradiction this code can see, so saving is blocked rather than one of
     // them silently winning inside the compositor.
-    var byClass = {};
+    //
+    // A plain {} is not safe as a map for strings that come from the
+    // configuration: "__proto__" reads back as Object.prototype rather than
+    // undefined, so the guard below would skip initialising the array and
+    // .push would not exist. The class allowlist deliberately permits "_" --
+    // real classes need it (nimbus-chat.example.org__-Default) -- so the map
+    // has to tolerate it rather than the allowlist forbid it.
+    var byClass = Object.create(null);
     for (i = 0; i < out.programs.length; i++) {
         var prog = out.programs[i];
         var key  = prog["class"];
