@@ -213,4 +213,114 @@ test_read_leaves_no_temp_file
 test_every_path_yields_exactly_one_envelope
 test_missing_config_directory_still_answers
 
+test_write_creates_the_file_with_0600() {
+    setup_sandbox
+    local out; out="$(valid_config | "$CONFIG_BIN" write --expect-mtime 0)"
+    assert_eq "write: creation is ok" "$(jq -r .ok <<<"$out")" "true"
+    assert_eq "write: mode is 0600" \
+              "$(stat -c %a "$XDG_CONFIG_HOME/omarchy/autostart-layout.json")" "600"
+    assert_eq "write: content round-trips" \
+              "$(jq -r '.config.workspaces[0].monitor' <<<"$("$CONFIG_BIN" read)")" "DP-4"
+    teardown_sandbox
+}
+
+test_write_refuses_a_stale_mtime() {
+    setup_sandbox
+    local f="$XDG_CONFIG_HOME/omarchy/autostart-layout.json"
+    valid_config > "$f"; chmod 600 "$f"
+    local out; out="$(valid_config | "$CONFIG_BIN" write --expect-mtime 1)"
+    assert_eq "write: stale mtime refused" "$(jq -r .error <<<"$out")" "stale"
+    teardown_sandbox
+}
+
+test_write_refuses_an_existing_file_when_expecting_none() {
+    setup_sandbox
+    local f="$XDG_CONFIG_HOME/omarchy/autostart-layout.json"
+    valid_config > "$f"; chmod 600 "$f"
+    assert_eq "write: expect-mtime 0 on an existing file refused" \
+              "$(jq -r .error <<<"$(valid_config | "$CONFIG_BIN" write --expect-mtime 0)")" \
+              "stale"
+    teardown_sandbox
+}
+
+test_write_refuses_oversized_input() {
+    setup_sandbox
+    # Streamed through redirection, never through jq --arg: a 300 KiB --arg
+    # value fails execve() with "Argument list too long" (kernel
+    # MAX_ARG_STRLEN, 131072 bytes) before jq ever runs -- the same reason
+    # test_read_refuses_an_oversized_file above avoids that pattern.
+    local out
+    out="$({
+        printf '{"schemaVersion":1,"programs":[{"id":"p1","name":"'
+        head -c 307200 /dev/zero | tr '\0' 'x'
+        printf '"}],"workspaces":[]}'
+    } | "$CONFIG_BIN" write --expect-mtime 0)"
+    assert_eq "write: oversized input refused" "$(jq -r .error <<<"$out")" "too-large"
+    assert_eq "write: nothing was created" \
+              "$([[ -e "$XDG_CONFIG_HOME/omarchy/autostart-layout.json" ]] && echo yes || echo no)" \
+              "no"
+    teardown_sandbox
+}
+
+test_write_refuses_broken_input_and_leaves_the_old_file() {
+    setup_sandbox
+    local f="$XDG_CONFIG_HOME/omarchy/autostart-layout.json"
+    valid_config > "$f"; chmod 600 "$f"
+    local mtime; mtime="$(stat -c %Y "$f")"
+    local out; out="$(printf '{"schemaVersion":1,' | "$CONFIG_BIN" write --expect-mtime "$mtime")"
+    assert_eq "write: broken input refused" "$(jq -r .error <<<"$out")" "not-json"
+    assert_eq "write: previous content untouched" \
+              "$(jq -r '.workspaces[0].monitor' "$f")" "DP-4"
+    teardown_sandbox
+}
+
+test_write_leaves_no_temp_file_behind() {
+    setup_sandbox
+    printf '{"schemaVersion":1,' | "$CONFIG_BIN" write --expect-mtime 0 >/dev/null
+    assert_eq "write: no leftover temp file" \
+              "$(find "$XDG_CONFIG_HOME/omarchy" -name '.autostart-layout.json.*' | wc -l)" "0"
+    teardown_sandbox
+}
+
+# The two Task 4 had to learn about after the fact: 44 assertions there looked
+# only at stdout and therefore saw neither the stderr noise nor the leaked file.
+test_write_is_silent_on_success() {
+    setup_sandbox
+    local err; err="$(valid_config | "$CONFIG_BIN" write --expect-mtime 0 2>&1 >/dev/null)"
+    assert_eq "write: a successful write says nothing on stderr" "$err" ""
+    teardown_sandbox
+}
+
+test_write_paths_each_yield_one_envelope() {
+    setup_sandbox
+    local f="$XDG_CONFIG_HOME/omarchy/autostart-layout.json"
+    local label out count
+    for label in create stale toolarge broken; do
+        rm -f "$f"
+        case "$label" in
+            create)   out="$(valid_config | "$CONFIG_BIN" write --expect-mtime 0)" ;;
+            stale)    valid_config > "$f"; chmod 600 "$f"
+                      out="$(valid_config | "$CONFIG_BIN" write --expect-mtime 1)" ;;
+            toolarge) out="$(jq -nc --argjson n 300000 '{schemaVersion:1,programs:[],workspaces:[]}' \
+                              | "$CONFIG_BIN" write --expect-mtime 0)" ;;
+            broken)   out="$(printf '{"schemaVersion":1,' | "$CONFIG_BIN" write --expect-mtime 0)" ;;
+        esac
+        assert_eq "write envelope: $label exits 0" "$?" "0"
+        count="$(jq -s 'length' <<<"$out" 2>/dev/null || echo BADJSON)"
+        assert_eq "write envelope: $label yields exactly one JSON object" "$count" "1"
+        assert_eq "write envelope: $label carries an ok field" \
+                  "$(jq -r 'has("ok")' <<<"$out" 2>/dev/null)" "true"
+    done
+    teardown_sandbox
+}
+
+test_write_creates_the_file_with_0600
+test_write_refuses_a_stale_mtime
+test_write_refuses_an_existing_file_when_expecting_none
+test_write_refuses_oversized_input
+test_write_refuses_broken_input_and_leaves_the_old_file
+test_write_leaves_no_temp_file_behind
+test_write_is_silent_on_success
+test_write_paths_each_yield_one_envelope
+
 summary

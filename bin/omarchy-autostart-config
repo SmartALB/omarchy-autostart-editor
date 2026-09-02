@@ -18,9 +18,11 @@ SCHEMA_VERSION=1
 # function-local variable: the trap runs at exit, when that local is out of
 # scope, and under `set -u` the expansion is fatal -- so the trap removes
 # nothing and a temporary file leaks on every single run.
-TMPFILE=""
+TMPFILE=""     # scratch copy under $TMPDIR, used by read
+STAGEFILE=""   # staged replacement beside the destination, used by write
 cleanup() {
     [[ -n "${TMPFILE:-}" ]] && rm -f -- "$TMPFILE"
+    [[ -n "${STAGEFILE:-}" ]] && rm -f -- "$STAGEFILE"
     return 0
 }
 trap cleanup EXIT
@@ -105,7 +107,61 @@ cmd_read() {
        '{ok:true,mtime:$m,config:$c[0]}'
 }
 
+cmd_write() {
+    local expect_mtime=""
+    while (( $# )); do
+        case "$1" in
+            --expect-mtime) expect_mtime="${2:-}"; shift 2 ;;
+            *) echo "usage: ${0##*/} write --expect-mtime <int> < config.json" >&2; exit 2 ;;
+        esac
+    done
+    [[ "$expect_mtime" =~ ^[0-9]+$ ]] \
+        || { echo "usage: ${0##*/} write --expect-mtime <int> < config.json" >&2; exit 2; }
+
+    check_permissions "$CONFIG_DIR" "directory"
+
+    local current=0
+    if [[ -e "$CONFIG" ]]; then
+        [[ -f "$CONFIG" ]] || err "not-a-file" "$CONFIG is not a plain file"
+        check_permissions "$CONFIG" "file"
+        current="$(stat -c %Y "$CONFIG")"
+    fi
+    [[ "$current" == "$expect_mtime" ]] \
+        || err "stale" "the file changed on disk (mtime $current, caller expected $expect_mtime)"
+
+    # Stage beside the destination so the move is atomic, and give the staged
+    # file its final mode before any content reaches it.
+    #
+    # STAGEFILE is script-level, not local, and there is no `trap` here. Task 4
+    # learned this the hard way: a trap body naming a function-local variable
+    # runs at exit, when that local is gone -- under `set -u` the expansion is
+    # fatal, so the trap removes nothing. Here that would leave a dotfile in
+    # the user's own configuration directory after every failed write. The
+    # single script-level `cleanup` installed at the top covers both scratch
+    # files; do NOT add `trap - EXIT` either, as that would disarm it.
+    STAGEFILE="$(mktemp "$CONFIG_DIR/.autostart-layout.json.XXXXXX")" \
+        || err "write-failed" "could not stage a replacement in $CONFIG_DIR"
+    [[ -n "$STAGEFILE" && -f "$STAGEFILE" ]] \
+        || err "write-failed" "could not stage a replacement in $CONFIG_DIR"
+    chmod 600 "$STAGEFILE"
+
+    read_bounded /dev/stdin "$STAGEFILE"
+    check_shape "$STAGEFILE"
+
+    mv -f "$STAGEFILE" "$CONFIG" || err "write-failed" "could not publish $CONFIG"
+    # Published: the staged path no longer exists, so take it out of cleanup's
+    # hands rather than have it try to remove the destination's former name.
+    STAGEFILE=""
+
+    local mtime
+    mtime="$(stat -c %Y "$CONFIG" 2>/dev/null)" \
+        || err "write-failed" "$CONFIG vanished immediately after it was written"
+    [[ "$mtime" =~ ^[0-9]+$ ]] || err "write-failed" "implausible modification time"
+    ok --argjson m "$mtime" '{ok:true,mtime:$m}'
+}
+
 case "${1:-}" in
-    read) cmd_read ;;
-    *)    echo "usage: ${0##*/} read" >&2; exit 2 ;;
+    read)  shift; cmd_read "$@" ;;
+    write) shift; cmd_write "$@" ;;
+    *)     echo "usage: ${0##*/} read | write --expect-mtime <int>" >&2; exit 2 ;;
 esac
