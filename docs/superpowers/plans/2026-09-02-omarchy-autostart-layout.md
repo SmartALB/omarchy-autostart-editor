@@ -1769,7 +1769,10 @@ In `test/harness.qml` vor der `console.warn("total=…")`-Zeile einfügen:
 - [ ] **Step 2: Laufen lassen und den Fehlschlag sehen**
 
 Run: `./test/run-qml-tests.sh; echo "status=$?"`
-Expected: FAIL — `Model.validate` ist keine Funktion. Status 1.
+Expected: FAIL — `Model.validate` ist keine Funktion. **Status 3**, nicht 1:
+`check(name, got, want)` wertet `got` vor dem Eintritt in `check` aus, der
+`TypeError` fliegt also, bevor eine Zusicherung gezählt wird, und landet im
+äußeren Fang des Gerüsts („das Gerüst selbst ist gebrochen").
 
 - [ ] **Step 3: Die Implementierung anfügen**
 
@@ -1813,9 +1816,15 @@ function placementProblem(placement) {
     if (placement.kind === "none") {
         return placement.value === undefined ? null : "placement-invalid";
     }
-    if (placement.monitor !== undefined && placement.workspace !== undefined) {
-        return "placement-invalid";
-    }
+    // Note for anyone tempted to add a check here that requires BOTH
+    // placement.monitor and placement.workspace to be present: this brief had
+    // one, and it was dead code. A placement is {kind, value}; nothing ever
+    // sets a .workspace field on it. The invariant is carried entirely by the
+    // two branch checks below -- with kind "workspace" a stray .monitor is
+    // rejected, with kind "monitor" a stray .workspace is. Task 8's
+    // implementer established that by removing the check and showing the
+    // suite stayed green, which is the only way to prove a line dead rather
+    // than argue it.
     if (placement.kind === "workspace") {
         if (placement.monitor !== undefined) return "placement-invalid";
         return WORKSPACE_RE.test(placement.value) ? null : "placement-invalid";
@@ -1939,8 +1948,10 @@ sed -i 's/\[A-Za-z0-9 \._^\$()|\\\[\\\]?\*+\\\\:-\]{1,200}/[\\s\\S]{1,200}/' Mod
 ./test/run-qml-tests.sh; echo "A status=$?"
 git checkout Model.js
 
-# Probe B -- Entweder-oder aufgeben
-sed -i 's/^    if (placement.monitor !== undefined \&\& placement.workspace !== undefined) {/    if (false) {/' Model.js
+# Probe B -- Entweder-oder aufgeben. Zielzeile ist der ZWEIGSPEZIFISCHE Test,
+# nicht ein oberer Sammelcheck: der war in diesem Entwurf toter Code (siehe
+# Kommentar in placementProblem) und eine Probe darauf liess die Suite gruen.
+sed -i 's/^        if (placement.monitor !== undefined) return "placement-invalid";/        if (false) return "placement-invalid";/' Model.js
 ./test/run-qml-tests.sh; echo "B status=$?"
 git checkout Model.js
 
