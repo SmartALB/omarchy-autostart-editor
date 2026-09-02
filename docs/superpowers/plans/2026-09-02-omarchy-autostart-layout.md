@@ -782,9 +782,29 @@ CONFIG="$CONFIG_DIR/autostart-layout.json"
 MAX_BYTES=262144          # 256 KiB
 SCHEMA_VERSION=1
 
+# One cleanup for the whole script. The trap body must never name a
+# function-local variable: the trap runs at exit, when that local is out of
+# scope, and under `set -u` the expansion is fatal -- so the trap removes
+# nothing and a temporary file leaks on every single run.
+TMPFILE=""
+cleanup() {
+    [[ -n "${TMPFILE:-}" ]] && rm -f -- "$TMPFILE"
+    return 0
+}
+trap cleanup EXIT
+
 # Every outcome leaves through one of these two, so a caller parses one shape.
-ok()  { jq -nc "$@"; exit 0; }
-err() { jq -nc --arg e "$1" --arg d "${2:-}" '{ok:false,error:$e,detail:$d}'; exit 0; }
+# Even jq itself failing must still produce exactly one JSON object on stdout
+# and exit 0 -- otherwise a caller sees nothing at all and cannot tell why.
+ok() {
+    jq -nc "$@" || printf '{"ok":false,"error":"internal","detail":"could not build the answer"}\n'
+    exit 0
+}
+err() {
+    jq -nc --arg e "$1" --arg d "${2:-}" '{ok:false,error:$e,detail:$d}' \
+        || printf '{"ok":false,"error":"internal","detail":"could not build the error answer"}\n'
+    exit 0
+}
 
 # Refuse when anyone but the owner can write the file or its directory. The
 # command field is a shell command line executed at login, so a foreign writer
@@ -792,7 +812,12 @@ err() { jq -nc --arg e "$1" --arg d "${2:-}" '{ok:false,error:$e,detail:$d}'; ex
 # enough -- the file can simply be replaced.
 check_permissions() {
     local path="$1" kind="$2" mode
-    mode="$(stat -c %a "$path" 2>/dev/null)" || return 0
+    # Absence is not a permission problem: on a fresh install neither the
+    # directory nor the file exists yet, and that path must still reach the
+    # empty-model answer.
+    [[ -e "$path" ]] || return 0
+    mode="$(stat -c %a "$path" 2>/dev/null)" \
+        || err "insecure-permissions" "cannot determine the permissions of $kind $path"
     if (( 8#$mode & 8#22 )); then
         err "insecure-permissions" \
             "$kind $path is writable by group or others (mode $mode); run: chmod g-w,o-w $path"
@@ -829,10 +854,23 @@ cmd_read() {
     [[ -f "$CONFIG" ]] || err "not-a-file" "$CONFIG is not a plain file"
     check_permissions "$CONFIG" "file"
 
-    local tmp; tmp="$(mktemp)"; trap 'rm -f "$tmp"' EXIT
-    read_bounded "$CONFIG" "$tmp"
-    check_shape "$tmp"
-    jq -c --argjson m "$(stat -c %Y "$CONFIG")" '{ok:true,mtime:$m,config:.}' "$tmp"
+    # Capture the mtime once, right here, before the content is read into
+    # TMPFILE. Re-stating $CONFIG after the bounded read would reopen exactly
+    # the TOCTOU window the MAX+1 read exists to close, and a vanished file
+    # here must produce the same envelope as any other error path -- never an
+    # empty --argjson that makes jq itself fail with exit 2.
+    local mtime
+    mtime="$(stat -c %Y "$CONFIG" 2>/dev/null)" \
+        || err "not-a-file" "$CONFIG disappeared while it was being read"
+    [[ "$mtime" =~ ^[0-9]+$ ]] \
+        || err "not-a-file" "implausible modification time for $CONFIG"
+
+    TMPFILE="$(mktemp)" || err "internal" "could not create a temporary file"
+    [[ -n "$TMPFILE" && -f "$TMPFILE" ]] || err "internal" "could not create a temporary file"
+    read_bounded "$CONFIG" "$TMPFILE"
+    check_shape "$TMPFILE"
+    ok --argjson m "$mtime" --slurpfile c "$TMPFILE" \
+       '{ok:true,mtime:$m,config:$c[0]}'
 }
 
 case "${1:-}" in
@@ -849,6 +887,31 @@ chmod +x bin/omarchy-autostart-config
 ./test/run-tests.sh
 ```
 Expected: alle Zusicherungen `ok`, `failed=0`.
+
+**Abweichungen, die die Umsetzung nötig gemacht hat** (Commits `f173aea`,
+`1c8f40f`, `225fef6`, `ed972d5`) — hier festgehalten, weil sie Fehler in diesem
+Plan waren, nicht in der Umsetzung:
+
+1. Die Testdaten oben schoben 256–300 KiB Füllung durch `jq --arg`. Linux
+   begrenzt ein einzelnes `execve`-Argument auf `MAX_ARG_STRLEN` = 131072 Byte,
+   die zwei Grenzwerttests waren also nicht ausführbar. Die Füllung wird
+   stattdessen per Umleitung gestromt und die Pad-Größe aus Prefix- und
+   Suffixlänge berechnet; die Wiederholschleife im Entwurf konnte ohnehin nicht
+   terminieren, weil `>` die Datei bei jedem Fehlversuch auf 0 Byte kürzte.
+2. `trap 'rm -f "$tmp"' EXIT` nannte eine `local`-Variable. Der Trap läuft beim
+   Beenden, wenn sie aus dem Geltungsbereich ist — unter `set -u` fatal, also
+   räumte er nichts ab: eine Temp-Datei leckte bei **jedem** Lesevorgang, und
+   auf stderr stand bei jedem **Erfolg** eine Fehlerzeile, die das Panel als
+   Fehler angezeigt hätte. Ersetzt durch `TMPFILE`/`cleanup` auf Skriptebene.
+3. Die Zeile, die den Erfolgs-Umschlag baute, lief nicht durch `ok()` und
+   stattete die Datei ein zweites Mal, nachdem der Inhalt schon gelesen war.
+   Verschwand sie dazwischen, endete das Skript mit Status 2 und **ohne
+   Ausgabe**. Änderungszeit wird jetzt einmal früh genommen; `ok()` und `err()`
+   haben einen Rückfall für ein scheiterndes `jq`.
+4. `check_permissions` fiel bei einem `stat`-Fehlschlag **offen** aus, und
+   `TMPDIR` fehlte in der Sandbox — jeder Testlauf schrieb ins echte `/tmp`.
+
+Die Suite steht am Ende bei 47 Zusicherungen.
 
 - [ ] **Step 5: Zwei Mutationsproben fahren**
 
@@ -956,12 +1019,46 @@ test_write_leaves_no_temp_file_behind() {
     teardown_sandbox
 }
 
+# The two Task 4 had to learn about after the fact: 44 assertions there looked
+# only at stdout and therefore saw neither the stderr noise nor the leaked file.
+test_write_is_silent_on_success() {
+    setup_sandbox
+    local err; err="$(valid_config | "$CONFIG_BIN" write --expect-mtime 0 2>&1 >/dev/null)"
+    assert_eq "write: a successful write says nothing on stderr" "$err" ""
+    teardown_sandbox
+}
+
+test_write_paths_each_yield_one_envelope() {
+    setup_sandbox
+    local f="$XDG_CONFIG_HOME/omarchy/autostart-layout.json"
+    local label out count
+    for label in create stale toolarge broken; do
+        rm -f "$f"
+        case "$label" in
+            create)   out="$(valid_config | "$CONFIG_BIN" write --expect-mtime 0)" ;;
+            stale)    valid_config > "$f"; chmod 600 "$f"
+                      out="$(valid_config | "$CONFIG_BIN" write --expect-mtime 1)" ;;
+            toolarge) out="$(jq -nc --argjson n 300000 '{schemaVersion:1,programs:[],workspaces:[]}' \
+                              | "$CONFIG_BIN" write --expect-mtime 0)" ;;
+            broken)   out="$(printf '{"schemaVersion":1,' | "$CONFIG_BIN" write --expect-mtime 0)" ;;
+        esac
+        assert_eq "write envelope: $label exits 0" "$?" "0"
+        count="$(jq -s 'length' <<<"$out" 2>/dev/null || echo BADJSON)"
+        assert_eq "write envelope: $label yields exactly one JSON object" "$count" "1"
+        assert_eq "write envelope: $label carries an ok field" \
+                  "$(jq -r 'has("ok")' <<<"$out" 2>/dev/null)" "true"
+    done
+    teardown_sandbox
+}
+
 test_write_creates_the_file_with_0600
 test_write_refuses_a_stale_mtime
 test_write_refuses_an_existing_file_when_expecting_none
 test_write_refuses_oversized_input
 test_write_refuses_broken_input_and_leaves_the_old_file
 test_write_leaves_no_temp_file_behind
+test_write_is_silent_on_success
+test_write_paths_each_yield_one_envelope
 ```
 
 - [ ] **Step 2: Laufen lassen und den Fehlschlag sehen**
@@ -998,18 +1095,47 @@ cmd_write() {
 
     # Stage beside the destination so the move is atomic, and give the staged
     # file its final mode before any content reaches it.
-    local tmp
-    tmp="$(mktemp "$CONFIG_DIR/.autostart-layout.json.XXXXXX")" || err "write-failed" "cannot stage"
-    trap 'rm -f "$tmp"' EXIT
-    chmod 600 "$tmp"
+    #
+    # STAGEFILE is script-level, not local, and there is no `trap` here. Task 4
+    # learned this the hard way: a trap body naming a function-local variable
+    # runs at exit, when that local is gone -- under `set -u` the expansion is
+    # fatal, so the trap removes nothing. Here that would leave a dotfile in
+    # the user's own configuration directory after every failed write. The
+    # single script-level `cleanup` installed at the top covers both scratch
+    # files; do NOT add `trap - EXIT` either, as that would disarm it.
+    STAGEFILE="$(mktemp "$CONFIG_DIR/.autostart-layout.json.XXXXXX")" \
+        || err "write-failed" "could not stage a replacement in $CONFIG_DIR"
+    [[ -n "$STAGEFILE" && -f "$STAGEFILE" ]] \
+        || err "write-failed" "could not stage a replacement in $CONFIG_DIR"
+    chmod 600 "$STAGEFILE"
 
-    read_bounded /dev/stdin "$tmp"
-    check_shape "$tmp"
+    read_bounded /dev/stdin "$STAGEFILE"
+    check_shape "$STAGEFILE"
 
-    mv -f "$tmp" "$CONFIG" || err "write-failed" "cannot publish $CONFIG"
-    trap - EXIT
-    ok --argjson m "$(stat -c %Y "$CONFIG")" '{ok:true,mtime:$m}'
+    mv -f "$STAGEFILE" "$CONFIG" || err "write-failed" "could not publish $CONFIG"
+    # Published: the staged path no longer exists, so take it out of cleanup's
+    # hands rather than have it try to remove the destination's former name.
+    STAGEFILE=""
+
+    local mtime
+    mtime="$(stat -c %Y "$CONFIG" 2>/dev/null)" \
+        || err "write-failed" "$CONFIG vanished immediately after it was written"
+    [[ "$mtime" =~ ^[0-9]+$ ]] || err "write-failed" "implausible modification time"
+    ok --argjson m "$mtime" '{ok:true,mtime:$m}'
 }
+```
+
+Und `cleanup` am Kopf der Datei um die zweite Zwischendatei erweitern:
+
+```bash
+TMPFILE=""     # scratch copy under $TMPDIR, used by read
+STAGEFILE=""   # staged replacement beside the destination, used by write
+cleanup() {
+    [[ -n "${TMPFILE:-}" ]] && rm -f -- "$TMPFILE"
+    [[ -n "${STAGEFILE:-}" ]] && rm -f -- "$STAGEFILE"
+    return 0
+}
+trap cleanup EXIT
 ```
 
 Und den `case`-Block ersetzen:
