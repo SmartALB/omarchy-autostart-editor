@@ -4407,6 +4407,21 @@ qmllint."
 ---
 ### Task 15: `Panel.qml` — Zustand, Listen, Anwenden
 
+> **`missingIds` ist ab Task 13 tragend, nicht schmückend** (Ruling 54, gemessen).
+> Ein Startfehler eines Programms ist auf der Shell-Seite **unsichtbar**: durch den
+> gelieferten Umschlag ergibt ein nicht vorhandenes Programm leeres stderr und
+> Umschlag-Exit 0. Ebenso still sind Exit 127, ein Programm das nicht-null endet, ein
+> Programm das seinen eigenen Fehler schreibt, ein Umleitungsfehler und `setsid`s eigener
+> exec-Fehler. `bash -n` sieht davon nichts — ein fehlendes Programm ist kein
+> Syntaxfehler. Es einzufangen hieße, die Stdio des Eintrags wieder zu öffnen, und genau
+> das ließ den Wächter bei JEDER Anmeldung falsch anschlagen (Ruling 50).
+>
+> Deshalb ist `Model.missingIds(model, matches)` die einzige Stelle, an der ein
+> Tippfehler im Programmnamen den Benutzer erreicht: „eingerichtet, aber es erschien nie
+> ein Fenster". Diese Anzeige darf nicht wegfallen und nicht nur als Beiwerk
+> erscheinen — ohne sie startet ein falsch geschriebenes Programm nie und niemand
+> erfährt warum.
+
 **Bausteine:** Für Knöpfe, Eingabefelder, Listen und Abstände die Typen benutzen, die `~/.config/omarchy/plugins/smartalb.vpn/Panel.qml` verwendet (`qs.Ui`, `qs.Commons`, `QtQuick.Controls`). **Achtung auf Namenskollisionen:** bei gleichem Typnamen gewinnt der **zuletzt** gelesene Import — in `smartalb.vpn/Panel.qml` steht dazu ein Kommentar bei Zeile 876, weil `Button` sowohl aus `QtQuick.Controls` als auch aus `qs.Ui` kommt.
 
 **Files:**
