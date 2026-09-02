@@ -505,15 +505,26 @@ TESTS_FAILED=0
 SANDBOX=""
 
 setup_sandbox() {
-    SANDBOX="$(mktemp -d)" || { echo "setup_sandbox: mktemp -d failed" >&2; return 1; }
+    # A prior test's setup_sandbox call may have exported TMPDIR pointing
+    # inside a sandbox that teardown_sandbox has since removed; mktemp -d
+    # here must build the new sandbox itself in the real /tmp, never inside
+    # a sandbox that no longer exists.
+    SANDBOX="$(TMPDIR=/tmp mktemp -d)" || { echo "setup_sandbox: mktemp -d failed" >&2; return 1; }
     [[ -n "$SANDBOX" && "$SANDBOX" == /tmp/?* ]] || { echo "setup_sandbox: implausible sandbox path ${SANDBOX@Q}" >&2; SANDBOX=""; return 1; }
     export HOME="$SANDBOX/home"
     export XDG_CONFIG_HOME="$SANDBOX/config"
     export XDG_STATE_HOME="$SANDBOX/state"
     export XDG_DATA_HOME="$SANDBOX/data"
     export XDG_RUNTIME_DIR="$SANDBOX/run"
+    export TMPDIR="$SANDBOX/tmp"
+    # A non-empty path defeats the ${XDG_DATA_DIRS:-...} default (":-"
+    # substitutes for set-but-empty too, not only unset), and an empty
+    # directory contributes nothing -- so no test can reach the real
+    # /usr/share/applications by accident.
+    export XDG_DATA_DIRS="$SANDBOX/data-dirs"
     mkdir -p "$HOME" "$XDG_CONFIG_HOME/omarchy" "$XDG_STATE_HOME" \
-             "$XDG_DATA_HOME/applications" "$XDG_RUNTIME_DIR"
+             "$XDG_DATA_HOME/applications" "$XDG_RUNTIME_DIR" "$TMPDIR" \
+             "$XDG_DATA_DIRS"
     export FAKE_LOG="$SANDBOX/fake.log"
     : > "$FAKE_LOG"
 }
@@ -616,7 +627,9 @@ Expected: `FAIL sandbox: $XDG_STATE_HOME lies under the sandbox`, `got "OUTSIDE:
 - [ ] **Step 4: Laufen lassen und Grün sehen**
 
 Run: `./test/run-tests.sh`
-Expected: zehn `ok` (je Variable Wert **und** Export), `total=10 failed=0`, Status 0.
+Expected: vierzehn `ok` (je Variable Wert **und** Export), `total=14 failed=0`, Status 0.
+
+**Zur Aussagekraft der Export-Haelfte, damit sie niemand ueberschaetzt:** sie faengt eine Umbiegung, die ohne `export` geschrieben wurde. Sie faengt **nicht** eine ganz fehlende Umbiegung, wenn die umgebende Sitzung dieselbe Variable ohnehin exportiert — dann faellt die Variable auf deren Wert zurueck und bleibt exportiert. Das eigentliche Netz ist die Wert-Zusicherung; die Export-Zusicherung ist eine Bemuehung, keine Garantie.
 
 - [ ] **Step 5: Commit**
 
@@ -1380,6 +1393,13 @@ parse_entry() {
             if (type != "Application") exit
             if (name == "" || exec == "") exit
             if (nodisp == "true" || hidden == "true") exit
+            # Values come from files this plugin does not own. A tab inside one
+            # would be indistinguishable from the delimiter after the join,
+            # silently shifting every later field of that entry, so it is
+            # squashed while the fields are still separate. Newlines cannot
+            # occur: awk reads line by line.
+            gsub(/\t/, " ", name); gsub(/\t/, " ", exec)
+            gsub(/\t/, " ", wmclass); gsub(/\t/, " ", icon)
             printf "%s\t%s\t%s\t%s\n", name, exec, wmclass, icon
         }
     '
