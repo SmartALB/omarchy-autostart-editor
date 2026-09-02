@@ -4302,7 +4302,17 @@ import qs.Ui
 //
 // Verify on the file, never on the source you just typed:
 //   grep -n "barGlyph:" BarWidget.qml | od -c
-BarIconButton {
+// KORRIGIERT nach der Lieferung (Ruling 56). Der Plan hatte hier
+// `BarIconButton` als Wurzeltyp mit `onClicked:`. Gegen die installierte
+// Plattform geprueft: /usr/share/omarchy/shell/Ui/WidgetButton.qml deklariert
+// genau zwei Signale, `pressed(int button)` und `wheelMoved(int delta)` --
+// KEIN `clicked`. `clicked` gibt es nur auf Ui/Button.qml, das nicht in
+// BarIconButtons Kette liegt. Die alte Form waere also ein Fehler beim
+// Erzeugen der Komponente gewesen, unsichtbar fuer jeden Test hier.
+// Die ausgelieferte plugins/bar/widgets/Microphone.qml zeigt die richtige
+// Form: BarWidget als Wurzel, implicitWidth/implicitHeight vom Knopf
+// weitergegeben, BarIconButton als Kind, Klick ueber `onPressed`.
+BarWidget {
     id: root
 
     readonly property string barGlyph: "\uf135"   // nf-fa-rocket
@@ -4328,7 +4338,18 @@ BarIconButton {
         if (panelLoader.item) panelLoader.item.closeForPopoutSwitch()
     }
 
-    onClicked: root.toggle()
+    implicitWidth: button.implicitWidth
+    implicitHeight: button.implicitHeight
+
+    BarIconButton {
+        id: button
+        anchors.fill: parent
+        bar: root.bar
+        text: root.barGlyph
+        tooltipText: root.tooltip
+
+        onPressed: function(b) { root.toggle() }
+    }
 
     Loader {
         id: panelLoader
