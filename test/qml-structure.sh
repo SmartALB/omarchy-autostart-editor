@@ -893,5 +893,49 @@ hits="$(grep -nE 'new RegExp|\.match\(|\.test\(' <<<"$stripped_panel" \
 [[ -z "$hits" ]] && ok "Panel: no JavaScript RegExp over user patterns" \
                  || bad "Panel: no JavaScript RegExp over user patterns" "$hits"
 
+# 16 -- the two lifecycle booleans hold real state, not a literal. Check 13
+#       above only proves the declaration's TEXT exists, and a mutation probe
+#       run against this file confirmed the gap is reachable: replacing the
+#       binding with `readonly property bool opened: true` -- which breaks the
+#       handoff outright, since the bar would then never see the panel as
+#       closed and open() would never be called again -- left every check
+#       green. That is round-1 finding F3 on BarWidget, reached a second time
+#       on the other side of the same contract, and check 11 is the shape of
+#       the answer: declared and bound are two separate claims, checked
+#       separately.
+#
+#       Origin-qualified the way check 11 is, but without hardcoding one
+#       backing name: the expression has to mention some identifier this file
+#       declares as a WRITABLE `property bool` (the `readonly` declarations are
+#       excluded, or the property would satisfy the check by naming itself).
+#       That is what distinguishes a value something can actually change from a
+#       constant wearing a property's name. Like check 8's onTriggered lookup,
+#       a property this script cannot locate at all is a FAIL, not a pass.
+for prop in opened popoutSwitchClosing; do
+  rhs="$(property_binding "$stripped_panel" "$prop")"
+  if [[ -z "$rhs" ]]; then
+    bad "Panel: '$prop' is bound to writable state, not a literal" \
+        "no expression found on the declaration's line or the next"
+    continue
+  fi
+  if [[ "$rhs" =~ ^(true|false)\;?$ ]]; then
+    bad "Panel: '$prop' is bound to writable state, not a literal" \
+        "bound to the hardcoded literal '$rhs'"
+    continue
+  fi
+  backed=0
+  for ident in $(grep -oE '[A-Za-z_][A-Za-z0-9_]*' <<<"$rhs"); do
+    decl="$(grep -E "(^|[^A-Za-z0-9_])property[[:space:]]+bool[[:space:]]+${ident}([^A-Za-z0-9_]|$)" \
+            <<<"$stripped_panel" | grep -v 'readonly' || true)"
+    if [[ -n "$decl" ]]; then backed=1; break; fi
+  done
+  if (( backed )); then
+    ok "Panel: '$prop' is bound to writable state, not a literal"
+  else
+    bad "Panel: '$prop' is bound to writable state, not a literal" \
+        "expression '$rhs' names no writable 'property bool' declared in this file"
+  fi
+done
+
 printf '\nqml structure: total=%d failed=%d\n' "$run" "$failed"
 (( failed == 0 ))
