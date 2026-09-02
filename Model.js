@@ -331,7 +331,14 @@ function stripFieldCodes(exec) {
 // ends Quickshell tears those pipes down and takes the application with it.
 // From a terminal the same command works, because nobody tears anything down.
 function launchCommand(command) {
-    return "uwsm-app -- " + command + " </dev/null >/dev/null 2>&1";
+    // The braces are load-bearing. The command field is a shell command
+    // line, so it may contain `&&`, `;` or a pipe -- and a redirection
+    // binds only to the last command of such a chain. Without the group,
+    // `sleep 2 && myapp` would leave `sleep 2` holding Quickshell's
+    // stdout and stderr, and Quickshell tears those down when the chain
+    // ends, taking the application with it. Grouping also makes the
+    // entries safe to join with `&` when several are launched at once.
+    return "{ uwsm-app -- " + command + " ; } </dev/null >/dev/null 2>&1";
 }
 
 // Workspace rules only take effect when a workspace is CREATED, so a workspace

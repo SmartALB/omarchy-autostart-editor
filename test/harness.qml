@@ -337,9 +337,17 @@ QtObject {
 
             // --- launchCommand -------------------------------------------------
             check("launchCommand: goes through uwsm-app",
-                  Model.launchCommand("cursor").indexOf("uwsm-app -- cursor") === 0, true);
+                  Model.launchCommand("cursor").indexOf("uwsm-app -- cursor") !== -1, true);
             check("launchCommand: detaches every standard stream",
-                  Model.launchCommand("cursor"), "uwsm-app -- cursor </dev/null >/dev/null 2>&1");
+                  Model.launchCommand("cursor"),
+                  "{ uwsm-app -- cursor ; } </dev/null >/dev/null 2>&1");
+            check("launchCommand: the redirection covers a compound command, not just its last part",
+                  (function() {
+                      // The group must close AFTER the whole command, so everything in
+                      // it is inside the braces rather than trailing behind them.
+                      var s = Model.launchCommand("sleep 2 && myapp");
+                      return s.indexOf("{ uwsm-app -- sleep 2 && myapp ; }") === 0;
+                  })(), true);
 
             // --- workspaceMoves ------------------------------------------------
             check("workspaceMoves: a workspace on the wrong monitor moves",
