@@ -754,10 +754,52 @@ FAKE
     teardown_sandbox
 }
 
+test_windows_match_is_not_confused_by_a_newline_in_a_class() {
+    setup_sandbox; fake_hyprctl_json
+    # A class with an embedded newline used to become two physical lines in
+    # `classes`, shifting every later grep -n line number by one -- so a
+    # match on a later, unrelated window's line pointed at the WRONG window.
+    # That answer was internally consistent (well-formed address, matching
+    # class), so nothing downstream could tell -- buildReconcileChunks would
+    # have faithfully generated a move for a real, unrelated window. This is
+    # the Task 1 incident class re-entered through text correspondence rather
+    # than a Lua selector.
+    jq -nc '[{address:"0xAAA",class:"weird
+split",title:"t",workspace:{id:1},monitor:0},
+             {address:"0xBBB",class:"match-me",title:"t",workspace:{id:1},monitor:0},
+             {address:"0xCCC",class:"decoy",title:"t",workspace:{id:1},monitor:0}]' > "$FAKE_CLIENTS"
+    printf 'p1\t^match-me$\n' > "$SANDBOX/match"
+    local out; out="$("$WINDOWS_BIN" --match-file "$SANDBOX/match")"
+    assert_eq "match: a newline in another window's class does not shift the answer" \
+              "$(jq -r '.[0].address' <<<"$out")" "0xBBB"
+    assert_eq "match: and the reported class is the matched one" \
+              "$(jq -r '.[0].class' <<<"$out")" "match-me"
+    teardown_sandbox
+}
+
+test_windows_match_file_survives_no_trailing_newline() {
+    setup_sandbox; fake_hyprctl_json
+    cat > "$FAKE_CLIENTS" <<'JSON'
+[{"address":"0x1","class":"match-me","title":"a","workspace":{"id":1},"monitor":0},
+ {"address":"0x2","class":"decoy","title":"b","workspace":{"id":1},"monitor":0}]
+JSON
+    # No trailing newline after the last line -- printf, not a heredoc, and
+    # no final \n. `read` returns failure at end-of-file-without-newline, so
+    # a bare "while read; do" silently drops this last line and its program
+    # shows as not running for no visible reason.
+    printf 'p1\t^(match-me)$\np2\t^(decoy)$' > "$SANDBOX/match"
+    local out; out="$("$WINDOWS_BIN" --match-file "$SANDBOX/match")"
+    assert_eq "match: the unterminated last line is still read" \
+              "$(jq -r '[.[].id] | sort | join(",")' <<<"$out")" "p1,p2"
+    teardown_sandbox
+}
+
 test_windows_workspaces_mode
 test_windows_match_file
 test_match_is_bounded_against_a_backtracking_regex
 test_windows_match_file_uses_the_grep_seam
+test_windows_match_is_not_confused_by_a_newline_in_a_class
+test_windows_match_file_survives_no_trailing_newline
 
 test_generated_lua_compiles() {
     local out_default out_many status_default status_many

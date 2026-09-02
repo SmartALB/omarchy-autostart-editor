@@ -46,10 +46,25 @@ cmd_list_json() {
         | map(select(type == "object"))
         | map(select((.workspace.id // 0) > 0))
         | .[0:$max]
+        # class and title are sanitized here, once, so the one-line-per-window
+        # invariant holds for every consumer of cmd_list_json -- not only
+        # cmd_match_file, which resolves a grep hit back to a window by line
+        # number and would otherwise misattribute a match whenever an earlier
+        # window has a class or title containing an embedded newline. Wayland
+        # app_id and X11 WM_CLASS are set by the client, so a buggy or
+        # hostile one can put arbitrary bytes there -- this is not exotic.
+        #
+        # Squashed to a space, not dropped, for the same reason task 6 kept
+        # a tab inside a .desktop value rather than deleting it. The trade
+        # this makes is real: a window whose actual class contains a control
+        # character is reported with a sanitized class, so From window
+        # produces a pattern that will not match it and that window cannot
+        # be placed. That is the acceptable side of the trade -- a window
+        # that cannot be placed, never a different window moved instead.
         | map({
             address:   (.address // ""),
-            class:     (.class // ""),
-            title:     (.title // ""),
+            class:     ((.class // "") | gsub("[[:cntrl:]]"; " ")),
+            title:     ((.title // "") | gsub("[[:cntrl:]]"; " ")),
             workspace: ((.workspace.id // 0) | tostring),
             monitor:   ($names[(.monitor // -1) | tostring] // "")
           })
@@ -92,7 +107,13 @@ cmd_match_file() {
     # rather than shift a field.
     local lines=0
     {
-        while IFS=$'\t' read -r id regex; do
+        # The "|| [[ -n "$id$regex" ]]" is load-bearing, not defensive
+        # decoration: `read` returns failure on the final line of a file with
+        # no trailing newline, so a bare "while read; do" silently drops that
+        # last line -- its program then shows as not running for no visible
+        # reason. The panel happens to write a trailing newline today, but a
+        # reader must not depend on what its caller happens to do.
+        while IFS=$'\t' read -r id regex || [[ -n "$id$regex" ]]; do
             [[ -n "$id" && -n "$regex" ]] || continue
             lines=$((lines + 1))
             (( lines > MAX_PROGRAMS )) && break
