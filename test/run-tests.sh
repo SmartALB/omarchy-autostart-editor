@@ -663,6 +663,71 @@ test_windows_filters_before_capping
 test_windows_survives_a_failing_hyprctl
 test_windows_survives_valid_json_that_is_not_an_array
 
+test_windows_workspaces_mode() {
+    setup_sandbox; fake_hyprctl_json
+    cat > "$SANDBOX/workspaces.json" <<'JSON'
+[{"id":1,"monitor":"DP-4"},{"id":6,"monitor":"HDMI-A-1"},{"id":-99,"monitor":"DP-4"}]
+JSON
+    # extend the router with a third answer
+    cat > "$SANDBOX/bin/hyprctl" <<'FAKE'
+#!/usr/bin/env bash
+for arg in "$@"; do
+  case "$arg" in
+    clients)    cat "$FAKE_CLIENTS";    exit 0 ;;
+    monitors)   cat "$FAKE_MONITORS";   exit 0 ;;
+    workspaces) cat "$FAKE_WORKSPACES"; exit 0 ;;
+  esac
+done
+exit 1
+FAKE
+    chmod +x "$SANDBOX/bin/hyprctl"
+    export FAKE_WORKSPACES="$SANDBOX/workspaces.json"
+    local out; out="$("$WINDOWS_BIN" --workspaces)"
+    assert_eq "windows --workspaces: special workspace dropped" "$(jq -r 'length' <<<"$out")" "2"
+    assert_eq "windows --workspaces: workspace is a string"     "$(jq -r '.[0].workspace' <<<"$out")" "1"
+    assert_eq "windows --workspaces: monitor name"              "$(jq -r '.[1].monitor' <<<"$out")" "HDMI-A-1"
+    teardown_sandbox
+}
+
+test_windows_match_file() {
+    setup_sandbox; fake_hyprctl_json
+    cat > "$FAKE_CLIENTS" <<'JSON'
+[{"address":"0x1","class":"cursor","title":"a","workspace":{"id":6},"monitor":1},
+ {"address":"0x2","class":"LM-Studio","title":"b","workspace":{"id":1},"monitor":0},
+ {"address":"0x3","class":"firefox","title":"c","workspace":{"id":1},"monitor":0}]
+JSON
+    printf 'p1\t^(cursor)$\np2\tLM[- ]?Studio\n' > "$SANDBOX/match"
+    local out; out="$("$WINDOWS_BIN" --match-file "$SANDBOX/match")"
+    assert_eq "match: two windows matched"  "$(jq -r 'length' <<<"$out")" "2"
+    assert_eq "match: p1 found cursor"      "$(jq -r '.[] | select(.id=="p1") | .address' <<<"$out")" "0x1"
+    assert_eq "match: p2 found LM-Studio"   "$(jq -r '.[] | select(.id=="p2") | .address' <<<"$out")" "0x2"
+    assert_eq "match: firefox matched nothing" \
+              "$(jq -r '[.[] | select(.class=="firefox")] | length' <<<"$out")" "0"
+    teardown_sandbox
+}
+
+test_match_is_bounded_against_a_backtracking_regex() {
+    setup_sandbox; fake_hyprctl_json
+    # A class regex built to blow up a backtracking engine, against a class
+    # that almost matches. grep -E uses an automaton and stays linear; the
+    # point of the test is that this returns at all, quickly.
+    jq -nc '[{address:"0x1",class:"aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaab",
+              title:"t",workspace:{id:1},monitor:0}]' > "$FAKE_CLIENTS"
+    printf 'p1\t^(a+)+$\n' > "$SANDBOX/match"
+    local start elapsed
+    start="$(date +%s)"
+    timeout 10 "$WINDOWS_BIN" --match-file "$SANDBOX/match" >/dev/null
+    assert_eq "match: a backtracking regex does not hang the matcher" "$?" "0"
+    elapsed=$(( $(date +%s) - start ))
+    assert_eq "match: it returned in under 5 seconds" \
+              "$([[ "$elapsed" -lt 5 ]] && echo fast || echo "slow: ${elapsed}s")" "fast"
+    teardown_sandbox
+}
+
+test_windows_workspaces_mode
+test_windows_match_file
+test_match_is_bounded_against_a_backtracking_regex
+
 test_generated_lua_compiles() {
     local out_default out_many status_default status_many
     out_default="$(./lua-syntax.sh 2>&1)"; status_default=$?

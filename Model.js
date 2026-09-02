@@ -377,3 +377,113 @@ function workspaceMoves(model, workspacesNow) {
     }
     return moves;
 }
+
+// --- reconcile ------------------------------------------------------------
+//
+// Windows are moved by ADDRESS, never by class: the class regex is matched
+// once, in grep -E, and never travels into Lua. Addresses are checked against
+// a shape before they are encoded, because they come out of hyprctl and
+// hyprctl's output is not ours.
+var ADDRESS_RE = /^0x[0-9a-f]{1,16}$/;
+
+// Both expressions are the forms task 1 measured against a real window.
+//
+// A window is NEVER addressed by a string here, and the loop below is the
+// whole reason this function exists in the shape it does.
+//
+// Measured on 2026-09-02 with a counting instrument -- 5 runs of 7 trials per
+// form, each with a negative control using an address that does not exist,
+// aborting on the first collateral event. This form: 35/35 moved the right
+// window, negative control clean 5/5.
+//
+// The mechanism behind three separate incidents, in which the probe moved the
+// user's Chatterbox window, two of his terminals and his Signal window:
+// hl.get_window("<bare hex>") always returns nil, a window field set to nil
+// means the KEY IS ABSENT, and window.move then acts on the ACTIVE window.
+// A bare hex address is not a valid selector; "address:<hex>" is.
+//
+// Two shorter forms measured clean as well -- window = "address:<hex>" as a
+// plain string, and hl.get_window("address:<hex>") behind an `if w then`.
+// Neither is used here. Their safety rests on Hyprland no-oping an
+// unresolvable string, a property of the runtime. This form's safety rests on
+// the shape of our own code: on the miss path no dispatcher is called at all.
+//
+// And the most instructive measurement is of a form NOT used:
+// hl.get_window("address:<hex>") WITHOUT the guard scored 7/7 on live
+// addresses and moved Signal on its negative control. Nothing but the
+// negative control separates it from the safe forms.
+function windowMoveExpression(address, placement) {
+    var field = (placement.kind === "workspace") ? "workspace" : "monitor";
+    return "do for _, w in ipairs(hl.get_windows({})) do "
+         + "if w.address == " + luaBytes(address) + " then "
+         + "hl.dispatch(hl.dsp.window.move({ "
+         + field + " = " + luaBytes(placement.value) + ", window = w, follow = false })) "
+         + "end end end";
+}
+
+function workspaceMoveExpression(move) {
+    return "hl.dsp.workspace.move({ workspace = " + luaBytes(move.workspace)
+         + ", monitor = " + luaBytes(move.monitor) + " })";
+}
+
+// Which hyprctl verb a payload needs.
+//
+// Two shapes exist. A block -- a rule block or a guarded window move, both
+// starting with `do` -- goes to eval. A bare dispatcher expression goes to
+// dispatch.
+//
+// To be precise about what was measured, since an earlier version of this
+// comment overstated it: for the WORKSPACE move both verbs work (7 of 7
+// each), so dispatch here is a choice, not a necessity. For the WINDOW move
+// the choice is forced: only the eval route is safe (see
+// windowMoveExpression). Keeping the decision in one tested function is why
+// Panel.qml does not carry it as an inline string comparison.
+function verbFor(payload) {
+    return String(payload).indexOf("hl.dsp.") === 0 ? "dispatch" : "eval";
+}
+
+function buildReconcileChunks(model, workspacesNow, matches) {
+    var out = [], i;
+
+    var moves = workspaceMoves(model, workspacesNow);
+    for (i = 0; i < moves.length; i++) out.push(workspaceMoveExpression(moves[i]));
+
+    // Object.create(null), not {} -- the same reason as everywhere else in
+    // this file. ID_RE forbids the underscore in "__proto__", so a plain {}
+    // would in fact be safe for this particular map today, but that safety
+    // would depend on a fact living in a different function; keeping every
+    // map in this file prototype-less is what makes that reasoning
+    // unnecessary to redo on every read.
+    var byId = Object.create(null);
+    var programs = (model && model.programs) || [];
+    for (i = 0; i < programs.length; i++) byId[programs[i].id] = programs[i];
+
+    var hits = matches || [];
+    for (i = 0; i < hits.length; i++) {
+        var program = byId[hits[i].id];
+        if (!program) continue;
+        var placement = program.placement;
+        if (!placement || placement.kind === "none") continue;
+        if (!ADDRESS_RE.test(hits[i].address)) {
+            throw new Error("buildReconcileChunks: refusing address " + hits[i].address);
+        }
+        out.push(windowMoveExpression(hits[i].address, placement));
+    }
+    return out;
+}
+
+// Which enabled programs have no window at all. Basis for [Launch missing];
+// the reconcile itself never starts anything, because saving should not open
+// windows.
+function missingIds(model, matches) {
+    // Object.create(null) rather than {} -- see the note in validate(): a key
+    // of "__proto__" reads back as Object.prototype from a plain object.
+    var seen = Object.create(null), out = [], i;
+    var hits = matches || [];
+    for (i = 0; i < hits.length; i++) seen[hits[i].id] = true;
+    var programs = (model && model.programs) || [];
+    for (i = 0; i < programs.length; i++) {
+        if (programs[i].enabled && !seen[programs[i].id]) out.push(programs[i].id);
+    }
+    return out;
+}

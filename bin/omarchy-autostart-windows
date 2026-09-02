@@ -12,32 +12,100 @@ set -uo pipefail
 
 HYPRCTL="${HYPRCTL:-hyprctl}"
 MAX_WINDOWS=500
+MAX_WORKSPACES=99
+MAX_PROGRAMS=200
 
-monitors="$("$HYPRCTL" -j monitors 2>/dev/null)" || monitors=""
-clients="$("$HYPRCTL" -j clients  2>/dev/null)" || clients=""
+cmd_list_json() {
+    local monitors clients
+    monitors="$("$HYPRCTL" -j monitors 2>/dev/null)" || monitors=""
+    clients="$("$HYPRCTL" -j clients  2>/dev/null)" || clients=""
 
-if [[ -z "$clients" ]] || ! jq -e 'type == "array"' <<<"$clients" >/dev/null 2>&1; then
-    echo "[]"
-    exit 0
-fi
-jq -e 'type == "array"' <<<"$monitors" >/dev/null 2>&1 || monitors="[]"
+    if [[ -z "$clients" ]] || ! jq -e 'type == "array"' <<<"$clients" >/dev/null 2>&1; then
+        echo "[]"
+        return 0
+    fi
+    jq -e 'type == "array"' <<<"$monitors" >/dev/null 2>&1 || monitors="[]"
 
-jq -c --argjson mon "$monitors" --argjson max "$MAX_WINDOWS" '
-    # monitors travels through --argjson (argv) while clients is streamed
-    # through stdin to respect the MAX_ARG_STRLEN limit. A monitor list is
-    # bounded by physical hardware and will never approach that limit;
-    # streaming a second input here would need a temporary file with its own
-    # cleanup -- more machinery than the inconsistency costs. Kept on purpose.
-    ( $mon | map(select(type == "object"))
-           | map({ key: (.id | tostring), value: .name }) | from_entries ) as $names
-    | map(select(type == "object"))
-    | map(select((.workspace.id // 0) > 0))
-    | .[0:$max]
-    | map({
-        address:   (.address // ""),
-        class:     (.class // ""),
-        title:     (.title // ""),
-        workspace: ((.workspace.id // 0) | tostring),
-        monitor:   ($names[(.monitor // -1) | tostring] // "")
-      })
-' <<<"$clients"
+    jq -c --argjson mon "$monitors" --argjson max "$MAX_WINDOWS" '
+        # monitors travels through --argjson (argv) while clients is streamed
+        # through stdin to respect the MAX_ARG_STRLEN limit. A monitor list is
+        # bounded by physical hardware and will never approach that limit;
+        # streaming a second input here would need a temporary file with its own
+        # cleanup -- more machinery than the inconsistency costs. Kept on purpose.
+        ( $mon | map(select(type == "object"))
+               | map({ key: (.id | tostring), value: .name }) | from_entries ) as $names
+        | map(select(type == "object"))
+        | map(select((.workspace.id // 0) > 0))
+        | .[0:$max]
+        | map({
+            address:   (.address // ""),
+            class:     (.class // ""),
+            title:     (.title // ""),
+            workspace: ((.workspace.id // 0) | tostring),
+            monitor:   ($names[(.monitor // -1) | tostring] // "")
+          })
+    ' <<<"$clients"
+}
+
+cmd_workspaces() {
+    local workspaces
+    workspaces="$("$HYPRCTL" -j workspaces 2>/dev/null)" || workspaces=""
+    if [[ -z "$workspaces" ]] || ! jq -e 'type == "array"' <<<"$workspaces" >/dev/null 2>&1; then
+        echo "[]"; exit 0
+    fi
+    jq -c --argjson max "$MAX_WORKSPACES" '
+        map(select((.id // 0) > 0))
+        | .[0:$max]
+        | map({ workspace: ((.id // 0) | tostring), monitor: (.monitor // "") })
+    ' <<<"$workspaces"
+}
+
+# Match each program's class regex against the open windows.
+#
+# The regex is evaluated HERE, by grep -E, and nowhere else. grep -E runs an
+# automaton: it does not backtrack, so a class such as ^(a+)+$ costs linear
+# time instead of hanging the caller. JavaScript RegExp would backtrack, and
+# QML gives JavaScript no timeout to be rescued by.
+cmd_match_file() {
+    local file="$1"
+    [[ -f "$file" ]] || { echo "[]"; exit 0; }
+
+    local windows; windows="$(cmd_list_json)"
+    local classes; classes="$(jq -r '.[] | .class' <<<"$windows")"
+
+    # The hand-over file carries `id<TAB>class-regex` per line. That is only
+    # unambiguous because the class allowlist in Model.js contains no tab --
+    # anyone widening it must revisit this, or a tab in a class would split a
+    # line into the wrong fields. Task 6 was bitten by exactly that shape when
+    # a value from /usr/share/applications contained a tab. The id side is
+    # ours ([a-z0-9]{1,16}), and `read` assigns the remainder of the line to
+    # the last variable, so a tab surviving into the regex would stay intact
+    # rather than shift a field.
+    local lines=0
+    {
+        while IFS=$'\t' read -r id regex; do
+            [[ -n "$id" && -n "$regex" ]] || continue
+            lines=$((lines + 1))
+            (( lines > MAX_PROGRAMS )) && break
+            # Feed the classes in and keep the line numbers, so the match maps
+            # back to the window without a second pass over the JSON.
+            while IFS= read -r hit; do
+                printf '%s\t%s\n' "$id" "$hit"
+            done < <(printf '%s\n' "$classes" | grep -n -E -- "$regex" 2>/dev/null | cut -d: -f1)
+        done < "$file"
+    } | jq -R -s --argjson w "$windows" '
+        split("\n") | map(select(length > 0) | split("\t"))
+        | map({ id: .[0], window: $w[(.[1] | tonumber) - 1] })
+        | map(select(.window != null))
+        | map({ id, address: .window.address, class: .window.class,
+                workspace: .window.workspace, monitor: .window.monitor })
+    '
+}
+
+case "${1:-}" in
+    "")           cmd_list_json ;;
+    --workspaces) cmd_workspaces ;;
+    --match-file) shift; [[ -n "${1:-}" ]] || { echo "usage: ${0##*/} --match-file <path>" >&2; exit 2; }
+                  cmd_match_file "$1" ;;
+    *)            echo "usage: ${0##*/} [--workspaces | --match-file <path>]" >&2; exit 2 ;;
+esac

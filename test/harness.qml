@@ -387,6 +387,86 @@ QtObject {
                   Model.workspaceMoves(Model.validate(cfg([], [{ workspace: "8", monitor: "DP-3" }])),
                                        [{ workspace: "2", monitor: "DP-3" }]).length, 0);
 
+            // --- reconcile -----------------------------------------------------
+            check("reconcile: a workspace move becomes a dispatcher expression",
+                  (function() {
+                      var m = Model.validate(cfg([], [{ workspace: "2", monitor: "DP-3" }]));
+                      var c = Model.buildReconcileChunks(m, [{ workspace: "2", monitor: "DP-4" }], []);
+                      return c.length === 1 && c[0].indexOf("hl.dsp.workspace.move") !== -1;
+                  })(), true);
+
+            check("reconcile: a matched window is moved by address, not by class",
+                  (function() {
+                      var m = Model.validate(cfg([prog({ id: "p1" })], []));
+                      var c = Model.buildReconcileChunks(m, [], [{ id: "p1", address: "0xdead" }]);
+                      var joined = c.join("\n");
+                      return joined.indexOf("0xdead") === -1     // encoded, not literal
+                          && joined.indexOf("cursor") === -1     // the class never travels
+                          && joined.indexOf("hl.dsp.window.move") !== -1;
+                  })(), true);
+
+            check("reconcile: no quotes in any expression",
+                  (function() {
+                      var m = Model.validate(cfg([prog({ id: "p1" })], [{ workspace: "2", monitor: "DP-3" }]));
+                      var c = Model.buildReconcileChunks(m, [{ workspace: "2", monitor: "DP-4" }],
+                                                         [{ id: "p1", address: "0xbeef" }]);
+                      for (var i = 0; i < c.length; i++) if (c[i].indexOf('"') !== -1) return "chunk " + i;
+                      return "clean";
+                  })(), "clean");
+
+            check("reconcile: a program without placement is not moved",
+                  Model.buildReconcileChunks(Model.validate(cfg([prog({ placement: { kind: "none" } })], [])),
+                                             [], [{ id: "p1", address: "0xbeef" }]).length, 0);
+
+            // --- verbFor: the three measured shapes ----------------------------
+            //
+            // Task 1 measured that the two move kinds need DIFFERENT hyprctl
+            // verbs. verbFor is the only place that decides, so it is the only
+            // place that has to be right -- and Panel.qml calls it rather than
+            // repeating the rule.
+            check("verbFor: a rule block goes to eval",
+                  Model.verbFor(Model.buildRuleChunks(Model.validate(cfg([], []))) [0]), "eval");
+            check("verbFor: a window move goes to eval (hl.dispatch wrapper)",
+                  Model.verbFor(Model.buildReconcileChunks(
+                      Model.validate(cfg([prog({ id: "p1" })], [])),
+                      [], [{ id: "p1", address: "0xbeef" }])[0]), "eval");
+            check("verbFor: a workspace move goes to dispatch (bare dispatcher)",
+                  Model.verbFor(Model.buildReconcileChunks(
+                      Model.validate(cfg([], [{ workspace: "2", monitor: "DP-3" }])),
+                      [{ workspace: "2", monitor: "DP-4" }], [])[0]), "dispatch");
+
+            // The window move resolves the address first and moves only if the
+            // window still exists. Without this guard a vanished window makes the
+            // move land on an unrelated one -- measured, not theorised: during
+            // task 1 an unguarded move relocated two of the user's own windows.
+            check("reconcile: the window move never passes the address as a selector",
+                  Model.buildReconcileChunks(Model.validate(cfg([prog({ id: "p1" })], [])),
+                                             [], [{ id: "p1", address: "0xbeef" }])[0]
+                      .indexOf("hl.get_window(") === -1, true);
+            check("reconcile: the window move enumerates and compares on the object",
+                  /for _, w in ipairs\(hl\.get_windows\(\{\}\)\) do if w\.address == string\.char\(/.test(
+                      Model.buildReconcileChunks(Model.validate(cfg([prog({ id: "p1" })], [])),
+                                                 [], [{ id: "p1", address: "0xbeef" }])[0]), true);
+            check("reconcile: the window move never uses the bare dispatch route",
+                  Model.verbFor(Model.buildReconcileChunks(
+                      Model.validate(cfg([prog({ id: "p1" })], [])),
+                      [], [{ id: "p1", address: "0xbeef" }])[0]), "eval");
+
+            checkThrows("reconcile: a malformed address is refused",
+                        function() {
+                            Model.buildReconcileChunks(Model.validate(cfg([prog({ id: "p1" })], [])),
+                                                       [], [{ id: "p1", address: "0x1; evil()" }]);
+                        }, /refusing address/);
+
+            // --- missingIds ----------------------------------------------------
+            check("missingIds: an enabled program with no window is missing",
+                  Model.missingIds(Model.validate(cfg([prog({ id: "p1" })], [])), []).length, 1);
+            check("missingIds: an enabled program with a window is not missing",
+                  Model.missingIds(Model.validate(cfg([prog({ id: "p1" })], [])),
+                                   [{ id: "p1", address: "0x1" }]).length, 0);
+            check("missingIds: a disabled program is never missing",
+                  Model.missingIds(Model.validate(cfg([prog({ id: "p1", enabled: false })], [])), []).length, 0);
+
             console.warn("total=" + total + " failed=" + failed);
             Qt.exit(failed === 0 ? 0 : 1);
         } catch (e) {
