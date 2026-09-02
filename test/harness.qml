@@ -4,7 +4,7 @@ import "../Model.js" as Model
 QtObject {
     Component.onCompleted: {
         var failed = 0, total = 0;
-        var currentTestName = "";
+        var currentTestName = "";  // Can be one test behind: check(name, got, want) evaluates got before check is entered
 
         function check(name, got, want) {
             total++;
@@ -18,6 +18,10 @@ QtObject {
         }
 
         function checkThrows(name, fn, expectedPattern) {
+            if (!expectedPattern) {
+                throw new Error("checkThrows('" + name + "') was called without an expected "
+                                + "message pattern -- without one, any exception counts as a pass");
+            }
             total++;
             currentTestName = name;
             try {
@@ -26,7 +30,7 @@ QtObject {
                 console.warn("FAIL " + name + " -- expected a throw, got none");
             } catch (e) {
                 var message = String((e && e.message) || e);
-                if (expectedPattern && !expectedPattern.test(message)) {
+                if (!expectedPattern.test(message)) {
                     failed++;
                     console.warn("FAIL " + name + " -- threw the wrong error\n       got  " + message
                                  + "\n       want a message matching " + expectedPattern);
@@ -61,8 +65,10 @@ QtObject {
             console.warn("total=" + total + " failed=" + failed);
             Qt.exit(failed === 0 ? 0 : 1);
         } catch (e) {
-            var message = String((e && e.message) || e);
-            console.warn("ERROR: harness broke in test '" + currentTestName + "': " + message);
+            var brokeWith = String((e && e.message) || e);
+            console.warn("ERROR: harness broke after test '" + (currentTestName || "<none yet>")
+                         + "' -- the throw came either from that test or while evaluating the "
+                         + "arguments of the one after it: " + brokeWith);
             Qt.exit(3);
         }
     }
