@@ -32,7 +32,7 @@ Diese gelten für **jede** Aufgabe, auch wenn sie dort nicht wiederholt werden.
 - **Zwei Aufrufwege:** `hypr(verb, payload)` ohne Shell (argv-Liste, Deadline 20 s) für alles, was mit Hyprland spricht — beide Verben nötig, `eval` für Regelblöcke, `dispatch` für Umzüge; `runner()`/`runnerOut()`/`runnerErr()` mit `/usr/bin/bash` (Deadline 120 s) für den Autostart und die eigenen `bin/`-Skripte. Absolute Pfade zu `/usr/bin/timeout` und `/usr/bin/bash`, `timeout -k 5`, `head -c 262144` auf eingesammeltes stdout, stderr über Prozess-Substitution.
 - **Grenzen stehen in den Helfern, nicht an den Aufrufstellen.**
 - **`Component.onDestruction` beendet jeden `Process`.**
-- **Testläufer:** `QT_FORCE_STDERR_LOGGING=1 QT_QPA_PLATFORM=offscreen /usr/lib/qt6/bin/qml`. `/usr/bin/qml` ist Qt 5.15 und scheitert **still** mit Status 1 — nie darauf zurückfallen.
+- **Testläufer:** `QT_FORCE_STDERR_LOGGING=1 QT_QPA_PLATFORM=offscreen /usr/bin/timeout -k 5 120 /usr/lib/qt6/bin/qml`. Vier Ausgangsstati: **0** grün, **1** ein Test rot, **2** kann nicht starten, **3** das Gerüst selbst gescheitert. `/usr/bin/qml` ist Qt 5.15, lädt das Gerüst nicht und endet mit Status 2 — nie darauf zurückfallen. Das Werkzeug, das **still** mit Status 1 endet, ist `/usr/bin/qmltestrunner`.
 - **Nach jeder QML-Änderung `omarchy-restart-shell`**, dann ~8 s warten, bevor gemessen wird (der inotify-Wächter lädt die Shell neu und reißt laufende `Process`-Objekte mit).
 - **Jeder Strukturtest bekommt eine Mutationsprobe**, die ihn rot macht, und die Probe muss den geprüften Pfad wirklich erreichen.
 
@@ -239,7 +239,7 @@ Das Testgerüst kommt zuerst, nicht zuletzt. Bei `smartalb.vpn` blieb der vierte
 
 **Interfaces:**
 - Consumes: nichts.
-- Produces: `Model.luaBytes(s) -> string` (wirft bei Bytes außerhalb 1–126); `test/run-qml-tests.sh` als Läufer für alle folgenden `Model.js`-Tests; die Prüf-Hilfen `check(name, got, want)` und `checkThrows(name, fn)` im Gerüst.
+- Produces: `Model.luaBytes(s) -> string` (wirft bei Bytes außerhalb 1–126); `test/run-qml-tests.sh` als Läufer für alle folgenden `Model.js`-Tests; die Prüf-Hilfen `check(name, got, want)` und `checkThrows(name, fn, expectedPattern)` im Gerüst — das Muster ist **verpflichtend**, ein Aufruf ohne wirft und endet mit Status 3.
 
 - [ ] **Step 1: Den fehlschlagenden Test schreiben**
 
@@ -255,6 +255,7 @@ QtObject {
 
         function check(name, got, want) {
             total++;
+            currentTestName = name;
             if (got !== want) {
                 failed++;
                 console.warn("FAIL " + name + "\n       got  " + got + "\n       want " + want);
@@ -263,14 +264,31 @@ QtObject {
             }
         }
 
-        function checkThrows(name, fn) {
+        // The pattern is mandatory. Without it a test with a typo throws a
+        // TypeError and reports ok -- dead, but looking alive. Such a test is
+        // not a failing test, it is a broken one, so it surfaces as the
+        // harness breaking (status 3) rather than as a red test.
+        function checkThrows(name, fn, expectedPattern) {
+            if (!expectedPattern) {
+                throw new Error("checkThrows('" + name + "') was called without an "
+                                + "expected message pattern -- without one, any "
+                                + "exception counts as a pass");
+            }
             total++;
+            currentTestName = name;
             try {
                 fn();
                 failed++;
                 console.warn("FAIL " + name + " -- expected a throw, got none");
             } catch (e) {
-                console.warn("ok   " + name);
+                var message = String((e && e.message) || e);
+                if (!expectedPattern.test(message)) {
+                    failed++;
+                    console.warn("FAIL " + name + " -- threw the wrong error\n       got  "
+                                 + message + "\n       want a message matching " + expectedPattern);
+                } else {
+                    console.warn("ok   " + name);
+                }
             }
         }
 
@@ -288,22 +306,36 @@ QtObject {
               Model.luaBytes("a}b").indexOf("}"), -1);
         check("luaBytes payload is digits and commas only",
               /^string\.char\([0-9,]+\)$/.test(Model.luaBytes("^(cursor)$")), true);
+        check("luaBytes accepts byte 126",
+              Model.luaBytes(String.fromCharCode(126)), "string.char(126)");
+        checkThrows("luaBytes refuses byte 0",
+                    function() { Model.luaBytes(String.fromCharCode(0)); }, /byte out of range/);
+        checkThrows("luaBytes refuses byte 127",
+                    function() { Model.luaBytes(String.fromCharCode(127)); }, /byte out of range/);
         checkThrows("luaBytes refuses non-ascii",
-                    function() { Model.luaBytes("café"); });
+                    function() { Model.luaBytes("café"); }, /byte out of range/);
 
         console.warn("total=" + total + " failed=" + failed);
         Qt.exit(failed === 0 ? 0 : 1);
         } catch (e) {
             var brokeWith = String((e && e.message) || e);
-            console.warn("ERROR: harness broke in test '" + currentTestName + "': " + brokeWith);
+            console.warn("ERROR: harness broke after test '"
+                         + (currentTestName || "<none yet>")
+                         + "' -- the throw came either from that test or while "
+                         + "evaluating the arguments of the one after it: " + brokeWith);
             Qt.exit(3);
         }
     }
 }
 ```
 
-Beide Prüf-Hilfen setzen `currentTestName = name` als erstes, damit die
-Fehlermeldung sagt, *wo* es gebrochen ist.
+Beide Prüf-Hilfen setzen `currentTestName = name`. Achtung auf die Grenze
+dieser Diagnose: `check(name, got, want)` wertet `got` **vor** dem Eintritt in
+`check` aus, ein Wurf in der Argumentauswertung erreicht die Zuweisung also
+nie und der Name hängt einen Test zurück. Deshalb ist die Meldung als „broke
+**after** test X" formuliert und nennt beide Möglichkeiten — sie behauptet
+nicht, den Schuldigen zu kennen. Der Ausnahmetext steht daneben und
+identifiziert ihn meist.
 
 `test/run-qml-tests.sh`:
 
@@ -412,8 +444,9 @@ git add Model.js test/harness.qml test/run-qml-tests.sh
 git commit -m "test: headless Model.js harness, plus luaBytes
 
 The runner resolves the Qt6 qml binary and refuses to run without it --
-/usr/bin/qml is Qt 5.15 here and exits 1 with no output, which is
-indistinguishable from a failing suite."
+/usr/bin/qml here is Qt 5.15 and cannot load the harness at all; it exits 2,
+colliding with the runner's own "cannot run". The tool that dies silently with
+status 1 is /usr/bin/qmltestrunner."
 ```
 
 ---
@@ -1759,7 +1792,7 @@ In `test/harness.qml` einfügen:
         checkThrows("chunks: a non-ascii class cannot be encoded",
                     function() {
                         Model.buildRuleChunks({ programs: [prog({ "class": "café" })], workspaces: [] });
-                    });
+                    }, /byte out of range/);
 
         // Panel.qml picks the hyprctl verb by looking at the payload's first
         // characters: a rule block goes to eval, a dispatcher expression to
@@ -2445,7 +2478,7 @@ In `test/harness.qml`:
                     function() {
                         Model.buildReconcileChunks(Model.validate(cfg([prog({ id: "p1" })], [])),
                                                    [], [{ id: "p1", address: "0x1; evil()" }]);
-                    });
+                    }, /refusing address/);
 
         // --- missingIds ----------------------------------------------------
         check("missingIds: an enabled program with no window is missing",
@@ -3929,9 +3962,9 @@ In `test/harness.qml`:
         check("classLiteral: the result passes the allowlist",
               Model.CLASS_RE.test(Model.classLiteral("LM-Studio")), true);
         checkThrows("classLiteral: a class with a quote is refused",
-                    function() { Model.classLiteral('a"b'); });
+                    function() { Model.classLiteral('a"b'); }, /classLiteral: refusing/);
         checkThrows("classLiteral: a non-ascii class is refused",
-                    function() { Model.classLiteral("café"); });
+                    function() { Model.classLiteral("café"); }, /classLiteral: refusing/);
 
         // --- guessCommand --------------------------------------------------
         var apps = [{ name: "Cursor", exec: "cursor %U", wmclass: "cursor", icon: "" },
@@ -4383,7 +4416,7 @@ Auf Englisch, und ohne die Wörter, die die Baseline als Capability liest. Diese
 7. **Development** — die drei Fallen, jede mit dem Symptom, an dem man sie erkennt:
    - Nach jeder QML-Änderung `omarchy-restart-shell`. Der Develop-Guide sagt „saved changes reload automatically"; für Bar-Widgets stimmt das nicht. Symptom: das Journal schreibt `Local plugin changed, reloading`, das Widget verhält sich aber wie die alte Fassung, und eingebaute Diagnose-Ausgaben feuern nicht.
    - Nach dem Anfassen einer Plugin-Datei ~8 s warten, bevor man messt: der inotify-Wächter lädt die Shell neu und reißt laufende `Process`-Objekte mit. Symptom im Journal: `another handler is registered for target`.
-   - Für die Testsuite `/usr/lib/qt6/bin/qml` benutzen. `/usr/bin/qml` ist auf Arch Qt 5.15 und endet **ohne jede Ausgabe** mit Status 1 — nicht von einer fehlgeschlagenen Suite zu unterscheiden.
+   - Für die Testsuite `/usr/lib/qt6/bin/qml` benutzen. `/usr/bin/qml` ist auf Arch Qt 5.15, lädt das Gerüst nicht und endet mit Status 2 — was mit dem eigenen „kann nicht starten" des Läufers kollidiert. Das Werkzeug, das **ohne jede Ausgabe** mit Status 1 endet, ist `/usr/bin/qmltestrunner`; deshalb wird es nicht benutzt. Die vier Ausgangsstati des Läufers: 0 grün, 1 ein Test rot, 2 kann nicht starten, 3 das Gerüst selbst gescheitert.
 8. **Tests** — `./test/run-tests.sh`, `./test/run-qml-tests.sh`, `./test/mutations.sh`.
 
 - [ ] **Step 6: `test/mutations.sh` schreiben**
