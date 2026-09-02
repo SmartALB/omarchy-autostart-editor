@@ -116,48 +116,74 @@ else
   ok "runnerErr does not close its group with a semicolon against the brace"
 fi
 
-# 5a -- cheap first line: no bare array literal starts on the same line as
-#       "command:". Kept alongside 5b even though 5b subsumes it -- two
-#       cheap checks that can disagree are easier to diagnose than one
-#       clever one that might be wrong in a new way.
-hits="$(grep_stripped_all '^[[:space:]]*command:[[:space:]]*\[' || true)"
-[[ -z "$hits" ]] && ok "no bare array literal on the same line as command:" \
-                 || bad "no bare array literal on the same line as command:" "$hits"
+# 5 -- every "command:" occurrence goes through THIS FILE'S OWN vetted
+#      Runners instance, and never as a bare array. Checked once per
+#      OCCURRENCE of "command:" on a line, not once per line: both halves
+#      used to be anchored to the START of a line ("^[[:space:]]*command:"),
+#      which only ever sees a "command:" that IS the first thing on its
+#      line. Two Process blocks sharing one physical line -- Process { id:
+#      a; command: run.tool("x") } Process { id: b; command: run.tool("y")
+#      } -- is an idiomatic QML one-liner a real author would write (it is
+#      exactly the shape check 6 already had to be fixed for, in the
+#      previous round), and it put the file's SECOND "command:" entirely
+#      outside an anchored pattern's view -- as would a single "command:"
+#      that simply is not the first token on its line for any other reason.
+#      Both checks below now scan every occurrence on a line via
+#      command_occurrences(), never a single line-anchored match, and each
+#      occurrence is judged independently -- a line with two commands only
+#      passes if BOTH do.
+command_occurrences() {
+  # $1 = one comment-stripped line. Emits, one per output line, the text
+  # immediately following each "command:" occurrence on it, to end of line
+  # -- there can be more than one. "command:" must not be preceded by an
+  # identifier character (the "(^|[^A-Za-z0-9_])" alternation), so a
+  # hypothetical "subCommand:" property is not mistaken for one; this is
+  # the same boundary care already used for helper-name matching elsewhere
+  # in this file.
+  awk '
+    {
+      s = $0
+      while (match(s, /(^|[^A-Za-z0-9_])command:/)) {
+        print substr(s, RSTART + RLENGTH)
+        s = substr(s, RSTART + RLENGTH)
+      }
+    }
+  ' <<<"$1"
+}
 
-# 5b -- every Process command: goes through a helper, anchored, and through
-#       THIS FILE'S OWN vetted instance -- not just a name that happens to
-#       match. Naming alone was still gameable: a locally shadowed
-#       "function tool(raw) { return [...] }" satisfies a check that only
-#       verifies the NAME "tool(", and so does an unrelated object,
-#       "legacyToolbox.tool(...)". Neither can be told apart from the real
-#       thing by a name-only check. What CAN be checked without a parser is
-#       origin: this file's own "Runners { id: X }" declaration names the
-#       one instance that was actually wired up, and a call is only trusted
-#       if it is dot-qualified by exactly that id (whitespace around the dot
-#       is fine -- "root . tool(...)" is ordinary QML, not a decoy). A bare
-#       "tool(" (no qualifier) is rejected outright -- it cannot be told
-#       apart from a shadowed local function, so it is never trusted, real
-#       or not. A qualifier that is not the declared instance is rejected.
-#       A file with a "command:" but no "Runners { id: ... }" declaration at
-#       all fails, since there is then no vetted instance to have called.
-#       Falls through to the next line only when nothing at all follows
-#       "command:" on its own line (a "[" or a call wrapped onto the next
-#       line).
-#
-#       This still only verifies the TEXT of the call site, not that the
-#       object it is called on actually resolves to the real Runners
-#       component at runtime, and it takes the file's FIRST "Runners { id:
-#       ... }" declaration if more than one exists -- verifying resolution
-#       needs a parser, and this script is deliberately not one; see the
-#       header.
 trim() { local t="$1"; t="${t#"${t%%[![:space:]]*}"}"; t="${t%"${t##*[![:space:]]}"}"; printf '%s' "$t"; }
+
+# Origin-qualification for 5b: a locally shadowed "function tool(raw) {
+# return [...] }" satisfies a check that only verifies the NAME "tool(",
+# and so does an unrelated object, "legacyToolbox.tool(...)". Neither can
+# be told apart from the real thing by a name-only check. What CAN be
+# checked without a parser is origin: this file's own "Runners { id: X }"
+# declaration names the one instance that was actually wired up, and a call
+# is only trusted if it is dot-qualified by exactly that id (whitespace
+# around the dot is fine -- "root . tool(...)" is ordinary QML, not a
+# decoy). A bare "tool(" (no qualifier) is rejected outright -- it cannot
+# be told apart from a shadowed local function, so it is never trusted,
+# real or not. A qualifier that is not the declared instance is rejected. A
+# file with a "command:" but no "Runners { id: ... }" declaration at all
+# fails, since there is then no vetted instance to have called.
+#
+# This still only verifies the TEXT of the call site, not that the object
+# it is called on actually resolves to the real Runners component at
+# runtime, and it takes the file's FIRST "Runners { id: ... }" declaration
+# if more than one exists -- verifying resolution needs a parser, and this
+# script is deliberately not one; see the header.
 runners_instance_id() {
   # $1 = comment-stripped file content. Prints the id of the file's first
-  # "Runners { id: X }" declaration (X on the same line or a following one,
-  # same shape as the Process id-detection below), or nothing if nine is
-  # found.
+  # "Runners { id: X }" declaration (X on the same line or a following
+  # one), or nothing if none is found. Unanchored and boundary-aware, like
+  # command_occurrences() above: "Runners {" can legitimately appear
+  # anywhere on a line (Item { Runners { id: runners } ... } is ordinary
+  # QML, not only "Runners {" as the first thing on its own line), and the
+  # boundary check keeps a type merely ending in "...Runners" (a
+  # hypothetical "MyRunners {") from being mistaken for the genuine
+  # component.
   awk '
-      /^[[:space:]]*Runners[[:space:]]*\{/ { inrun = 1 }
+      /(^|[^A-Za-z0-9_])Runners[[:space:]]*\{/ { inrun = 1 }
       inrun && /id:[[:space:]]*[A-Za-z_]/ {
           match($0, /id:[[:space:]]*[A-Za-z_][A-Za-z0-9_]*/)
           s = substr($0, RSTART, RLENGTH); sub(/id:[[:space:]]*/, "", s)
@@ -165,7 +191,9 @@ runners_instance_id() {
       }
   ' <<<"$1"
 }
-hits=""
+
+hits_5a=""
+hits_5b=""
 for f in $(qml_files); do
   clean="$(strip_comments "$f")"
   mapfile -t lines <<<"$clean"
@@ -173,29 +201,49 @@ for f in $(qml_files); do
   runners_id="$(runners_instance_id "$clean")"
   for ((i = 0; i < n; i++)); do
     line="${lines[$i]}"
-    [[ "$line" =~ ^[[:space:]]*command:(.*)$ ]] || continue
-    rest="$(trim "${BASH_REMATCH[1]}")"
-    if [[ -n "$rest" ]]; then
-      candidate="$rest"
-    else
-      nextline=""
-      (( i + 1 < n )) && nextline="$(trim "${lines[$((i + 1))]}")"
-      candidate="$nextline"
-    fi
-    if [[ -z "$runners_id" ]]; then
-      hits="$hits
-$f:$((i + 1)): ${line} (no Runners { id: ... } declaration found in this file)"
-      continue
-    fi
-    helper_anchor_pat="^${runners_id}[[:space:]]*\.[[:space:]]*(runner|runnerOut|runnerErr|hypr|tool)\("
-    if [[ ! "$candidate" =~ $helper_anchor_pat ]]; then
-      hits="$hits
+    [[ "$line" == *command:* ]] || continue
+    while IFS= read -r occ; do
+      same="$(trim "$occ")"
+
+      # 5a -- cheap: a bare array literal starting right after THIS
+      # occurrence of command:. Kept alongside 5b even though 5b subsumes
+      # it -- two cheap checks that can disagree are easier to diagnose
+      # than one clever one that might be wrong in a new way.
+      if [[ "$same" == \[* ]]; then
+        hits_5a="$hits_5a
 $f:$((i + 1)): ${line}"
-    fi
+      fi
+
+      # 5b -- anchored to THIS occurrence, origin-qualified. Falls through
+      # to the next line only when nothing at all follows this particular
+      # "command:" on its own line (a "[" or a call wrapped onto the next
+      # line) -- not when a LATER "command:" occurrence on the same line
+      # has content; that later occurrence is judged on its own next time
+      # around this loop.
+      if [[ -n "$same" ]]; then
+        candidate="$same"
+      else
+        nextline=""
+        (( i + 1 < n )) && nextline="$(trim "${lines[$((i + 1))]}")"
+        candidate="$nextline"
+      fi
+      if [[ -z "$runners_id" ]]; then
+        hits_5b="$hits_5b
+$f:$((i + 1)): ${line} (no Runners { id: ... } declaration found in this file)"
+      else
+        helper_anchor_pat="^${runners_id}[[:space:]]*\.[[:space:]]*(runner|runnerOut|runnerErr|hypr|tool)\("
+        if [[ ! "$candidate" =~ $helper_anchor_pat ]]; then
+          hits_5b="$hits_5b
+$f:$((i + 1)): ${line}"
+        fi
+      fi
+    done < <(command_occurrences "$line")
   done
 done
-[[ -z "$hits" ]] && ok "every Process command begins with a call on this file's own Runners instance" \
-                 || bad "every Process command begins with a call on this file's own Runners instance" "$hits"
+[[ -z "$hits_5a" ]] && ok "no bare array literal right after any command: occurrence" \
+                     || bad "no bare array literal right after any command: occurrence" "$hits_5a"
+[[ -z "$hits_5b" ]] && ok "every Process command begins with a call on this file's own Runners instance" \
+                     || bad "every Process command begins with a call on this file's own Runners instance" "$hits_5b"
 
 # 6 -- teardown covers every declared Process with an actual statement, not
 #      merely a mention -- a comment like "// also stop barProc" used to
@@ -243,7 +291,37 @@ for file in $(qml_files); do
         "found $proc_count Process block(s) (opener count) but extracted only $id_count id(s) -- an id this script cannot read cannot be verified as stopped in teardown"
   fi
   [[ -z "$ids" ]] && continue
-  teardown="$(awk '/Component.onDestruction/,/^[[:space:]]*\}/' <<<"$clean")"
+  # Brace-depth extraction, not a /start/,/end/ range: a range whose END
+  # pattern is "a line starting with }" never matches when the WHOLE
+  # onDestruction block is one line -- "Component.onDestruction: { a.running
+  # = false }" is ordinary QML for a single-Process file, and the old range
+  # then stayed "open" until the file's very last closing brace, silently
+  # absorbing everything after it as if it were still inside teardown.
+  # Counting braces from the opening line closes the block at its own "}"
+  # regardless of how many lines that takes -- coarse (a brace inside a
+  # string would confuse it), but the only strings this script ever expects
+  # inside a teardown block are shell commands, which have no reason to
+  # carry one.
+  teardown="$(awk '
+      BEGIN { capturing = 0; depth = 0 }
+      {
+          line = $0
+          if (!capturing) {
+              if (line !~ /Component\.onDestruction/) next
+              capturing = 1
+          }
+          print line
+          n = length(line)
+          for (i = 1; i <= n; i++) {
+              c = substr(line, i, 1)
+              if (c == "{") depth++
+              else if (c == "}") {
+                  depth--
+                  if (depth <= 0) { capturing = 0; i = n + 1 }
+              }
+          }
+      }
+  ' <<<"$clean")"
   for id in $ids; do
     stop_pat="\\b${id}\\.running[[:space:]]*=[[:space:]]*false\\b"
     grep -qE "$stop_pat" <<<"$teardown" \
