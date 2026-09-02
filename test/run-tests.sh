@@ -45,8 +45,13 @@ test_teardown_restores_the_environment() {
     teardown_sandbox
     assert_eq "teardown: TMPDIR is what it was before" "${TMPDIR-$'\x01unset'}" "$before_tmpdir"
     assert_eq "teardown: HOME is what it was before" "${HOME-$'\x01unset'}" "$before_home"
+    # mktemp -u only prints a name -- it never touches the filesystem, so it
+    # cannot see that TMPDIR points at a directory teardown_sandbox just
+    # deleted, and this assertion would pass even with the restore loop
+    # removed entirely (confirmed by probe). Create for real instead: that
+    # forces mktemp to resolve TMPDIR against an actual write.
     assert_eq "teardown: mktemp works again afterwards" \
-              "$(mktemp -u >/dev/null 2>&1 && echo ok || echo broken)" "ok"
+              "$(probe_file="$(mktemp 2>/dev/null)" && [[ -f "$probe_file" ]] && { rm -f "$probe_file"; echo ok; } || echo broken)" "ok"
 }
 
 test_teardown_restores_the_environment
