@@ -160,13 +160,16 @@ test_read_leaves_no_temp_file() {
     teardown_sandbox
 }
 
-test_every_error_path_yields_exactly_one_envelope() {
+test_every_path_yields_exactly_one_envelope() {
     setup_sandbox
     local f="$XDG_CONFIG_HOME/omarchy/autostart-layout.json"
     local label out count
     # Each of these drives the script down a different path; every one of
     # them must answer with exactly one JSON object carrying an "ok" field.
-    for label in missing broken badschema groupwritable notafile; do
+    # "valid" closes the structural gap on the success path -- the round-trip
+    # test already covers it with stronger, content-level assertions, but
+    # this is the one test whose name promises every path, so it must too.
+    for label in missing broken badschema groupwritable notafile valid; do
         rm -rf "$f"
         case "$label" in
             missing)        : ;;
@@ -174,6 +177,7 @@ test_every_error_path_yields_exactly_one_envelope() {
             badschema)      printf '{"schemaVersion":9,"programs":[],"workspaces":[]}' > "$f"; chmod 600 "$f" ;;
             groupwritable)  valid_config > "$f"; chmod 664 "$f" ;;
             notafile)       mkdir -p "$f" ;;
+            valid)          valid_config > "$f"; chmod 600 "$f" ;;
         esac
         out="$("$CONFIG_BIN" read 2>/dev/null)"
         assert_eq "envelope: $label exits 0" "$?" "0"
@@ -206,7 +210,7 @@ test_read_refuses_a_group_writable_file
 test_read_refuses_a_world_writable_directory
 test_read_is_silent_on_success
 test_read_leaves_no_temp_file
-test_every_error_path_yields_exactly_one_envelope
+test_every_path_yields_exactly_one_envelope
 test_missing_config_directory_still_answers
 
 summary

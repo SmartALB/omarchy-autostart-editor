@@ -97,7 +97,8 @@ cmd_read() {
     [[ "$mtime" =~ ^[0-9]+$ ]] \
         || err "not-a-file" "implausible modification time for $CONFIG"
 
-    TMPFILE="$(mktemp)"
+    TMPFILE="$(mktemp)" || err "internal" "could not create a temporary file"
+    [[ -n "$TMPFILE" && -f "$TMPFILE" ]] || err "internal" "could not create a temporary file"
     read_bounded "$CONFIG" "$TMPFILE"
     check_shape "$TMPFILE"
     ok --argjson m "$mtime" --slurpfile c "$TMPFILE" \
