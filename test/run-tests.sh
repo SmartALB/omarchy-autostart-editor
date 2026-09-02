@@ -396,4 +396,78 @@ test_write_usage_errors_terminate
 test_write_creates_a_missing_config_directory
 test_write_refuses_a_symlinked_config_file
 
+APPS_BIN="$PWD/../bin/omarchy-autostart-apps"
+
+write_desktop() {
+    local dir="$1" file="$2"; shift 2
+    mkdir -p "$dir"
+    { echo "[Desktop Entry]"; printf '%s\n' "$@"; } > "$dir/$file"
+}
+
+test_apps_reads_name_exec_and_class() {
+    setup_sandbox
+    write_desktop "$XDG_DATA_HOME/applications" "cursor.desktop" \
+        "Type=Application" "Name=Cursor" "Exec=cursor %U" \
+        "StartupWMClass=cursor" "Icon=cursor"
+    local out; out="$(DESKTOP_DIRS="$XDG_DATA_HOME/applications" "$APPS_BIN")"
+    assert_eq "apps: one entry"        "$(jq -r 'length'        <<<"$out")" "1"
+    assert_eq "apps: name"             "$(jq -r '.[0].name'     <<<"$out")" "Cursor"
+    assert_eq "apps: raw exec kept"    "$(jq -r '.[0].exec'     <<<"$out")" "cursor %U"
+    assert_eq "apps: wmclass"          "$(jq -r '.[0].wmclass'  <<<"$out")" "cursor"
+    teardown_sandbox
+}
+
+test_apps_skips_hidden_and_nondisplay_and_nonapplication() {
+    setup_sandbox
+    local d="$XDG_DATA_HOME/applications"
+    write_desktop "$d" "a.desktop" "Type=Application" "Name=A" "Exec=a" "NoDisplay=true"
+    write_desktop "$d" "b.desktop" "Type=Application" "Name=B" "Exec=b" "Hidden=true"
+    write_desktop "$d" "c.desktop" "Type=Link" "Name=C" "URL=http://x"
+    write_desktop "$d" "d.desktop" "Type=Application" "Name=D" "Exec=d"
+    local out; out="$(DESKTOP_DIRS="$d" "$APPS_BIN")"
+    assert_eq "apps: only the visible application remains" "$(jq -r 'length' <<<"$out")" "1"
+    assert_eq "apps: it is D" "$(jq -r '.[0].name' <<<"$out")" "D"
+    teardown_sandbox
+}
+
+test_apps_missing_exec_is_dropped() {
+    setup_sandbox
+    write_desktop "$XDG_DATA_HOME/applications" "e.desktop" "Type=Application" "Name=E"
+    assert_eq "apps: an entry without Exec is useless and dropped" \
+              "$(jq -r 'length' <<<"$(DESKTOP_DIRS="$XDG_DATA_HOME/applications" "$APPS_BIN")")" "0"
+    teardown_sandbox
+}
+
+test_apps_caps_the_file_count() {
+    setup_sandbox
+    local d="$XDG_DATA_HOME/applications"; mkdir -p "$d"
+    for i in $(seq 1 2005); do
+        printf '[Desktop Entry]\nType=Application\nName=N%s\nExec=n%s\n' "$i" "$i" \
+            > "$d/n$i.desktop"
+    done
+    assert_eq "apps: file count capped at 2000" \
+              "$(jq -r 'length' <<<"$(DESKTOP_DIRS="$d" "$APPS_BIN")")" "2000"
+    teardown_sandbox
+}
+
+test_apps_caps_bytes_per_file() {
+    setup_sandbox
+    local d="$XDG_DATA_HOME/applications"; mkdir -p "$d"
+    # Name comes first, then 100 KiB of comments, then Exec. With a 64 KiB cap
+    # the Exec line is never read, so the entry is dropped -- which is exactly
+    # the observable effect of the byte limit.
+    { printf '[Desktop Entry]\nType=Application\nName=Fat\n'
+      head -c 102400 /dev/zero | tr '\0' '#' | fold -w 80 | sed 's/^/#/'
+      printf 'Exec=fat\n'; } > "$d/fat.desktop"
+    assert_eq "apps: per-file byte cap keeps the tail unread" \
+              "$(jq -r 'length' <<<"$(DESKTOP_DIRS="$d" "$APPS_BIN")")" "0"
+    teardown_sandbox
+}
+
+test_apps_reads_name_exec_and_class
+test_apps_skips_hidden_and_nondisplay_and_nonapplication
+test_apps_missing_exec_is_dropped
+test_apps_caps_the_file_count
+test_apps_caps_bytes_per_file
+
 summary

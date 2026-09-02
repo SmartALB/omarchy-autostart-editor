@@ -1,0 +1,66 @@
+#!/usr/bin/env bash
+# Lists installed .desktop entries as JSON, for the "Add program" picker.
+#
+# Pure reader: it opens no configuration, runs no program, and talks to no
+# compositor. The directory it walks belongs to the system, not to us, so both
+# the file count and the bytes per file are capped before anything is parsed.
+#
+# Exec= is emitted raw, field codes and all. Stripping them is Model.js's job,
+# where the test runner is fast and the cases are easy to enumerate.
+set -uo pipefail
+
+MAX_FILES=2000
+MAX_BYTES_PER_FILE=65536   # 64 KiB
+
+default_dirs() {
+    printf '%s\n' "${XDG_DATA_HOME:-$HOME/.local/share}/applications"
+    local IFS=':'
+    for dir in ${XDG_DATA_DIRS:-/usr/local/share:/usr/share}; do
+        [[ -n "$dir" ]] && printf '%s\n' "$dir/applications"
+    done
+}
+
+dirs() {
+    if [[ -n "${DESKTOP_DIRS:-}" ]]; then
+        local IFS=':'
+        for dir in $DESKTOP_DIRS; do [[ -n "$dir" ]] && printf '%s\n' "$dir"; done
+    else
+        default_dirs
+    fi
+}
+
+# Read only the first group of the file and only the keys we need. Values are
+# taken from the first occurrence, which is what the desktop entry spec says.
+parse_entry() {
+    head -c "$MAX_BYTES_PER_FILE" "$1" | awk -F= '
+        /^\[/          { if (seen_group) exit; seen_group = 1; next }
+        !seen_group    { next }
+        /^Type=/       { if (type == "")    { type = substr($0, 6) } }
+        /^Name=/       { if (name == "")    { name = substr($0, 6) } }
+        /^Exec=/       { if (exec == "")    { exec = substr($0, 6) } }
+        /^Icon=/       { if (icon == "")    { icon = substr($0, 6) } }
+        /^NoDisplay=/  { if (nodisp == "")  { nodisp = substr($0, 11) } }
+        /^Hidden=/     { if (hidden == "")  { hidden = substr($0, 8) } }
+        /^StartupWMClass=/ { if (wmclass == "") { wmclass = substr($0, 16) } }
+        END {
+            if (type != "Application") exit
+            if (name == "" || exec == "") exit
+            if (nodisp == "true" || hidden == "true") exit
+            printf "%s\t%s\t%s\t%s\n", name, exec, wmclass, icon
+        }
+    '
+}
+
+count=0
+{
+    while IFS= read -r dir; do
+        [[ -d "$dir" ]] || continue
+        while IFS= read -r file; do
+            (( count >= MAX_FILES )) && break 2
+            count=$((count + 1))
+            parse_entry "$file"
+        done < <(find "$dir" -maxdepth 1 -type f -name '*.desktop' | sort)
+    done < <(dirs)
+} | jq -R -s 'split("\n")
+              | map(select(length > 0) | split("\t"))
+              | map({name: .[0], exec: .[1], wmclass: (.[2] // ""), icon: (.[3] // "")})'
