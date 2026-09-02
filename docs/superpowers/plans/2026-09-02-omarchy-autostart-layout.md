@@ -29,6 +29,7 @@ Diese gelten für **jede** Aufgabe, auch wenn sie dort nicht wiederholt werden.
 - **Obergrenzen, alle vor dem ersten Aufruf durchgesetzt:** JSON 256 KiB (MAX+1 gelesen, bei Überlauf abgewiesen); 200 Programme; 99 Workspace-Einträge; 500 Fenster; 2000 `.desktop`-Dateien à 64 KiB; je `eval`-Aufruf ≤ 20 Regeln, ≤ 64 KiB Nutzlast, ≤ 20 Aufrufe.
 - **Zeichen-Erlaubnisliste für `class`:** nur `A-Z a-z 0-9`, Leerzeichen und `. _ - ^ $ ( ) | [ ] ? * + \ :`, Länge 1–200. Abgewiesen: `"` `'` `{` `}` `;` `=`, Backtick, Zeilenumbruch, alles außerhalb ASCII 1–126.
 - **Jeder Wert, der nach Lua geht, wird als `string.char(...)` kodiert.** Nie als Zeichenkette in Anführungszeichen.
+- **Jede Karte in `Model.js` wird mit `Object.create(null)` angelegt, ohne Ausnahme** — nie mit `{}`. Auf einem gewöhnlichen Objekt liest sich der Schlüssel `"__proto__"` als `Object.prototype` zurück statt als `undefined`, und die Erlaubnislisten lassen `_` bewusst zu, weil echte Fensterklassen und Monitornamen es brauchen (`nimbus-chat.example.org__-Default`). Am 02.09.2026 hat genau das `validate()` **werfen** lassen, in der Funktion, die schlechte Eingaben in benannte Ablehnungen verwandeln soll. Die Konvention gilt auch dort, wo die Schlüssel nachweislich nur `[a-z0-9]` sind — eine Regel ohne Ausnahmen muss man sich nicht merken.
 - **Zwei Aufrufwege:** `hypr(verb, payload)` ohne Shell (argv-Liste, Deadline 20 s) für alles, was mit Hyprland spricht — beide Verben nötig, `eval` für Regelblöcke, `dispatch` für Umzüge; `runner()`/`runnerOut()`/`runnerErr()` mit `/usr/bin/bash` (Deadline 120 s) für den Autostart und die eigenen `bin/`-Skripte. Absolute Pfade zu `/usr/bin/timeout` und `/usr/bin/bash`, `timeout -k 5`, `head -c 262144` auf eingesammeltes stdout, stderr über Prozess-Substitution.
 - **Grenzen stehen in den Helfern, nicht an den Aufrufstellen.**
 - **`Component.onDestruction` beendet jeden `Process`.**
@@ -1857,7 +1858,7 @@ function validate(config) {
     var out = { programs: [], workspaces: [], rejected: [], blocked: [] };
     var programs   = (config && config.programs)   || [];
     var workspaces = (config && config.workspaces) || [];
-    var i, seenIds = {}, seenWs = {};
+    var i, seenIds = Object.create(null), seenWs = Object.create(null);
 
     for (i = 0; i < programs.length; i++) {
         var p = programs[i];
@@ -1903,7 +1904,14 @@ function validate(config) {
     // Two programs matching the same class but wanting different places is a
     // contradiction this code can see, so saving is blocked rather than one of
     // them silently winning inside the compositor.
-    var byClass = {};
+    // A plain {} is not safe as a map for strings from the configuration:
+    // "__proto__" reads back as Object.prototype rather than undefined, so the
+    // guard below would skip initialising the array and .push would not exist
+    // -- validate() would THROW, inside the very function that is supposed to
+    // turn bad input into a named rejection. The allowlist deliberately
+    // permits "_" because real classes need it
+    // (nimbus-chat.example.org__-Default), so the map has to tolerate it.
+    var byClass = Object.create(null);
     for (i = 0; i < out.programs.length; i++) {
         var prog = out.programs[i];
         var key  = prog["class"];
@@ -1911,7 +1919,7 @@ function validate(config) {
         byClass[key].push(prog);
     }
     for (var cls in byClass) {
-        var group = byClass[cls], places = {}, labels = [];
+        var group = byClass[cls], places = Object.create(null), labels = [];
         for (i = 0; i < group.length; i++) {
             places[placementKey(group[i].placement)] = true;
             labels.push(labelOf(group[i], i));
@@ -2541,7 +2549,7 @@ function launchCommand(command) {
 function workspaceMoves(model, workspacesNow) {
     var wanted = (model && model.workspaces) || [];
     var now = workspacesNow || [];
-    var current = {}, moves = [], i;
+    var current = Object.create(null), moves = [], i;
     for (i = 0; i < now.length; i++) current[now[i].workspace] = now[i].monitor;
     for (i = 0; i < wanted.length; i++) {
         var row = wanted[i];
@@ -2967,7 +2975,9 @@ function buildReconcileChunks(model, workspacesNow, matches) {
 // the reconcile itself never starts anything, because saving should not open
 // windows.
 function missingIds(model, matches) {
-    var seen = {}, out = [], i;
+    // Object.create(null) rather than {} -- see the note in validate(): a key
+    // of "__proto__" reads back as Object.prototype from a plain object.
+    var seen = Object.create(null), out = [], i;
     var hits = matches || [];
     for (i = 0; i < hits.length; i++) seen[hits[i].id] = true;
     var programs = (model && model.programs) || [];
@@ -4151,7 +4161,11 @@ Item {
     // The visual tree is specified in the plan as a binding table. Component
     // vocabulary and spacing come from smartalb.vpn/Panel.qml.
     function monitorNames() {
-        var names = {}, out = [], i
+        // Object.create(null), not {}: MONITOR_RE permits "_", so a monitor
+        // called "__proto__" is a legal name, and on a plain object it would
+        // read back as Object.prototype -- the entry would silently vanish
+        // from the dropdown rather than crash, which is worse to diagnose.
+        var names = Object.create(null), out = [], i
         for (i = 0; i < root.workspacesNow.length; i++) names[root.workspacesNow[i].monitor] = true
         for (i = 0; i < root.openWindows.length; i++)  names[root.openWindows[i].monitor] = true
         for (i = 0; i < (root.draft.workspaces || []).length; i++) {
@@ -4365,7 +4379,7 @@ Expected: FAIL, `Model.newId` ist keine Funktion.
 // --- adding entries -------------------------------------------------------
 
 function newId(existing) {
-    var used = {}, i;
+    var used = Object.create(null), i;
     for (i = 0; i < (existing || []).length; i++) used[existing[i].id] = true;
     for (i = 1; i <= 100000; i++) {
         var candidate = "p" + i;
@@ -4410,7 +4424,9 @@ function guessCommand(windowClass, apps) {
 // window should not cost the other twenty.
 function importFromSession(windows, workspacesNow, apps) {
     var config = { schemaVersion: 1, programs: [], workspaces: [] };
-    var seen = {}, i;
+    // Object.create(null), not {}: a window whose class is "__proto__" would
+    // read back as already-seen from a plain object and be skipped silently.
+    var seen = Object.create(null), i;
 
     for (i = 0; i < (workspacesNow || []).length; i++) {
         var row = workspacesNow[i];
