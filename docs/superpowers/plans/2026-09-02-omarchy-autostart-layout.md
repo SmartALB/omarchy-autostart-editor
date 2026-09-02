@@ -4901,6 +4901,7 @@ Jeden Punkt einzeln, nach `omarchy-restart-shell` und 8 s Wartezeit:
 6. `[Revert]` verwirft und „changes pending" verschwindet.
 7. `[Launch missing]` startet genau die eingeschalteten Programme, die nicht laufen — und **keins** doppelt.
 8. `omarchy-restart-shell` startet **nichts** neu (die Startmarke).
+8a. **Zweimal `[Apply]` hintereinander, dann `hyprctl workspacerules | grep -c "Workspace rule"`.** Die Zahl darf beim zweiten Mal nicht wachsen. Hintergrund: `put()` schaltet die vorher gesetzte Regel über `set_enabled(false)` ab, und die Hyprland-Stubs schreiben `set_enabled` für `HL.WorkspaceRule` genauso wie für `HL.WindowRule`. Belegt ist das aber nur durch die Stubs — und dieses Projekt hat gelernt, dass die Stubs für die Laufzeit nicht maßgeblich sind (`HL.WindowRuleSpec` deklariert kein `monitor`, und das Feld wirkt trotzdem). Wächst die Zahl, häufen sich Regeln innerhalb einer Sitzung an; die letzte passende gewinnt, das Verhalten bleibt also richtig, aber die Liste wird lang. Dann in `put()` einen anderen Weg für Workspace-Regeln suchen.
 9. Plugin über die Omarchy-Oberfläche deaktivieren und wieder aktivieren.
 10. `./uninstall`, dann prüfen: Verzeichnis weg, Konfigurationsdatei noch da.
 11. Die Konfigurationsdatei auf `chmod 664` setzen, Panel öffnen: es muss die Meldung mit dem nötigen `chmod` zeigen und **nichts** anwenden.
