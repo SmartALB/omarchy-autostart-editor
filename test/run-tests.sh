@@ -8,6 +8,13 @@ cd "$(dirname "$0")"
 # export HOME alone does not isolate anything: in an Omarchy session
 # XDG_STATE_HOME and XDG_DATA_HOME are set and keep pointing at the real
 # directories. On 2026-09-02 a test run overwrote real state that way.
+#
+# Two assertions per variable. The VALUE assertion is the real net: it
+# catches a redirect that is missing or points outside the sandbox. The
+# EXPORT assertion catches a redirect written without `export` -- but it
+# cannot catch a missing redirect for a variable the surrounding session
+# already exports, because the variable then falls through to that
+# ambient value and stays exported. Best effort, not a guarantee.
 test_sandbox_contains_every_path() {
     setup_sandbox
     for var in HOME XDG_CONFIG_HOME XDG_STATE_HOME XDG_DATA_HOME XDG_DATA_DIRS XDG_RUNTIME_DIR TMPDIR; do
@@ -512,5 +519,77 @@ test_apps_caps_the_file_count
 test_apps_caps_bytes_per_file
 test_apps_survives_a_tab_inside_a_value
 test_apps_default_search_path_is_used_when_the_seam_is_unset
+
+WINDOWS_BIN="$PWD/../bin/omarchy-autostart-windows"
+
+# The stand-in from lib.sh answers `eval` with ok and everything else from a
+# file. Windows needs two different answers, so give it a small router.
+fake_hyprctl_json() {
+    mkdir -p "$SANDBOX/bin"
+    cat > "$SANDBOX/bin/hyprctl" <<'FAKE'
+#!/usr/bin/env bash
+for arg in "$@"; do
+  case "$arg" in
+    clients)  cat "$FAKE_CLIENTS";  exit 0 ;;
+    monitors) cat "$FAKE_MONITORS"; exit 0 ;;
+  esac
+done
+exit 1
+FAKE
+    chmod +x "$SANDBOX/bin/hyprctl"
+    export HYPRCTL="$SANDBOX/bin/hyprctl"
+    export FAKE_CLIENTS="$SANDBOX/clients.json"
+    export FAKE_MONITORS="$SANDBOX/monitors.json"
+    cat > "$FAKE_MONITORS" <<'JSON'
+[{"id":0,"name":"DP-4"},{"id":1,"name":"HDMI-A-1"}]
+JSON
+}
+
+test_windows_resolves_the_monitor_name() {
+    setup_sandbox; fake_hyprctl_json
+    cat > "$FAKE_CLIENTS" <<'JSON'
+[{"address":"0x1","class":"cursor","title":"main","workspace":{"id":6},"monitor":1}]
+JSON
+    local out; out="$("$WINDOWS_BIN")"
+    assert_eq "windows: one window"      "$(jq -r 'length'         <<<"$out")" "1"
+    assert_eq "windows: class"           "$(jq -r '.[0].class'     <<<"$out")" "cursor"
+    assert_eq "windows: workspace"       "$(jq -r '.[0].workspace' <<<"$out")" "6"
+    assert_eq "windows: monitor by name" "$(jq -r '.[0].monitor'   <<<"$out")" "HDMI-A-1"
+    teardown_sandbox
+}
+
+test_windows_drops_special_workspaces() {
+    setup_sandbox; fake_hyprctl_json
+    cat > "$FAKE_CLIENTS" <<'JSON'
+[{"address":"0x1","class":"a","title":"t","workspace":{"id":-99},"monitor":0},
+ {"address":"0x2","class":"b","title":"t","workspace":{"id":2},"monitor":0}]
+JSON
+    local out; out="$("$WINDOWS_BIN")"
+    assert_eq "windows: special workspaces dropped" "$(jq -r 'length' <<<"$out")" "1"
+    assert_eq "windows: the normal one stays"       "$(jq -r '.[0].class' <<<"$out")" "b"
+    teardown_sandbox
+}
+
+test_windows_caps_the_count() {
+    setup_sandbox; fake_hyprctl_json
+    jq -nc '[range(0;520) | {address:("0x"+(.|tostring)),class:"c",title:"t",
+                             workspace:{id:1},monitor:0}]' > "$FAKE_CLIENTS"
+    assert_eq "windows: count capped at 500" \
+              "$(jq -r 'length' <<<"$("$WINDOWS_BIN")")" "500"
+    teardown_sandbox
+}
+
+test_windows_survives_an_unreachable_compositor() {
+    setup_sandbox
+    export HYPRCTL="$SANDBOX/bin/nope"
+    assert_eq "windows: unreachable hyprctl yields an empty array, not a crash" \
+              "$("$WINDOWS_BIN")" "[]"
+    teardown_sandbox
+}
+
+test_windows_resolves_the_monitor_name
+test_windows_drops_special_workspaces
+test_windows_caps_the_count
+test_windows_survives_an_unreachable_compositor
 
 summary

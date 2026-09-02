@@ -1,0 +1,36 @@
+#!/usr/bin/env bash
+# Lists the open windows as JSON, for "pick from window" and for the reconcile
+# step that moves already-open windows after Apply.
+#
+# The output of hyprctl is not ours, so the window count is capped before
+# anything iterates over it -- the panel spawns work per window, and runtime is
+# count times timeout.
+#
+# HYPRCTL is a named seam, not a PATH trick: Omarchy also lives in /usr/bin, so
+# a "clean" PATH excludes nothing.
+set -uo pipefail
+
+HYPRCTL="${HYPRCTL:-hyprctl}"
+MAX_WINDOWS=500
+
+monitors="$("$HYPRCTL" -j monitors 2>/dev/null)" || monitors=""
+clients="$("$HYPRCTL" -j clients  2>/dev/null)" || clients=""
+
+if [[ -z "$clients" ]] || ! jq -e 'type == "array"' <<<"$clients" >/dev/null 2>&1; then
+    echo "[]"
+    exit 0
+fi
+jq -e 'type == "array"' <<<"$monitors" >/dev/null 2>&1 || monitors="[]"
+
+jq -c --argjson mon "$monitors" --argjson max "$MAX_WINDOWS" '
+    ( $mon | map({ key: (.id | tostring), value: .name }) | from_entries ) as $names
+    | map(select((.workspace.id // 0) > 0))
+    | .[0:$max]
+    | map({
+        address:   (.address // ""),
+        class:     (.class // ""),
+        title:     (.title // ""),
+        workspace: ((.workspace.id // 0) | tostring),
+        monitor:   ($names[(.monitor // -1) | tostring] // "")
+      })
+' <<<"$clients"
