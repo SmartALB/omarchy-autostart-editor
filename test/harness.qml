@@ -303,6 +303,58 @@ QtObject {
                       return "all";
                   })(), "all");
 
+            // --- effectiveMonitor ---------------------------------------------
+            var rows = [{ workspace: "6", monitor: "HDMI-A-1" },
+                        { workspace: "2", monitor: "DP-3" }];
+
+            check("effectiveMonitor: workspace placement follows the table",
+                  Model.effectiveMonitor(prog({ placement: { kind: "workspace", value: "6" } }), rows),
+                  "HDMI-A-1");
+            check("effectiveMonitor: an unpinned workspace has no monitor",
+                  Model.effectiveMonitor(prog({ placement: { kind: "workspace", value: "7" } }), rows),
+                  "");
+            check("effectiveMonitor: monitor placement is its own answer",
+                  Model.effectiveMonitor(prog({ placement: { kind: "monitor", value: "DP-4" } }), rows),
+                  "DP-4");
+            check("effectiveMonitor: no placement, no monitor",
+                  Model.effectiveMonitor(prog({ placement: { kind: "none" } }), rows), "");
+
+            // --- stripFieldCodes ----------------------------------------------
+            check("stripFieldCodes: %U goes",        Model.stripFieldCodes("cursor %U"), "cursor");
+            check("stripFieldCodes: %F goes",        Model.stripFieldCodes("gimp %F"), "gimp");
+            check("stripFieldCodes: %i %c %k go",    Model.stripFieldCodes("app %i %c %k"), "app");
+            check("stripFieldCodes: %f in the middle",
+                  Model.stripFieldCodes("app %f --flag"), "app --flag");
+            check("stripFieldCodes: %% survives as a literal percent",
+                  Model.stripFieldCodes("app %% x"), "app % x");
+            check("stripFieldCodes: an unknown code is left alone",
+                  Model.stripFieldCodes("app %z"), "app %z");
+            check("stripFieldCodes: quoted arguments survive",
+                  Model.stripFieldCodes('nimbus --app=https://a.example/ %U'),
+                  "nimbus --app=https://a.example/");
+            check("stripFieldCodes: nothing to strip",
+                  Model.stripFieldCodes("modelbox"), "modelbox");
+
+            // --- launchCommand -------------------------------------------------
+            check("launchCommand: goes through uwsm-app",
+                  Model.launchCommand("cursor").indexOf("uwsm-app -- cursor") === 0, true);
+            check("launchCommand: detaches every standard stream",
+                  Model.launchCommand("cursor"), "uwsm-app -- cursor </dev/null >/dev/null 2>&1");
+
+            // --- workspaceMoves ------------------------------------------------
+            check("workspaceMoves: a workspace on the wrong monitor moves",
+                  (function() {
+                      var m = Model.validate(cfg([], [{ workspace: "2", monitor: "DP-3" }]));
+                      var moves = Model.workspaceMoves(m, [{ workspace: "2", monitor: "DP-4" }]);
+                      return moves.length === 1 && moves[0].monitor === "DP-3";
+                  })(), true);
+            check("workspaceMoves: a workspace already right stays put",
+                  Model.workspaceMoves(Model.validate(cfg([], [{ workspace: "2", monitor: "DP-3" }])),
+                                       [{ workspace: "2", monitor: "DP-3" }]).length, 0);
+            check("workspaceMoves: a workspace that does not exist yet is not moved",
+                  Model.workspaceMoves(Model.validate(cfg([], [{ workspace: "8", monitor: "DP-3" }])),
+                                       [{ workspace: "2", monitor: "DP-3" }]).length, 0);
+
             console.warn("total=" + total + " failed=" + failed);
             Qt.exit(failed === 0 ? 0 : 1);
         } catch (e) {

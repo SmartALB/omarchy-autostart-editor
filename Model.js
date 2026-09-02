@@ -283,3 +283,71 @@ function buildRuleChunks(model) {
     }
     return chunks;
 }
+
+// --- derived values -------------------------------------------------------
+
+// The monitor a program actually ends up on. With placement kind "workspace"
+// this is the monitor the workspace is pinned to -- which is why the panel can
+// show it greyed out behind the workspace choice and why placement is
+// either-or rather than two fields with a precedence. An empty string means
+// "the workspace is not pinned anywhere", not "unknown".
+function effectiveMonitor(program, workspaces) {
+    var placement = program && program.placement;
+    if (!placement || placement.kind === "none") return "";
+    if (placement.kind === "monitor") return placement.value;
+    var rows = workspaces || [];
+    for (var i = 0; i < rows.length; i++) {
+        if (rows[i].workspace === placement.value) return rows[i].monitor;
+    }
+    return "";
+}
+
+// Remove the field codes of the desktop entry specification. %% is an escaped
+// percent sign and becomes one; codes we do not know are left alone rather
+// than guessed at, because a wrong guess produces a command that fails at
+// login with no one watching.
+function stripFieldCodes(exec) {
+    var known = { "f": 1, "F": 1, "u": 1, "U": 1, "d": 1, "D": 1,
+                  "n": 1, "N": 1, "i": 1, "c": 1, "k": 1, "v": 1, "m": 1 };
+    var out = "", i = 0;
+    while (i < exec.length) {
+        if (exec.charAt(i) === "%" && i + 1 < exec.length) {
+            var next = exec.charAt(i + 1);
+            if (next === "%") { out += "%"; i += 2; continue; }
+            if (known[next])  { i += 2; continue; }
+        }
+        out += exec.charAt(i);
+        i += 1;
+    }
+    return out.replace(/\s+/g, " ").replace(/^ | $/g, "");
+}
+
+// The command field is a shell command line by design -- the same trust level
+// as a line in ~/.config/hypr/autostart.lua -- and it is handed to bash as one
+// single argv element, never pasted into a larger command line.
+//
+// The redirections are not cosmetic: anything started from a Quickshell
+// Process inherits its stdout and stderr pipes, and when the command chain
+// ends Quickshell tears those pipes down and takes the application with it.
+// From a terminal the same command works, because nobody tears anything down.
+function launchCommand(command) {
+    return "uwsm-app -- " + command + " </dev/null >/dev/null 2>&1";
+}
+
+// Workspace rules only take effect when a workspace is CREATED, so a workspace
+// that already exists has to be moved explicitly. One that does not exist yet
+// is left alone -- the rule will place it when it appears.
+function workspaceMoves(model, workspacesNow) {
+    var wanted = (model && model.workspaces) || [];
+    var now = workspacesNow || [];
+    var current = Object.create(null), moves = [], i;
+    for (i = 0; i < now.length; i++) current[now[i].workspace] = now[i].monitor;
+    for (i = 0; i < wanted.length; i++) {
+        var row = wanted[i];
+        if (current[row.workspace] === undefined) continue;
+        if (current[row.workspace] !== row.monitor) {
+            moves.push({ workspace: row.workspace, monitor: row.monitor });
+        }
+    }
+    return moves;
+}
