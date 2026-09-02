@@ -2397,14 +2397,14 @@ In `test/harness.qml`:
         // window still exists. Without this guard a vanished window makes the
         // move land on an unrelated one -- measured, not theorised: during
         // task 1 an unguarded move relocated two of the user's own windows.
-        check("reconcile: the window move resolves the address into an object first",
-              /local w = hl\.get_window\(string\.char\(/.test(
-                  Model.buildReconcileChunks(Model.validate(cfg([prog({ id: "p1" })], [])),
-                                             [], [{ id: "p1", address: "0xbeef" }])[0]), true);
-        check("reconcile: the window move is guarded by if w then",
+        check("reconcile: the window move never passes the address as a selector",
               Model.buildReconcileChunks(Model.validate(cfg([prog({ id: "p1" })], [])),
                                          [], [{ id: "p1", address: "0xbeef" }])[0]
-                  .indexOf("if w then") !== -1, true);
+                  .indexOf("hl.get_window(") === -1, true);
+        check("reconcile: the window move enumerates and compares on the object",
+              /for _, w in ipairs\(hl\.get_windows\(\{\}\)\) do if w\.address == string\.char\(/.test(
+                  Model.buildReconcileChunks(Model.validate(cfg([prog({ id: "p1" })], [])),
+                                             [], [{ id: "p1", address: "0xbeef" }])[0]), true);
         check("reconcile: the window move never uses the bare dispatch route",
               Model.verbFor(Model.buildReconcileChunks(
                   Model.validate(cfg([prog({ id: "p1" })], [])),
@@ -2516,28 +2516,29 @@ var ADDRESS_RE = /^0x[0-9a-f]{1,16}$/;
 
 // Both expressions are the forms task 1 measured against a real window.
 //
-// THE MOST IMPORTANT LINE IN THIS FILE is the `if w then` below, and it is
-// there because of an incident, not a hunch.
+// A window is NEVER addressed by a string here, and the loop below is the
+// whole reason this function exists in the shape it does.
 //
-// A window.move whose `window` selector does not resolve does NOT no-op. It
-// acts on some other window. During task 1 that silently moved two of the
-// user's real, unrelated windows to a scratch workspace. This code is exposed
-// to exactly that: addresses come from a match taken moments earlier, and a
-// window can close in between -- at which point an unguarded move would take
-// an innocent window with it. Resolving first and moving only on success
-// makes the vanished-window case a no-op by construction.
+// Measured on 2026-09-02 with a counting instrument (7 trials per form,
+// aborting on the first collateral event), three runs, same result each time:
+// hl.get_window("<hex>") is either inert (0/7) or -- passed on as the window
+// field -- hits an UNRELATED window from the second trial onwards. It moved
+// the user's Chatterbox window and two of his terminals. A resolution guard
+// (`if w then`) does not help, because w is not nil; it is the wrong window.
+// The likely reason, untested: a bare hex string is not a valid window
+// selector and hl.get_window falls back to something else, plausibly the
+// active window.
 //
-// Two further measured facts, both load-bearing:
-//   * the `window` field must be an OBJECT (hl.get_window(...)). A plain
-//     address string was measured not to work -- 0 of 7 trials.
-//   * the object form must go through `eval`, never through bare `dispatch`.
-//     dispatch + object worked in only 2 of 7 trials and was the form caught
-//     moving the wrong window. Never use it.
+// So the object comes out of hl.get_windows() -- a list the compositor
+// itself produced -- and the address is compared on the object's own field.
+// No match then means no move, by construction rather than by a guard.
 function windowMoveExpression(address, placement) {
     var field = (placement.kind === "workspace") ? "workspace" : "monitor";
-    return "do local w = hl.get_window(" + luaBytes(address) + ") "
-         + "if w then hl.dispatch(hl.dsp.window.move({ "
-         + field + " = " + luaBytes(placement.value) + ", window = w, follow = false })) end end";
+    return "do for _, w in ipairs(hl.get_windows({})) do "
+         + "if w.address == " + luaBytes(address) + " then "
+         + "hl.dispatch(hl.dsp.window.move({ "
+         + field + " = " + luaBytes(placement.value) + ", window = w, follow = false })) "
+         + "end end end";
 }
 
 function workspaceMoveExpression(move) {

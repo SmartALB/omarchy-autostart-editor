@@ -166,15 +166,28 @@ Schritte 1–3, danach der Abgleich:
       do local w = hl.get_window(<bytes>)
          if w then hl.dispatch(hl.dsp.window.move({ … window = w … })) end end
 
-  Der Grund ist gemessen, nicht vermutet: ein `window.move`, dessen Selektor
-  sich **nicht** auflöst, macht **kein** No-op, sondern trifft ein anderes
-  Fenster. Am 02.09.2026 hat das während der Probe zu Task 1 zwei fremde
-  Fenster des Benutzers auf einen Ausweich-Workspace verschoben. Das Plugin
-  ist demselben Fall ausgesetzt, weil zwischen dem Ermitteln der Treffer und
-  dem Verschieben ein Fenster geschlossen werden kann. Ebenfalls gemessen:
-  das `window`-Feld trägt nur als **Objekt** (`hl.get_window(...)`), und der
-  Umzug muss über `eval` laufen — die Form `dispatch` + Objekt griff nur in 2
-  von 7 Versuchen und war diejenige, die das fremde Fenster verschob.
+  **Und der Selektor darf keine Zeichenkette sein.** Ein zählendes Instrument
+  (7 Versuche je Form, Abbruch beim ersten Kollateralschaden) hat am
+  02.09.2026 in drei Läufen gezeigt: `hl.get_window("<hex>")` ist entweder
+  wirkungslos (0/7) oder — als Objekt weitergegeben — trifft ab dem zweiten
+  Versuch ein **fremdes** Fenster. Eine Auflösungswache hilft dagegen nicht,
+  weil `w` nicht `nil` ist, sondern das falsche Fenster. Betroffen waren
+  Chatterbox und zwei Termpane-Fenster des Benutzers.
+
+  Deshalb wird das Fensterobjekt **aufgezählt und am Objekt verglichen**,
+  nie über eine Zeichenkette adressiert:
+
+      do for _, w in ipairs(hl.get_windows({})) do
+           if w.address == <bytes> then
+             hl.dispatch(hl.dsp.window.move({ … window = w … }))
+           end
+         end end
+
+  Damit ist „kein Treffer" von der Bauweise her ein No-op. Diese Form ist zum
+  Zeitpunkt dieser Fassung **noch nicht gemessen**; Task 1 muss sie belegen,
+  bevor Task 11 sie benutzt. Belegt sie sich nicht, entfällt das Verschieben
+  bereits offener Fenster ganz und die Platzierung greift erst beim nächsten
+  Öffnen — als bekannte Grenze ins README.
 - Der Abgleich startet **nichts**. Ein separater Knopf `[Launch missing]`
   startet die `enabled`-Programme, die noch nicht laufen. Speichern soll
   keine Fenster aufmachen.
