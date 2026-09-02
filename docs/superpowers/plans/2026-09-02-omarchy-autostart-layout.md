@@ -677,8 +677,12 @@ test_read_refuses_an_oversized_file() {
     setup_sandbox
     local f="$XDG_CONFIG_HOME/omarchy/autostart-layout.json"
     # 300 KiB of valid JSON: one long name field.
-    jq -nc --arg pad "$(head -c 307200 /dev/zero | tr '\0' 'x')" \
-        '{schemaVersion:1,programs:[{id:"p1",name:$pad}],workspaces:[]}' > "$f"
+    # Streamed, never through jq --arg: a 300 KiB argv entry exceeds the
+    # kernel's MAX_ARG_STRLEN (131072) and fails execve before jq runs.
+    { printf '{"schemaVersion":1,"programs":[{"id":"p1","name":"'
+      head -c 307200 /dev/zero | tr '\0' 'x'
+      printf '"}],"workspaces":[]}'
+    } > "$f"
     chmod 600 "$f"
     local out; out="$("$CONFIG_BIN" read)"
     assert_eq "read: oversized file refused" "$(jq -r .error <<<"$out")" "too-large"
@@ -688,23 +692,25 @@ test_read_refuses_an_oversized_file() {
 test_read_accepts_exactly_the_limit() {
     setup_sandbox
     local f="$XDG_CONFIG_HOME/omarchy/autostart-layout.json"
-    # Grow the padding until the file is exactly 262144 bytes. The boundary is
-    # where an off-by-one in the MAX+1 read would show up, and nowhere else.
-    local pad=1 size=0
-    while :; do
-        jq -nc --arg pad "$(head -c "$pad" /dev/zero | tr '\0' 'x')" \
-            '{schemaVersion:1,programs:[{id:"p1",name:$pad}],workspaces:[]}' > "$f"
-        size="$(wc -c < "$f")"
-        (( size >= 262144 )) && break
-        pad=$(( pad + 262144 - size ))
-    done
-    if (( size == 262144 )); then
-        chmod 600 "$f"
-        assert_eq "read: exactly 256 KiB is accepted" \
-                  "$(jq -r .ok <<<"$("$CONFIG_BIN" read)")" "true"
-    else
-        assert_eq "read: could not build a 256 KiB file (size $size)" "built" "built"
-    fi
+    # The boundary is where an off-by-one in the MAX+1 read would show up, and
+    # nowhere else. The pad is computed from the prefix and suffix lengths
+    # rather than found by retrying: a retry loop cannot terminate here,
+    # because the `>` redirection truncates the file to 0 bytes on every
+    # failed attempt and the pad then grows for ever.
+    local f="$XDG_CONFIG_HOME/omarchy/autostart-layout.json"
+    local prefix='{"schemaVersion":1,"programs":[{"id":"p1","name":"'
+    local suffix='"}],"workspaces":[]}'
+    local pad=$(( 262144 - ${#prefix} - ${#suffix} ))
+    {
+        printf '%s' "$prefix"
+        head -c "$pad" /dev/zero | tr '\0' 'x'
+        printf '%s' "$suffix"
+    } > "$f"
+    local size; size="$(wc -c < "$f")"
+    assert_eq "read: built file is exactly 256 KiB" "$size" "262144"
+    chmod 600 "$f"
+    assert_eq "read: exactly 256 KiB is accepted" \
+              "$(jq -r .ok <<<"$("$CONFIG_BIN" read)")" "true"
     teardown_sandbox
 }
 
@@ -1092,12 +1098,29 @@ cmd_write() {
     local expect_mtime=""
     while (( $# )); do
         case "$1" in
-            --expect-mtime) expect_mtime="${2:-}"; shift 2 ;;
+            --expect-mtime)
+                # $# -ge 2, not just "$2 is set": with exactly one positional
+                # parameter left, `shift 2` is a no-op per the bash manual
+                # (shift does nothing if n > $#), so a bare trailing
+                # --expect-mtime would leave $1 unchanged and spin the while
+                # loop forever instead of terminating.
+                [[ $# -ge 2 ]] \
+                    || { echo "usage: ${0##*/} write --expect-mtime <int> < config.json" >&2; exit 2; }
+                expect_mtime="$2"
+                shift 2
+                ;;
             *) echo "usage: ${0##*/} write --expect-mtime <int> < config.json" >&2; exit 2 ;;
         esac
     done
     [[ "$expect_mtime" =~ ^[0-9]+$ ]] \
         || { echo "usage: ${0##*/} write --expect-mtime <int> < config.json" >&2; exit 2; }
+
+    # read treats a missing directory as the empty model, so write has to be
+    # able to create the first-ever configuration -- otherwise a new user can
+    # look at an empty panel and then not be able to save it. Leave the mode
+    # to the user's umask, matching the rest of ~/.config; check_permissions
+    # below still refuses a pre-existing group/other-writable directory.
+    mkdir -p "$CONFIG_DIR" || err "write-failed" "could not create $CONFIG_DIR"
 
     check_permissions "$CONFIG_DIR" "directory"
 
@@ -1105,7 +1128,8 @@ cmd_write() {
     if [[ -e "$CONFIG" ]]; then
         [[ -f "$CONFIG" ]] || err "not-a-file" "$CONFIG is not a plain file"
         check_permissions "$CONFIG" "file"
-        current="$(stat -c %Y "$CONFIG")"
+        current="$(stat -c %Y "$CONFIG" 2>/dev/null)" \
+            || err "not-a-file" "$CONFIG disappeared before it could be checked"
     fi
     [[ "$current" == "$expect_mtime" ]] \
         || err "stale" "the file changed on disk (mtime $current, caller expected $expect_mtime)"
