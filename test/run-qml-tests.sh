@@ -7,9 +7,14 @@
 #   2 = cannot run (no Qt6 qml binary found)
 #   3 = harness broke (unexpected exception in test code)
 #
-# /usr/bin/qml on Arch is Qt 5.15 and fails SILENTLY with status 1 -- no output
-# on stdout or stderr at all. Never fall back to it: a silent exit 1 looks
-# exactly like a failing test suite. Resolve the Qt6 binary or refuse to run.
+# /usr/bin/qml on Arch is Qt 5.15 and does not load this harness at all: it
+# rejects the versionless `import QtQml` and exits 2 with an error about
+# loading no objects. Never fall back to it -- that failure reads like a
+# tooling problem rather than "the logic under test is wrong", and its exit
+# code collides with our own "cannot run". Resolve the Qt6 binary or refuse.
+#
+# The tool that fails SILENTLY with status 1 -- nothing on either stream --
+# is /usr/bin/qmltestrunner, which is why it is not used here.
 set -euo pipefail
 
 QML=""
@@ -20,7 +25,7 @@ done
 
 if [[ -z "$QML" ]]; then
   echo "error: no Qt6 qml runtime found." >&2
-  echo "       /usr/bin/qml is Qt 5.15 here and exits 1 without a word." >&2
+  echo "       /usr/bin/qml here is Qt 5.15 and cannot load the harness." >&2
   echo "       install qt6-declarative or point QT6_QML at the Qt6 binary." >&2
   exit 2
 fi
