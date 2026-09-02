@@ -173,10 +173,12 @@ smartalb.autostart/
 |- BarWidget.qml          Glyph, Tooltip, oeffnet das Panel
 |- Panel.qml              Oberflaeche; bindet Model.js, ruft die Helfer
 |- Service.qml            Sitzungsstart, configreloaded-Abo, Startmarke
-|- Model.js               die gesamte Logik, reines JavaScript
+|- Runners.qml            die Aufruf-Helfer, von Panel und Service benutzt
+|- Model.js               die gesamte Entscheidungslogik, reines JavaScript
 |- bin/omarchy-autostart-config    read | write (stdin), 0600, atomar, mtime
 |- bin/omarchy-autostart-apps      installierte .desktop-Eintraege als JSON
-|- bin/omarchy-autostart-windows   offene Fenster als JSON
+|- bin/omarchy-autostart-windows   offene Fenster, Workspaces, Klassen-Match
+|- bin/omarchy-autostart-marker    Startmarke je Hyprland-Instanz beanspruchen
 |- test/harness.qml, test/run-qml-tests.sh, test/run-tests.sh
 |- README.md, LICENSE, preview.png, install, uninstall
 ```
@@ -189,7 +191,16 @@ sicherheitstragenden Teile — Rechteprüfung, atomares Schreiben, die
 Obergrenzen beim Einlesen — an die am leichtesten prüfbare Stelle des
 Projekts statt an die am schwersten prüfbare. Alle drei Skripte sind reine
 Leser bzw. Schreiber ihrer eigenen Datei; keines ruft `hyprctl eval`, keines
-startet ein Programm.
+startet ein Programm. Das Marker-Skript liegt aus demselben Grund dort: ein
+Fehler darin verdoppelt die Sitzung, und in der Shell ist er prüfbar.
+
+Das Klassen-Matching liegt ebenfalls in `bin/`, und zwar zwingend: die
+Erlaubnisliste lässt `+ * ( ) |` zu, also verschachtelte Quantoren. Ein
+Ausdruck wie `(a+)+$` gegen 500 Fensterklassen lässt eine
+backtrackende Regex-Maschine hängen, und QML bietet für JavaScript kein
+Zeitlimit. Gematcht wird deshalb in `grep -E`, dessen Automat linear läuft;
+verschoben wird danach über die Fensteradresse, sodass der Regex nie nach Lua
+gelangt. **`class` wird nirgends mit JavaScript-`RegExp` ausgewertet.**
 
 ## 6. Sicherheit
 
@@ -221,8 +232,8 @@ ein Ausbruch ist nicht abgewehrt, sondern nicht formulierbar. Schicht 1 fängt
 Unsinn früh und verständlich ab und ist nicht sicherheitstragend.
 
 **Keine Shell dazwischen.** Der Aufruf geht als argv-Liste über
-`evalRunner()` (§6, Obergrenzen) — `timeout` ist keine Shell, es gibt also
-keine zweite Zitierfrage.
+`hypr()` (§6, Obergrenzen) — `timeout` ist keine Shell, es gibt also keine
+zweite Zitierfrage.
 
 ### Die Stelle, die absichtlich Code ist
 
@@ -256,9 +267,11 @@ Zwei Aufrufwege, bewusst getrennt:
 
 **Ohne Shell** — alles, was mit Hyprland spricht:
 
-- `evalRunner(chunk)` — argv-Liste
-  `["/usr/bin/timeout", "-k", "5", "20", "/usr/bin/hyprctl", "eval", chunk]`.
-  Keine Shell, also keine zweite Zitierfrage. Deadline 20 s.
+- `hypr(verb, payload)` — argv-Liste
+  `["/usr/bin/timeout", "-k", "5", "20", "/usr/bin/hyprctl", verb, payload]`.
+  Keine Shell, also keine zweite Zitierfrage. Deadline 20 s. Beide Verben sind
+  nötig und nicht austauschbar: `eval` führt einen Lua-Block aus (Regeln),
+  `dispatch` nimmt einen Dispatcher-Ausdruck (Umzüge).
 
 **Mit Shell** — nur der Autostart, weil `command` eine Kommandozeile ist und
 die Abkopplung eine Umleitung braucht:
