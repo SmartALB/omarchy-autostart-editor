@@ -33,6 +33,24 @@ test_sandbox_contains_every_path() {
 
 test_sandbox_contains_every_path
 
+# teardown_sandbox must put HOME/XDG_*/TMPDIR back exactly as it found them
+# -- absent stays absent, set comes back verbatim -- because every test that
+# runs afterwards in this same process, including this file's own
+# test_generated_lua_compiles, otherwise inherits a TMPDIR pointing at a
+# directory that no longer exists and mktemp fails for the rest of the run.
+test_teardown_restores_the_environment() {
+    local before_tmpdir="${TMPDIR-$'\x01unset'}"
+    local before_home="${HOME-$'\x01unset'}"
+    setup_sandbox
+    teardown_sandbox
+    assert_eq "teardown: TMPDIR is what it was before" "${TMPDIR-$'\x01unset'}" "$before_tmpdir"
+    assert_eq "teardown: HOME is what it was before" "${HOME-$'\x01unset'}" "$before_home"
+    assert_eq "teardown: mktemp works again afterwards" \
+              "$(mktemp -u >/dev/null 2>&1 && echo ok || echo broken)" "ok"
+}
+
+test_teardown_restores_the_environment
+
 CONFIG_BIN="$PWD/../bin/omarchy-autostart-config"
 
 valid_config() {

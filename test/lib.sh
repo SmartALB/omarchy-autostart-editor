@@ -3,11 +3,34 @@ TESTS_RUN=0
 TESTS_FAILED=0
 SANDBOX=""
 
+# The redirected variables, saved so teardown can put them back. Without
+# this, teardown deletes the sandbox and leaves TMPDIR and the XDG paths
+# pointing into it: mktemp then fails outright for anything that runs
+# afterwards in the same process, and the failure reads as a mystery
+# rather than as a torn-down sandbox.
+declare -A SANDBOX_SAVED=()
+SANDBOX_VARS=(HOME XDG_CONFIG_HOME XDG_STATE_HOME XDG_DATA_HOME
+              XDG_DATA_DIRS XDG_RUNTIME_DIR TMPDIR)
+
 setup_sandbox() {
-    # A prior test's setup_sandbox call may have exported TMPDIR pointing
-    # inside a sandbox that teardown_sandbox has since removed; mktemp -d
-    # here must build the new sandbox itself in the real /tmp, never inside
-    # a sandbox that no longer exists.
+    # Save the current values of the seven redirected variables before
+    # touching any of them, so teardown_sandbox can restore exactly this
+    # state -- absent-vs-empty included -- once it is done.
+    SANDBOX_SAVED=()
+    local var
+    for var in "${SANDBOX_VARS[@]}"; do
+        if [[ -v $var ]]; then
+            SANDBOX_SAVED["$var"]="${!var}"
+        else
+            SANDBOX_SAVED["$var"]=$'\x01was-unset'
+        fi
+    done
+
+    # Belt-and-braces, not the fix: this runs before the save/restore above
+    # is in effect for THIS call (there is nothing yet to restore from), so
+    # a still-broken TMPDIR from a process that never went through
+    # setup_sandbox at all -- or a caller that sourced lib.sh mid-session --
+    # would otherwise break mktemp -d here too.
     SANDBOX="$(TMPDIR=/tmp mktemp -d)" || { echo "setup_sandbox: mktemp -d failed" >&2; return 1; }
     [[ -n "$SANDBOX" && "$SANDBOX" == /tmp/?* ]] || { echo "setup_sandbox: implausible sandbox path ${SANDBOX@Q}" >&2; SANDBOX=""; return 1; }
     export HOME="$SANDBOX/home"
@@ -44,6 +67,20 @@ teardown_sandbox() {
         printf 'teardown_sandbox: refusing to delete %q -- not a plain path under /tmp\n' "$SANDBOX" >&2
     fi
     SANDBOX=""
+
+    # Put the seven redirected variables back exactly as setup_sandbox found
+    # them: unset stays unset (never comes back as an empty string), and a
+    # value that was set is restored verbatim. Without this, everything that
+    # runs after a teardown in the same process inherits HOME and XDG_* paths
+    # -- and TMPDIR -- pointing at a directory that was just deleted.
+    local var
+    for var in "${SANDBOX_VARS[@]}"; do
+        if [[ "${SANDBOX_SAVED[$var]-}" == $'\x01was-unset' ]]; then
+            unset "$var"
+        elif [[ -n "${SANDBOX_SAVED[$var]+set}" ]]; then
+            export "$var=${SANDBOX_SAVED[$var]}"
+        fi
+    done
 }
 
 assert_eq() {

@@ -40,10 +40,11 @@ CONFIG="${1:-}"
      "placement":{"kind":"workspace","value":"2"}}],
   "workspaces":[{"workspace":"6","monitor":"HDMI-A-1"},{"workspace":"2","monitor":"DP-3"}]}'
 
-# A prior test's setup_sandbox (see lib.sh) may leave TMPDIR exported and
-# pointing at a sandbox teardown_sandbox has since deleted -- it removes the
-# sandbox directory but never restores TMPDIR. Force /tmp here, the same
-# workaround lib.sh's own setup_sandbox uses for the identical problem.
+# teardown_sandbox (lib.sh) now restores TMPDIR itself, so this script does
+# not depend on it any more when it runs as part of run-tests.sh. Kept as
+# belt-and-braces anyway: this script can also be invoked directly, outside
+# run-tests.sh, from a shell whose TMPDIR is someone else's business and may
+# point anywhere. Force /tmp here regardless of who called it or why.
 tmp="$(TMPDIR=/tmp mktemp -d)"; trap 'rm -rf "$tmp"' EXIT
 # Wrapped in timeout like run-qml-tests.sh: an uncaught exception in
 # Component.onCompleted (e.g. Model.buildRuleChunks missing) never reaches
