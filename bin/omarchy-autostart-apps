@@ -46,6 +46,13 @@ parse_entry() {
             if (type != "Application") exit
             if (name == "" || exec == "") exit
             if (nodisp == "true" || hidden == "true") exit
+            # Values come from files this plugin does not own. A tab inside one
+            # would be indistinguishable from the delimiter after the join,
+            # silently shifting every later field of that entry, so it is
+            # squashed while the fields are still separate. Newlines cannot
+            # occur: awk reads line by line.
+            gsub(/\t/, " ", name); gsub(/\t/, " ", exec)
+            gsub(/\t/, " ", wmclass); gsub(/\t/, " ", icon)
             printf "%s\t%s\t%s\t%s\n", name, exec, wmclass, icon
         }
     '

@@ -414,6 +414,7 @@ test_apps_reads_name_exec_and_class() {
     assert_eq "apps: name"             "$(jq -r '.[0].name'     <<<"$out")" "Cursor"
     assert_eq "apps: raw exec kept"    "$(jq -r '.[0].exec'     <<<"$out")" "cursor %U"
     assert_eq "apps: wmclass"          "$(jq -r '.[0].wmclass'  <<<"$out")" "cursor"
+    assert_eq "apps: icon"             "$(jq -r '.[0].icon'     <<<"$out")" "cursor"
     teardown_sandbox
 }
 
@@ -471,10 +472,40 @@ test_apps_caps_bytes_per_file() {
     teardown_sandbox
 }
 
+test_apps_survives_a_tab_inside_a_value() {
+    setup_sandbox
+    local d="$XDG_DATA_HOME/applications"; mkdir -p "$d"
+    printf '[Desktop Entry]\nType=Application\nName=Tabby\nExec=foo\tbar\n' > "$d/tabby.desktop"
+    write_desktop "$d" "clean.desktop" "Type=Application" "Name=Clean" "Exec=clean"
+    local out; out="$(DESKTOP_DIRS="$d" "$APPS_BIN")"
+    assert_eq "apps: a tab in a value does not shift the later fields" \
+              "$(jq -r '.[] | select(.name=="Tabby") | .wmclass' <<<"$out")" ""
+    assert_eq "apps: and the tabbed value itself survives as one field" \
+              "$(jq -r '.[] | select(.name=="Tabby") | .exec' <<<"$out")" "foo bar"
+    assert_eq "apps: the other entry is unaffected" \
+              "$(jq -r '.[] | select(.name=="Clean") | .exec' <<<"$out")" "clean"
+    teardown_sandbox
+}
+
+test_apps_default_search_path_is_used_when_the_seam_is_unset() {
+    setup_sandbox
+    write_desktop "$XDG_DATA_HOME/applications" "defaulted.desktop" \
+        "Type=Application" "Name=Defaulted" "Exec=defaulted"
+    # No DESKTOP_DIRS: this exercises default_dirs() and its XDG handling.
+    # XDG_DATA_DIRS is cleared so the machine's real /usr/share/applications
+    # cannot join the answer and make the count unpredictable.
+    local out; out="$(XDG_DATA_DIRS="" "$APPS_BIN")"
+    assert_eq "apps: the default search path finds the sandboxed entry" \
+              "$(jq -r '.[] | select(.name=="Defaulted") | .exec' <<<"$out")" "defaulted"
+    teardown_sandbox
+}
+
 test_apps_reads_name_exec_and_class
 test_apps_skips_hidden_and_nondisplay_and_nonapplication
 test_apps_missing_exec_is_dropped
 test_apps_caps_the_file_count
 test_apps_caps_bytes_per_file
+test_apps_survives_a_tab_inside_a_value
+test_apps_default_search_path_is_used_when_the_seam_is_unset
 
 summary
