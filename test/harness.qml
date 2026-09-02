@@ -589,6 +589,27 @@ QtObject {
             check("firstFreeWorkspace: no rows at all is not a crash",
                   Model.firstFreeWorkspace(undefined), "1");
 
+            // "Has wording" has to mean MORE than "is not the bare code", and a
+            // mutation probe is how that was learned: deleting the
+            // write-failed branch left this assertion GREEN, because the
+            // fallback is a polite sentence naming the code rather than the
+            // bare code itself. So the fallback's own shape is asked for with
+            // a sentinel and then rendered for each real code -- derived from
+            // the function under test, not copied from it, so it keeps working
+            // if the fallback wording changes. reasonText below gets the same
+            // treatment; its fallback happens to be the bare code today, which
+            // is why the plain equality test still caught things there.
+            function unwordedAmong(codes, worder) {
+                var fallback = worder("__sentinel__"), without = [];
+                for (var i = 0; i < codes.length; i++) {
+                    var worded = worder(codes[i]);
+                    if (worded === codes[i]
+                        || worded === fallback.replace("__sentinel__", codes[i])
+                        || String(worded).length < 12) without.push(codes[i]);
+                }
+                return without.join(",");
+            }
+
             // --- reasonText ----------------------------------------------------
             //
             // Provoked from real configurations rather than from a hand-copied
@@ -667,13 +688,20 @@ QtObject {
             // the equality test does not count as wording.
             check("reasonText: every reason validate emits through EITHER channel has plain wording",
                   (function() {
-                      var all = provokedReasons(), without = [];
+                      var all = provokedReasons(), codes = [], labelOf = {};
                       for (var i = 0; i < all.length; i++) {
-                          var worded = Model.reasonText(all[i].code);
-                          if (worded === all[i].code || String(worded).length < 12)
-                              without.push(all[i].channel + ":" + all[i].code);
+                          codes.push(all[i].code);
+                          labelOf[all[i].code] = all[i].channel + ":" + all[i].code;
                       }
-                      return without.join(",");
+                      // Same fallback-aware rule as envelopeText above: a
+                      // fallback that politely names the code would otherwise
+                      // read as wording. Re-labelled with the channel so a
+                      // failure still says which one it came from.
+                      var bare = unwordedAmong(codes, Model.reasonText);
+                      if (bare === "") return "";
+                      var parts = bare.split(","), out = [];
+                      for (var j = 0; j < parts.length; j++) out.push(labelOf[parts[j]] || parts[j]);
+                      return out.join(",");
                   })(), "");
             // These two bind the one above: without them, a channel nothing
             // provokes would pass it vacuously -- which is exactly how the
@@ -694,14 +722,8 @@ QtObject {
             // Same rule as reasonText: not the bare code back, and long enough
             // to be a sentence rather than a decorated identifier.
             check("envelopeText: every code the config helper can emit has plain wording",
-                  (function() {
-                      var codes = Model.envelopeCodes(), without = [];
-                      for (var i = 0; i < codes.length; i++) {
-                          var worded = Model.envelopeText(codes[i], "");
-                          if (worded === codes[i] || String(worded).length < 12) without.push(codes[i]);
-                      }
-                      return without.join(",");
-                  })(), "");
+                  unwordedAmong(Model.envelopeCodes(),
+                                function(c) { return Model.envelopeText(c, ""); }), "");
             check("envelopeText: the list it checks is not empty",
                   Model.envelopeCodes().length, 8);
 
