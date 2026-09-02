@@ -1725,6 +1725,18 @@ In `test/harness.qml` einfügen:
                     function() {
                         Model.buildRuleChunks({ programs: [prog({ "class": "café" })], workspaces: [] });
                     });
+
+        // Panel.qml picks the hyprctl verb by looking at the payload's first
+        // characters: a rule block goes to eval, a dispatcher expression to
+        // dispatch. Nothing asserted that property, so it is pinned here.
+        check("chunks: every rule block starts with do -- the panel sends these to eval",
+              (function() {
+                  var c = chunksFor([prog({})], [{ workspace: "1", monitor: "DP-4" }]);
+                  for (var i = 0; i < c.length; i++) {
+                      if (c[i].indexOf("do") !== 0) return "chunk " + i + " starts with " + c[i].substring(0, 8);
+                  }
+                  return "all";
+              })(), "all");
 ```
 
 `test/dump-chunks.qml` (die Brücke zum Lua-Compiler):
@@ -2359,6 +2371,20 @@ In `test/harness.qml`:
               Model.buildReconcileChunks(Model.validate(cfg([prog({ placement: { kind: "none" } })], [])),
                                          [], [{ id: "p1", address: "0xbeef" }]).length, 0);
 
+        // The counterpart to the rule-block test in task 9: Panel.qml routes
+        // anything starting with hl.dsp. to the dispatch verb.
+        check("reconcile: every expression starts with hl.dsp. -- the panel sends these to dispatch",
+              (function() {
+                  var m = Model.validate(cfg([prog({ id: "p1" })], [{ workspace: "2", monitor: "DP-3" }]));
+                  var c = Model.buildReconcileChunks(m, [{ workspace: "2", monitor: "DP-4" }],
+                                                     [{ id: "p1", address: "0xbeef" }]);
+                  if (c.length === 0) return "no expressions produced";
+                  for (var i = 0; i < c.length; i++) {
+                      if (c[i].indexOf("hl.dsp.") !== 0) return "expression " + i;
+                  }
+                  return "all";
+              })(), "all");
+
         checkThrows("reconcile: a malformed address is refused",
                     function() {
                         Model.buildReconcileChunks(Model.validate(cfg([prog({ id: "p1" })], [])),
@@ -2660,11 +2686,19 @@ for file in $(qml_files); do
   done
 done
 
-# 7 -- no literal double-quoted Lua string anywhere: everything that reaches
-#      the compositor must arrive as string.char(...).
-hits="$(grep -nE 'hl\.(window_rule|workspace_rule|dsp)[^\n]*\\?"' ./*.qml 2>/dev/null || true)"
-[[ -z "$hits" ]] && ok "no literal quoted Lua value in any qml file" \
-                 || bad "no literal quoted Lua value in any qml file" "$hits"
+# 7a -- Lua rule construction lives in Model.js only. A qml file must not
+#       build rules at all; it only passes strings through. (hl.dsp. may
+#       appear there -- the panel sniffs it to choose the hyprctl verb.)
+hits="$(grep -nE 'hl\.(window_rule|workspace_rule)' ./*.qml 2>/dev/null || true)"
+[[ -z "$hits" ]] && ok "no rule construction in any qml file" \
+                 || bad "no rule construction in any qml file" "$hits"
+
+# 7b -- and in Model.js every line that builds a rule encodes its values.
+#       A quoted value there would be code inside the compositor.
+hits="$(grep -nE 'hl\.(window_rule|workspace_rule|dsp)' Model.js \
+        | grep -v 'luaBytes(' || true)"
+[[ -z "$hits" ]] && ok "every rule-building line in Model.js uses luaBytes" \
+                 || bad "every rule-building line in Model.js uses luaBytes" "$hits"
 
 printf '\nqml structure: total=%d failed=%d\n' "$run" "$failed"
 (( failed == 0 ))
@@ -3179,11 +3213,18 @@ else
   bad "BarWidget: bar glyph is written as a \\u escape" \
       "$(grep -n 'barGlyph' BarWidget.qml || echo 'no barGlyph at all')"
 fi
-if LC_ALL=C grep -qP '[\x{e000}-\x{f8ff}]' BarWidget.qml 2>/dev/null; then
+# python3 rather than grep -P: with LC_ALL=C, PCRE rejects \x{} values above
+# 0xFF outright, so the check would end in an error instead of a result.
+if python3 - BarWidget.qml <<'PUA'
+import io, sys
+text = io.open(sys.argv[1], encoding="utf-8", errors="replace").read()
+sys.exit(1 if any(0xE000 <= ord(c) <= 0xF8FF for c in text) else 0)
+PUA
+then
+  ok "BarWidget: no literal private-use character in the file"
+else
   bad "BarWidget: no literal private-use character in the file" \
       "found a raw PUA codepoint -- write it as \\uXXXX"
-else
-  ok "BarWidget: no literal private-use character in the file"
 fi
 ```
 
