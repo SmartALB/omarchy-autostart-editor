@@ -456,9 +456,16 @@ test_apps_caps_bytes_per_file() {
     # Name comes first, then 100 KiB of comments, then Exec. With a 64 KiB cap
     # the Exec line is never read, so the entry is dropped -- which is exactly
     # the observable effect of the byte limit.
+    #
+    # 102400 is an exact multiple of the fold width, so fold's last output
+    # line carries no trailing newline; without an explicit "\n" here the
+    # following "Exec=fat" would merge onto that last comment line and never
+    # appear as a line matching /^Exec=/ at all -- masking the byte cap
+    # entirely (verified: even reading the whole file with `cat` still
+    # yielded 0 entries, for the wrong reason).
     { printf '[Desktop Entry]\nType=Application\nName=Fat\n'
       head -c 102400 /dev/zero | tr '\0' '#' | fold -w 80 | sed 's/^/#/'
-      printf 'Exec=fat\n'; } > "$d/fat.desktop"
+      printf '\nExec=fat\n'; } > "$d/fat.desktop"
     assert_eq "apps: per-file byte cap keeps the tail unread" \
               "$(jq -r 'length' <<<"$(DESKTOP_DIRS="$d" "$APPS_BIN")")" "0"
     teardown_sandbox
