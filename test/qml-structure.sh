@@ -1342,5 +1342,135 @@ raw_env="$(sed '/^$/d' <<<"$raw_env")"
 [[ -z "$raw_env" ]] && ok "Panel: every envelope error is worded through Model.envelopeText" \
                     || bad "Panel: every envelope error is worded through Model.envelopeText" "$raw_env"
 
+# 24/25 -- the fix for this task's worst defect, bound as a class.
+#
+#          THE DEFECT: collapsing a row while one of its fields has focus
+#          clears no focus and fires no activeFocusChanged, so the focus
+#          counter sticks above zero. Escape is then swallowed for the rest of
+#          the open session, and -- worse -- the now-invisible field remains
+#          the window's activeFocusItem, so keystrokes go on editing the draft
+#          with Apply ready to persist them. Measured, offscreen qml, a stub of
+#          Panel.qml's exact shape:
+#            collapsed without the hand-over  editorsFocused=1 blocked=true  activeFocusItem=field1 fieldVisible=false
+#            collapsed with it                editorsFocused=0 blocked=false activeFocusItem=keyCatcher
+#
+#          THE FIX was held by nothing at all: deleting the hand-over line
+#          leaves all five suites AND qmllint green. Two checks bind it,
+#          because either alone is insufficient -- the hand-over is only
+#          reached if every collapse goes through the setter, and the setter is
+#          only useful if the hand-over happens before the write.
+#
+#          Neither check can see whether focus actually moves at runtime; that
+#          part is measured in the stub above and recorded in the task report,
+#          not here. What these bind is the SHAPE the measurement was taken of.
+
+# The line numbers a named function's brace-delimited body spans, so order
+# inside it can be compared. Same brace-depth technique as function_body(),
+# which returns the text but loses the positions.
+function_line_range() {
+  # $1 = comment-stripped content, $2 = function name. Prints "START END".
+  awk -v fn="$2" '
+    BEGIN { capturing = 0; depth = 0; started = 0; s = 0 }
+    {
+      if (!capturing) {
+        if ($0 !~ "(^|[^A-Za-z0-9_])function[[:space:]]+" fn "[[:space:]]*\\(") next
+        capturing = 1; depth = 0; started = 0; s = NR
+      }
+      n = length($0)
+      for (i = 1; i <= n; i++) {
+        c = substr($0, i, 1)
+        if (c == "{") { depth++; started = 1 }
+        else if (c == "}") {
+          depth--
+          if (started && depth <= 0) { print s " " NR; exit }
+        }
+      }
+    }
+  ' <<<"$1"
+}
+
+# The PanelKeyCatcher's own id, so the hand-over below is origin-qualified
+# rather than merely a call to some forceActiveFocus. Same
+# first-id-after-the-opener technique check 16 uses, on the same block.
+panel_catcher_id="$(awk '
+    /(^|[^A-Za-z0-9_])PanelKeyCatcher[[:space:]]*\{/ { incatcher = 1 }
+    incatcher && /id:[[:space:]]*[A-Za-z_]/ {
+        match($0, /id:[[:space:]]*[A-Za-z_][A-Za-z0-9_]*/)
+        t = substr($0, RSTART, RLENGTH); sub(/id:[[:space:]]*/, "", t)
+        print t; exit
+    }
+' <<<"$keyboard_block")"
+
+expanded_write_pat='(^|[^A-Za-z0-9_.])(root\.)?expandedRow[[:space:]]*=[[:space:]]*[^=]'
+setter_range="$(function_line_range "$stripped_panel" setExpandedRow)"
+
+# 24 -- the hand-over happens, on the key catcher, and BEFORE the write.
+#       Order is the whole point: handing focus over after expandedRow has
+#       already changed is handing it over after the field is gone, which is
+#       the unfixed behaviour with an extra line in it.
+if [[ -z "$setter_range" ]]; then
+  bad "Panel: setExpandedRow hands focus to the key catcher before writing" \
+      "no 'function setExpandedRow(...) { ... }' block found -- the collapse paths have nowhere to route through"
+elif [[ -z "$panel_catcher_id" ]]; then
+  bad "Panel: setExpandedRow hands focus to the key catcher before writing" \
+      "no PanelKeyCatcher id could be read, so a hand-over cannot be qualified against it"
+else
+  setter_start="${setter_range%% *}"; setter_end="${setter_range##* }"
+  handover_line=0; write_line=0
+  for ((i = setter_start; i <= setter_end; i++)); do
+    line="${panel_all[$((i - 1))]}"
+    if (( handover_line == 0 )) \
+       && grep -qE "(^|[^A-Za-z0-9_])${panel_catcher_id}[[:space:]]*\.[[:space:]]*forceActiveFocus[[:space:]]*\(" <<<"$line"; then
+      handover_line=$i
+    fi
+    if (( write_line == 0 )) && grep -qE "$expanded_write_pat" <<<"$line"; then
+      write_line=$i
+    fi
+  done
+  if (( handover_line == 0 )); then
+    bad "Panel: setExpandedRow hands focus to the key catcher before writing" \
+        "no '${panel_catcher_id}.forceActiveFocus()' inside setExpandedRow -- collapsing then strands focus on an invisible field and blocks Escape for the session"
+  elif (( write_line == 0 )); then
+    bad "Panel: setExpandedRow hands focus to the key catcher before writing" \
+        "setExpandedRow never writes expandedRow at all"
+  elif (( handover_line < write_line )); then
+    ok "Panel: setExpandedRow hands focus to the key catcher before writing"
+  else
+    bad "Panel: setExpandedRow hands focus to the key catcher before writing" \
+        "the hand-over is on line $handover_line and the write on line $write_line -- after the write the field is already gone, which is the unfixed behaviour with an extra line in it"
+  fi
+fi
+
+# 25 -- and it is the ONLY write site. This is what makes check 24 sufficient:
+#       a direct assignment anywhere else bypasses the hand-over completely,
+#       and there were five such sites before this round (close, removeProgram,
+#       reload, revert, and the two row buttons) -- routing them through the
+#       setter is the entire reason the fix reaches every collapse.
+write_sites=""
+for ((i = 0; i < ${#panel_all[@]}; i++)); do
+  grep -qE "$expanded_write_pat" <<<"${panel_all[$i]}" || continue
+  write_sites="$write_sites
+$((i + 1)): ${panel_all[$i]}"
+done
+write_sites="$(sed '/^$/d' <<<"$write_sites")"
+site_count=0
+[[ -n "$write_sites" ]] && site_count="$(grep -c . <<<"$write_sites")"
+if (( site_count != 1 )); then
+  bad "Panel: expandedRow has exactly one write site, inside setExpandedRow" \
+      "found $site_count write site(s); every one outside the setter bypasses the focus hand-over:$write_sites"
+elif [[ -z "$setter_range" ]]; then
+  bad "Panel: expandedRow has exactly one write site, inside setExpandedRow" \
+      "the single write site cannot be placed: no setExpandedRow block found"
+else
+  only_line="${write_sites%%:*}"
+  only_line="$(tr -d '[:space:]' <<<"$only_line")"
+  if (( only_line >= ${setter_range%% *} && only_line <= ${setter_range##* } )); then
+    ok "Panel: expandedRow has exactly one write site, inside setExpandedRow"
+  else
+    bad "Panel: expandedRow has exactly one write site, inside setExpandedRow" \
+        "the write is on line $only_line, outside setExpandedRow (lines $setter_range) -- it bypasses the focus hand-over"
+  fi
+fi
+
 printf '\nqml structure: total=%d failed=%d\n' "$run" "$failed"
 (( failed == 0 ))
