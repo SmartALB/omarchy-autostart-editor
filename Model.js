@@ -291,6 +291,56 @@ function buildRuleChunks(model) {
 
 // --- derived values -------------------------------------------------------
 
+// The lowest workspace number the table does not use yet, as the string the
+// schema stores. Bounded by MAX_WORKSPACES, which is why this lives here and
+// not in the panel: the bound and the allowlist that has to agree with it are
+// both in this file.
+//
+// When every number is taken it returns the last one rather than nothing. The
+// row the panel then adds is a duplicate, validate() names it as
+// "workspace-duplicate" and the user changes it -- a visible dead end, rather
+// than a button that silently does nothing.
+//
+// A malformed row contributes whatever it stringifies to and therefore blocks
+// no legal number; rows do not have to be valid to be counted, because this
+// runs on a draft that is mid-edit by definition.
+function firstFreeWorkspace(rows) {
+    var used = Object.create(null), i;
+    var list = rows || [];
+    for (i = 0; i < list.length; i++) {
+        used[String(list[i] && list[i].workspace)] = true;
+    }
+    for (i = 1; i <= MAX_WORKSPACES; i++) {
+        if (used[String(i)] === undefined) return String(i);
+    }
+    return String(MAX_WORKSPACES);
+}
+
+// Plain wording for the reason codes validate() reports, so the omissions list
+// is readable by the person who has to fix the entry rather than by whoever
+// wrote the validator. Every code the functions above can produce has an entry
+// here; test/harness.qml provokes them from real configurations and fails if
+// one turns up without wording, so a new code cannot be added upstream and
+// silently reach the user as a bare identifier.
+//
+// An unknown code is passed through unchanged rather than guessed at.
+function reasonText(code) {
+    if (code === "not-a-list")          return "this is not a list";
+    if (code === "not-an-object")       return "this entry is not an object";
+    if (code === "id-invalid")          return "the internal id is malformed";
+    if (code === "id-duplicate")        return "two entries share one id";
+    if (code === "name-invalid")        return "the name is empty or too long";
+    if (code === "enabled-invalid")     return "the on/off value is not true or false";
+    if (code === "command-invalid")     return "the command is empty or too long";
+    if (code === "command-incomplete")  return "the command ends in &&, || or | and cannot run";
+    if (code === "class-not-allowed")   return "the window class pattern is not allowed";
+    if (code === "placement-invalid")   return "the placement is not allowed";
+    if (code === "workspace-invalid")   return "the workspace number or monitor name is not allowed";
+    if (code === "workspace-duplicate") return "this workspace is listed twice";
+    if (code === "too-many")            return "there are too many entries";
+    return String(code);
+}
+
 // The monitor a program actually ends up on. With placement kind "workspace"
 // this is the monitor the workspace is pinned to -- which is why the panel can
 // show it greyed out behind the workspace choice and why placement is

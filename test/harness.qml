@@ -569,6 +569,84 @@ QtObject {
             check("missingIds: a disabled program is never missing",
                   Model.missingIds(Model.validate(cfg([prog({ id: "p1", enabled: false })], [])), []).length, 0);
 
+            // --- firstFreeWorkspace --------------------------------------------
+            check("firstFreeWorkspace: an empty table starts at 1",
+                  Model.firstFreeWorkspace([]), "1");
+            check("firstFreeWorkspace: takes the lowest number not in use",
+                  Model.firstFreeWorkspace([{ workspace: "1" }, { workspace: "2" },
+                                            { workspace: "4" }]), "3");
+            // The edge case: with every legal number taken it returns the last
+            // one rather than nothing, so the panel adds a visible duplicate
+            // the user can change instead of a button that does nothing.
+            check("firstFreeWorkspace: with 1 to 99 all taken it returns 99, not nothing",
+                  (function() {
+                      var full = [];
+                      for (var i = 1; i <= 99; i++) full.push({ workspace: String(i) });
+                      return Model.firstFreeWorkspace(full);
+                  })(), "99");
+            check("firstFreeWorkspace: a malformed row blocks no legal number",
+                  Model.firstFreeWorkspace([{ workspace: null }, {}, { workspace: 1 }]), "2");
+            check("firstFreeWorkspace: no rows at all is not a crash",
+                  Model.firstFreeWorkspace(undefined), "1");
+
+            // --- reasonText ----------------------------------------------------
+            //
+            // Provoked from real configurations rather than from a hand-copied
+            // list of codes: a new reason added to validate() with no wording
+            // turns the first of these red, which a list mirroring the
+            // validator could never do. The second binds the first -- without
+            // it, provoking nothing at all would pass vacuously, which was
+            // confirmed by blanking the list and watching only the second go
+            // red.
+            function provokedReasons() {
+                var many = [], i;
+                for (i = 0; i < 205; i++) many.push(prog({ id: "p" + i }));
+                var manyWs = [];
+                for (i = 1; i <= 99; i++) manyWs.push({ workspace: String(i), monitor: "DP-4" });
+                manyWs.push({ workspace: "5", monitor: "DP-4" });
+
+                var configs = [
+                    { schemaVersion: 1, programs: "cursor", workspaces: [] },
+                    { schemaVersion: 1, programs: [], workspaces: "DP-4" },
+                    cfg([null]),
+                    cfg([prog({ id: "P 1!" })]),
+                    cfg([prog({ name: "" })]),
+                    cfg([prog({ enabled: "yes" })]),
+                    cfg([prog({ command: "" })]),
+                    cfg([prog({ command: "myapp &&" })]),
+                    cfg([prog({ "class": 'a"b' })]),
+                    cfg([prog({ placement: { kind: "screen", value: "DP-4" } })]),
+                    cfg([prog({ id: "a" }), prog({ id: "a" })]),
+                    cfg(many),
+                    cfg([], [{ workspace: "0", monitor: "DP-4" }]),
+                    cfg([], [{ workspace: "1", monitor: "DP-4" },
+                             { workspace: "1", monitor: "DP-3" }]),
+                    cfg([], manyWs)
+                ];
+                var seen = Object.create(null), out = [];
+                for (i = 0; i < configs.length; i++) {
+                    var rejected = Model.validate(configs[i]).rejected;
+                    for (var j = 0; j < rejected.length; j++) {
+                        var code = String(rejected[j].reason);
+                        if (seen[code] === undefined) { seen[code] = true; out.push(code); }
+                    }
+                }
+                return out;
+            }
+
+            check("reasonText: every reason validate produces has plain wording",
+                  (function() {
+                      var codes = provokedReasons(), without = [];
+                      for (var i = 0; i < codes.length; i++) {
+                          if (Model.reasonText(codes[i]) === codes[i]) without.push(codes[i]);
+                      }
+                      return without.join(",");
+                  })(), "");
+            check("reasonText: the configurations above really do provoke 13 distinct reasons",
+                  provokedReasons().length, 13);
+            check("reasonText: an unknown code is passed through, not guessed at",
+                  Model.reasonText("something-new"), "something-new");
+
             // --- shellQuote ----------------------------------------------------
             check("shellQuote: plain path",      Model.shellQuote("/a/b"), "'/a/b'");
             check("shellQuote: a space",         Model.shellQuote("a b"), "'a b'");

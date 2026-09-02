@@ -16,6 +16,15 @@ Item {
     readonly property string binHyprctl: "/usr/bin/hyprctl"
     readonly property string binSetsid: "/usr/bin/setsid"
 
+    // For the one command shape that needs a real file on disk to hand over:
+    // bin/omarchy-autostart-windows --match-file asks `[[ -f ]]` before
+    // reading, so a pipe and a process substitution are both refused -- and
+    // silently, it answers "[]" and every program then reads as not running.
+    // Named here rather than at that call site, because one place names the
+    // tools.
+    readonly property string binMktemp: "/usr/bin/mktemp"
+    readonly property string binRm: "/usr/bin/rm"
+
     readonly property int shellSeconds: 120
     readonly property int hyprSeconds: 20
 
