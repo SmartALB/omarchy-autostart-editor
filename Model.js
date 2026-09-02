@@ -87,9 +87,20 @@ function placementKey(placement) {
 
 function validate(config) {
     var out = { programs: [], workspaces: [], rejected: [], blocked: [] };
-    var programs   = (config && config.programs)   || [];
-    var workspaces = (config && config.workspaces) || [];
-    var i, seenIds = {}, seenWs = {};
+    var i, seenIds = Object.create(null), seenWs = Object.create(null);
+
+    // A string has .length and bracket indexing, so a hand-edited
+    // "programs": "cursor" would otherwise be walked character by character
+    // and produce one meaningless rejection per letter. A present-but-wrong
+    // value is named; an absent key is not an error at all.
+    if (config && config.programs !== undefined && !Array.isArray(config.programs)) {
+        out.rejected.push({ kind: "program", label: "programs", reason: "not-a-list" });
+    }
+    if (config && config.workspaces !== undefined && !Array.isArray(config.workspaces)) {
+        out.rejected.push({ kind: "workspace", label: "workspaces", reason: "not-a-list" });
+    }
+    var programs   = (config && Array.isArray(config.programs))   ? config.programs   : [];
+    var workspaces = (config && Array.isArray(config.workspaces)) ? config.workspaces : [];
 
     for (i = 0; i < programs.length; i++) {
         var p = programs[i];
@@ -150,7 +161,7 @@ function validate(config) {
         byClass[key].push(prog);
     }
     for (var cls in byClass) {
-        var group = byClass[cls], places = {}, labels = [];
+        var group = byClass[cls], places = Object.create(null), labels = [];
         for (i = 0; i < group.length; i++) {
             places[placementKey(group[i].placement)] = true;
             labels.push(labelOf(group[i], i));

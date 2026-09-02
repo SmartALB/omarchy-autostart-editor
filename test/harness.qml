@@ -180,6 +180,37 @@ QtObject {
                       }
                   })(), "survived, blocked=1");
 
+            // ID_RE is /^[a-z0-9]{1,16}$/, which permits "constructor",
+            // "tostring" and "valueof" -- JS-special names on a plain object.
+            // seenIds has to be prototype-less for the same reason byClass
+            // does: a sole program named "constructor" must not be reported
+            // as a duplicate of itself.
+            check("validate accepts a sole program whose id is a JS-special name",
+                  (function() {
+                      var r = Model.validate(cfg([prog({ id: "constructor" })]));
+                      return r.programs.length + "/" + ((r.rejected[0] || {}).reason || "none");
+                  })(), "1/none");
+            check("validate still catches a real duplicate id",
+                  (function() {
+                      var r = Model.validate(cfg([prog({ id: "constructor" }), prog({ id: "constructor" })]));
+                      return r.programs.length + "/" + ((r.rejected[0] || {}).reason || "none");
+                  })(), "1/id-duplicate");
+
+            // A string has .length and bracket indexing, so a hand-edited
+            // "programs": "cursor" would otherwise be walked character by
+            // character and produce one meaningless rejection per letter
+            // instead of one legible one.
+            check("validate rejects a programs value that is a string, once",
+                  (function() {
+                      var r = Model.validate(cfg("cursor"));
+                      return r.rejected.length + "/" + ((r.rejected[0] || {}).reason || "none");
+                  })(), "1/not-a-list");
+            check("validate does not treat an absent programs key as an error",
+                  (function() {
+                      var r = Model.validate({ schemaVersion: 1 });
+                      return r.rejected.length;
+                  })(), 0);
+
             console.warn("total=" + total + " failed=" + failed);
             Qt.exit(failed === 0 ? 0 : 1);
         } catch (e) {
