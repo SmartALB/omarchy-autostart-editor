@@ -16,8 +16,14 @@ setup_sandbox() {
     export XDG_DATA_HOME="$SANDBOX/data"
     export XDG_RUNTIME_DIR="$SANDBOX/run"
     export TMPDIR="$SANDBOX/tmp"
+    # A non-empty path defeats the ${XDG_DATA_DIRS:-...} default (":-"
+    # substitutes for set-but-empty too, not only unset), and an empty
+    # directory contributes nothing -- so no test can reach the real
+    # /usr/share/applications by accident.
+    export XDG_DATA_DIRS="$SANDBOX/data-dirs"
     mkdir -p "$HOME" "$XDG_CONFIG_HOME/omarchy" "$XDG_STATE_HOME" \
-             "$XDG_DATA_HOME/applications" "$XDG_RUNTIME_DIR" "$TMPDIR"
+             "$XDG_DATA_HOME/applications" "$XDG_RUNTIME_DIR" "$TMPDIR" \
+             "$XDG_DATA_DIRS"
     export FAKE_LOG="$SANDBOX/fake.log"
     : > "$FAKE_LOG"
 }

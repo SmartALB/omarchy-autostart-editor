@@ -10,7 +10,7 @@ cd "$(dirname "$0")"
 # directories. On 2026-09-02 a test run overwrote real state that way.
 test_sandbox_contains_every_path() {
     setup_sandbox
-    for var in HOME XDG_CONFIG_HOME XDG_STATE_HOME XDG_DATA_HOME XDG_RUNTIME_DIR TMPDIR; do
+    for var in HOME XDG_CONFIG_HOME XDG_STATE_HOME XDG_DATA_HOME XDG_DATA_DIRS XDG_RUNTIME_DIR TMPDIR; do
         local value="${!var-}"
         assert_eq "sandbox: \$$var lies under the sandbox" \
                   "$(case "$value" in "$SANDBOX"/*) echo inside ;; *) echo "OUTSIDE: $value" ;; esac)" \
@@ -492,11 +492,16 @@ test_apps_default_search_path_is_used_when_the_seam_is_unset() {
     write_desktop "$XDG_DATA_HOME/applications" "defaulted.desktop" \
         "Type=Application" "Name=Defaulted" "Exec=defaulted"
     # No DESKTOP_DIRS: this exercises default_dirs() and its XDG handling.
-    # XDG_DATA_DIRS is cleared so the machine's real /usr/share/applications
-    # cannot join the answer and make the count unpredictable.
-    local out; out="$(XDG_DATA_DIRS="" "$APPS_BIN")"
+    # No XDG_DATA_DIRS override either -- the sandbox points it at an empty
+    # directory of its own, which is what keeps /usr/share/applications out.
+    # Setting it to "" would NOT work: default_dirs uses ${XDG_DATA_DIRS:-...}
+    # and :- substitutes the default for a set-but-empty value too, which is
+    # what the XDG specification requires.
+    local out; out="$("$APPS_BIN")"
     assert_eq "apps: the default search path finds the sandboxed entry" \
               "$(jq -r '.[] | select(.name=="Defaulted") | .exec' <<<"$out")" "defaulted"
+    assert_eq "apps: the default search path sees only the sandbox" \
+              "$(jq -r 'length' <<<"$out")" "1"
     teardown_sandbox
 }
 
