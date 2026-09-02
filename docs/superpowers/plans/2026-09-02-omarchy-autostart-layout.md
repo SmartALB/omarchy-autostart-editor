@@ -2611,7 +2611,15 @@ function launchCommand(command) {
     // chain ends, taking the application with it -- exactly the trap these
     // redirections exist to prevent. Grouping also makes the entries safe to
     // join with `&` when several are launched at once.
-    return "{ uwsm-app -- " + command + " ; } </dev/null >/dev/null 2>&1";
+    // Terminated by a NEWLINE, not by "; ": a command ending in "&", ";" or a
+    // trailing #comment is a legitimate shell command line, and "; }" after it
+    // is a syntax error -- the group then never runs and the program never
+    // starts, silently. Measured:
+    //   { uwsm-app -- myapp & ; } ...        -> syntax error
+    //   { uwsm-app -- myapp &\n} ...         -> valid
+    // A command ending in "&&" or "|" is incomplete in any context and is
+    // refused by validate() instead (command-incomplete).
+    return "{ uwsm-app -- " + command + "\n} </dev/null >/dev/null 2>&1";
 }
 
 // Workspace rules only take effect when a workspace is CREATED, so a workspace
@@ -3653,9 +3661,21 @@ Item {
             if (programs[i].enabled) commands.push(Model.launchCommand(programs[i].command))
         }
         if (commands.length === 0) return
-        // One shell for the whole list: the count is capped at 200 by
-        // validate(), and 200 processes to start 200 programs is waste.
-        launchProc.command = run.runner(commands.join(" & ") + " & wait")
+        // Each entry gets its own `bash -c`, and that is not a stylistic
+        // choice. bash parses a whole line before it runs any of it, so with
+        // every entry on one line a single malformed command would stop the
+        // ENTIRE autostart -- the user logs in to an empty desktop and a
+        // syntax error on stderr. Measured:
+        //   all entries on one line:  syntax error -> nothing ran
+        //   one bash -c per entry:    the good ones ran, only the bad reported
+        // The outer shell still starts them all in parallel and waits once, so
+        // this costs one short-lived process per program, not one per program
+        // kept alive.
+        var isolated = []
+        for (var j = 0; j < commands.length; j++) {
+            isolated.push("/usr/bin/bash -c " + Model.shellQuote(commands[j]))
+        }
+        launchProc.command = run.runner(isolated.join(" & ") + " & wait")
         launchProc.running = true
     }
 
