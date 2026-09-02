@@ -2576,9 +2576,18 @@ function effectiveMonitor(program, workspaces) {
 // percent sign and becomes one; codes we do not know are left alone rather
 // than guessed at, because a wrong guess produces a command that fails at
 // login with no one watching.
+//
+// This does not track quoting, so a field code inside a quoted argument is
+// stripped too (the freedesktop specification explicitly leaves that case
+// undefined) and the whitespace collapse below can turn a double space
+// inside a quoted argument into a single one. Accepted: the collapse is what
+// cleans up the gap a removed code leaves behind, and a deliberate double
+// space inside a quoted Exec= argument is essentially unheard of.
 function stripFieldCodes(exec) {
-    var known = { "f": 1, "F": 1, "u": 1, "U": 1, "d": 1, "D": 1,
-                  "n": 1, "N": 1, "i": 1, "c": 1, "k": 1, "v": 1, "m": 1 };
+    var known = Object.create(null);
+    known["f"] = 1; known["F"] = 1; known["u"] = 1; known["U"] = 1;
+    known["d"] = 1; known["D"] = 1; known["n"] = 1; known["N"] = 1;
+    known["i"] = 1; known["c"] = 1; known["k"] = 1; known["v"] = 1; known["m"] = 1;
     var out = "", i = 0;
     while (i < exec.length) {
         if (exec.charAt(i) === "%" && i + 1 < exec.length) {
@@ -2601,24 +2610,18 @@ function stripFieldCodes(exec) {
 // ends Quickshell tears those pipes down and takes the application with it.
 // From a terminal the same command works, because nobody tears anything down.
 function launchCommand(command) {
-    // The braces are load-bearing. The command field is a shell command line,
-    // so it may contain `&&`, `;` or a pipe -- and a redirection binds only to
-    // the LAST command of such a chain. Measured:
-    //   echo A && echo B </dev/null >/dev/null 2>&1   -> prints A
-    //   { echo A && echo B ; } </dev/null >/dev/null 2>&1 -> prints nothing
-    // Without the group, `sleep 2 && myapp` leaves `sleep 2` holding
-    // Quickshell's stdout and stderr, and Quickshell tears those down when the
-    // chain ends, taking the application with it -- exactly the trap these
-    // redirections exist to prevent. Grouping also makes the entries safe to
-    // join with `&` when several are launched at once.
-    // Terminated by a NEWLINE, not by "; ": a command ending in "&", ";" or a
+    // The braces are load-bearing. The command field is a shell command
+    // line, so it may contain `&&`, `;` or a pipe -- and a redirection
+    // binds only to the last command of such a chain. Without the group,
+    // `sleep 2 && myapp` would leave `sleep 2` holding Quickshell's
+    // stdout and stderr, and Quickshell tears those down when the chain
+    // ends, taking the application with it. Grouping also makes the
+    // entries safe to join with `&` when several are launched at once.
+    //
+    // Terminated by a newline, not by "; ": a command ending in "&", ";" or a
     // trailing #comment is a legitimate shell command line, and "; }" after it
     // is a syntax error -- the group then never runs and the program never
-    // starts, silently. Measured:
-    //   { uwsm-app -- myapp & ; } ...        -> syntax error
-    //   { uwsm-app -- myapp &\n} ...         -> valid
-    // A command ending in "&&" or "|" is incomplete in any context and is
-    // refused by validate() instead (command-incomplete).
+    // starts, silently. A newline closes the list in every one of those cases.
     return "{ uwsm-app -- " + command + "\n} </dev/null >/dev/null 2>&1";
 }
 
