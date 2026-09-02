@@ -93,13 +93,10 @@ test_read_accepts_exactly_the_limit() {
         printf '%s' "$suffix"
     } > "$f"
     local size; size="$(wc -c < "$f")"
-    if (( size == 262144 )); then
-        chmod 600 "$f"
-        assert_eq "read: exactly 256 KiB is accepted" \
-                  "$(jq -r .ok <<<"$("$CONFIG_BIN" read)")" "true"
-    else
-        assert_eq "read: could not build a 256 KiB file (size $size)" "built" "built"
-    fi
+    assert_eq "read: built file is exactly 256 KiB" "$size" "262144"
+    chmod 600 "$f"
+    assert_eq "read: exactly 256 KiB is accepted" \
+              "$(jq -r .ok <<<"$("$CONFIG_BIN" read)")" "true"
     teardown_sandbox
 }
 
@@ -163,6 +160,42 @@ test_read_leaves_no_temp_file() {
     teardown_sandbox
 }
 
+test_every_error_path_yields_exactly_one_envelope() {
+    setup_sandbox
+    local f="$XDG_CONFIG_HOME/omarchy/autostart-layout.json"
+    local label out count
+    # Each of these drives the script down a different path; every one of
+    # them must answer with exactly one JSON object carrying an "ok" field.
+    for label in missing broken badschema groupwritable notafile; do
+        rm -rf "$f"
+        case "$label" in
+            missing)        : ;;
+            broken)         printf '{"schemaVersion":1,' > "$f"; chmod 600 "$f" ;;
+            badschema)      printf '{"schemaVersion":9,"programs":[],"workspaces":[]}' > "$f"; chmod 600 "$f" ;;
+            groupwritable)  valid_config > "$f"; chmod 664 "$f" ;;
+            notafile)       mkdir -p "$f" ;;
+        esac
+        out="$("$CONFIG_BIN" read 2>/dev/null)"
+        assert_eq "envelope: $label exits 0" "$?" "0"
+        count="$(jq -s 'length' <<<"$out" 2>/dev/null || echo BADJSON)"
+        assert_eq "envelope: $label yields exactly one JSON object" "$count" "1"
+        assert_eq "envelope: $label carries an ok field" \
+                  "$(jq -r 'has("ok")' <<<"$out" 2>/dev/null)" "true"
+    done
+    rm -rf "$f"
+    teardown_sandbox
+}
+
+test_missing_config_directory_still_answers() {
+    setup_sandbox
+    rm -rf "$XDG_CONFIG_HOME/omarchy"
+    local out; out="$("$CONFIG_BIN" read)"
+    assert_eq "read: a missing config directory yields the empty model" \
+              "$(jq -r .ok <<<"$out")" "true"
+    assert_eq "read: and its mtime is 0" "$(jq -r .mtime <<<"$out")" "0"
+    teardown_sandbox
+}
+
 test_read_missing_file_yields_empty_model
 test_read_round_trips_a_valid_file
 test_read_refuses_an_oversized_file
@@ -173,5 +206,7 @@ test_read_refuses_a_group_writable_file
 test_read_refuses_a_world_writable_directory
 test_read_is_silent_on_success
 test_read_leaves_no_temp_file
+test_every_error_path_yields_exactly_one_envelope
+test_missing_config_directory_still_answers
 
 summary

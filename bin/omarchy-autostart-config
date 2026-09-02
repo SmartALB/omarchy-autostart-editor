@@ -26,8 +26,17 @@ cleanup() {
 trap cleanup EXIT
 
 # Every outcome leaves through one of these two, so a caller parses one shape.
-ok()  { jq -nc "$@"; exit 0; }
-err() { jq -nc --arg e "$1" --arg d "${2:-}" '{ok:false,error:$e,detail:$d}'; exit 0; }
+# Even jq itself failing must still produce exactly one JSON object on stdout
+# and exit 0 -- otherwise a caller sees nothing at all and cannot tell why.
+ok() {
+    jq -nc "$@" || printf '{"ok":false,"error":"internal","detail":"could not build the answer"}\n'
+    exit 0
+}
+err() {
+    jq -nc --arg e "$1" --arg d "${2:-}" '{ok:false,error:$e,detail:$d}' \
+        || printf '{"ok":false,"error":"internal","detail":"could not build the error answer"}\n'
+    exit 0
+}
 
 # Refuse when anyone but the owner can write the file or its directory. The
 # command field is a shell command line executed at login, so a foreign writer
@@ -35,7 +44,12 @@ err() { jq -nc --arg e "$1" --arg d "${2:-}" '{ok:false,error:$e,detail:$d}'; ex
 # enough -- the file can simply be replaced.
 check_permissions() {
     local path="$1" kind="$2" mode
-    mode="$(stat -c %a "$path" 2>/dev/null)" || return 0
+    # Absence is not a permission problem: on a fresh install neither the
+    # directory nor the file exists yet, and that path must still reach the
+    # empty-model answer.
+    [[ -e "$path" ]] || return 0
+    mode="$(stat -c %a "$path" 2>/dev/null)" \
+        || err "insecure-permissions" "cannot determine the permissions of $kind $path"
     if (( 8#$mode & 8#22 )); then
         err "insecure-permissions" \
             "$kind $path is writable by group or others (mode $mode); run: chmod g-w,o-w $path"
@@ -72,10 +86,22 @@ cmd_read() {
     [[ -f "$CONFIG" ]] || err "not-a-file" "$CONFIG is not a plain file"
     check_permissions "$CONFIG" "file"
 
+    # Capture the mtime once, right here, before the content is read into
+    # TMPFILE. Re-stating $CONFIG after the bounded read would reopen exactly
+    # the TOCTOU window the MAX+1 read exists to close, and a vanished file
+    # here must produce the same envelope as any other error path -- never an
+    # empty --argjson that makes jq itself fail with exit 2.
+    local mtime
+    mtime="$(stat -c %Y "$CONFIG" 2>/dev/null)" \
+        || err "not-a-file" "$CONFIG disappeared while it was being read"
+    [[ "$mtime" =~ ^[0-9]+$ ]] \
+        || err "not-a-file" "implausible modification time for $CONFIG"
+
     TMPFILE="$(mktemp)"
     read_bounded "$CONFIG" "$TMPFILE"
     check_shape "$TMPFILE"
-    jq -c --argjson m "$(stat -c %Y "$CONFIG")" '{ok:true,mtime:$m,config:.}' "$TMPFILE"
+    ok --argjson m "$mtime" --slurpfile c "$TMPFILE" \
+       '{ok:true,mtime:$m,config:$c[0]}'
 }
 
 case "${1:-}" in
