@@ -18,6 +18,17 @@ einmal `./install` laufen lassen, danach `omarchy-restart-shell` und 8 s warten.
 
 ## Global Constraints
 
+> **Runners: exit status and the autostart route** (corrected after Task 13, Rulings 44-45).
+> `runnerOut`/`runnerErr` recover the command's own status; a 141 (SIGPIPE from `head`
+> closing the pipe at the cap) is a truncation, not a failure, and is remapped to 0.
+> Before that correction every `onExited` handler comparing `exitCode !== 0` after a
+> `run.tool(...)` call was dead code that could never fire -- five of them appear in
+> Tasks 15 and 16, one setting the panel's `errorText`. Those handlers are live for the
+> first time; treat them as untested until each has been exercised.
+> Programs the plugin starts go out through `launcher()` (`timeout --foreground`) with
+> each entry prefixed `setsid -f`, so neither the 120 s deadline nor a teardown reaches
+> a started program.
+
 Diese gelten für **jede** Aufgabe, auch wenn sie dort nicht wiederholt werden.
 
 - **Plugin-ID:** `smartalb.autostart`. Anzeigename `Autostart Layout`. Der Namensraum `omarchy.*` ist Dritten verboten.
@@ -3720,6 +3731,7 @@ Item {
     // different machine, and tidying PATH protects nothing here: Omarchy lives
     // in /usr/bin too.
     readonly property string binTimeout: "/usr/bin/timeout"
+    readonly property string binSetsid: "/usr/bin/setsid"
     readonly property string binBash: "/usr/bin/bash"
     readonly property string binHyprctl: "/usr/bin/hyprctl"
 
@@ -3749,15 +3761,48 @@ Item {
     // makes "; }" after it a syntax error -- the group then never runs and
     // nothing is collected, silently. A newline closes the list in every one
     // of those cases, the same fix as launchCommand.
+    // A pipeline reports its LAST command's status, so `head` would report 0
+    // and the command's own status would be thrown away -- callers read it.
+    // ${PIPESTATUS[0]} recovers it. `set -o pipefail` was the other candidate
+    // and was rejected: it also rescores a pipeline living inside cmd.
+    //
+    // head closes its read end after its Nth byte, so a producer whose output
+    // exceeds the cap takes SIGPIPE and reports 141. That is output longer
+    // than expected, NOT a failure: reporting it as one would turn "the answer
+    // was bigger than the cap" into a spurious error in every caller that
+    // checks exitCode !== 0. Caught here, turned into 0, noted on stderr.
+    //
+    // Measured (marker refusal / usage error / success / over-cap output):
+    //   plain pipe:            0   0   0   0     <- every failure invisible
+    //   ${PIPESTATUS[0]}+141:  1   2   0   0
     function runnerOut(cmd) {
-        return root.runner("{ " + cmd + "\n} | head -c " + root.maxOutBytes)
+        return root.runner("{ " + cmd + "\n} | head -c " + root.maxOutBytes
+            + "\ns=${PIPESTATUS[0]}"
+            + "\nif [ $s -eq 141 ]; then echo 'runnerOut: producer output exceeded the cap -- truncated, not a failure' >&2; exit 0; fi"
+            + "\nexit $s")
     }
 
     // Process substitution rather than a pipe: a pipe would replace the exit
     // status of the command itself, and callers read it. Newline-terminated
-    // for the same reason as runnerOut.
+    // for the same reason as runnerOut. (The first version of this plan stated
+    // that reason HERE and then wrote runnerOut above with a pipe anyway. The
+    // property was named and the sibling was left broken; see Ruling 45.)
     function runnerErr(cmd) {
         return root.runner("{ " + cmd + "\n} 2> >(head -c " + root.maxOutBytes + " >&2)")
+    }
+
+    // The autostart route. `timeout` without --foreground puts itself in a new
+    // process group that the child inherits and signals the WHOLE group at the
+    // deadline, so every program the plugin started would take SIGTERM at
+    // login+120 s and SIGKILL at +125 s -- and a teardown would reach the
+    // user's running applications too. Measured, surviving a group-wide
+    // SIGTERM: neither 0/2, --foreground only 0/2, setsid -f only 2/2,
+    // both 2/2. They are not substitutes: --foreground answers the deadline,
+    // setsid -f answers the teardown. launchAll prefixes each entry with
+    // binSetsid + " -f".
+    function launcher(cmd) {
+        return [root.binTimeout, "--foreground", "-k", "5", String(root.shellSeconds),
+                root.binBash, "-c", cmd]
     }
 
     // Without a shell. Both hyprctl verbs take a Lua string; handing it over as
