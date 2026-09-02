@@ -883,6 +883,34 @@ test_envelope_codes_match_the_script() {
 
 test_envelope_codes_match_the_script
 
+# The coupling the two halves of the class-literal claim did NOT have.
+#
+# test/harness.qml asserts Model.classLiteral produces one exact pattern, and
+# test_windows_match_accepts_a_class_literal_from_a_window feeds that pattern
+# through the real grep -E. Measured, though: dropping "-" and ":" from the
+# escape set turns 2 QML assertions red and 0 shell ones -- the shell side
+# carries a HAND-COPIED literal and is indifferent to what classLiteral does.
+# So the two halves were about the same string only by the honour system.
+#
+# This closes it mechanically: the exact literal must be present in both test
+# files. Change the escaping and the harness assertion goes red; update the
+# harness literal alone and this goes red until the shell fixture is brought
+# along. It is the same two-file binding as the envelope codes above and the
+# truncation marker in qml-structure.sh.
+#
+# Fixed-string grep, and the two source forms are identical on purpose: inside
+# the QML double-quoted literal and inside the shell printf's single quotes,
+# "\\-" is the same four characters on disk.
+test_class_literal_fixture_is_the_same_in_both_suites() {
+    local literal='^(nimbus\\-web\\.chat\\.com__\\-Default)$'
+    assert_eq "class literal: the harness names the exact pattern" \
+              "$(grep -cF -- "$literal" harness.qml)" "1"
+    assert_eq "class literal: and the matcher test feeds that same pattern to grep -E" \
+              "$(grep -cF -- "$literal" run-tests.sh)" "2"
+}
+
+test_class_literal_fixture_is_the_same_in_both_suites
+
 test_qml_structure() {
     local out status
     out="$(./qml-structure.sh 2>&1)"; status=$?
