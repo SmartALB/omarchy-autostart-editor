@@ -625,7 +625,15 @@ fi
 # same way as everywhere else in this file.)
 stripped_barwidget="$(strip_comments BarWidget.qml)"
 
-# 8 -- the plugin lifecycle contract from the develop guide.
+# 8 -- the plugin lifecycle contract from the develop guide. DECLARED
+#      only -- this proves the four functions and two properties exist
+#      under the right names, nothing about what they do. Check 12
+#      below closes the other half (FORWARDING) for the four
+#      functions, the same way check 11 already does it for the two
+#      properties: declared and forwarding are two separate claims in
+#      this file, checked separately, because an empty body satisfies
+#      this check exactly as well as a real one does (round-2
+#      finding).
 for needed in "function open()" "function close()" "function toggle()" \
               "function closeForPopoutSwitch()" \
               "readonly property bool opened" \
@@ -757,6 +765,88 @@ for prop in opened popoutSwitchClosing; do
         "expression '$rhs' never mentions panelLoader"
   else
     ok "BarWidget: '$prop' is bound to panelLoader, not a literal"
+  fi
+done
+
+
+# 12 -- the four lifecycle contract functions do not merely exist (check 8),
+#       they forward toward the panel. Round-2 finding: an empty body --
+#       `function closeForPopoutSwitch() { }`, no comment tricks needed --
+#       left every check so far green, because check 8 only proves the
+#       declaration's TEXT exists. This is the same gap check 11 closed for
+#       the two lifecycle booleans, applied here for consistency: leaving
+#       one member of the class unbound while its siblings are bound is the
+#       inconsistency that makes a check suite hard to trust. Declared and
+#       forwarding are two separate claims, checked separately, the same
+#       way check 8 (declared) and check 11 (bound) are separate for the
+#       properties.
+#
+#       Each function's own body (brace-depth extraction, same technique as
+#       the watchdog block above) must reference either `panelLoader`
+#       directly, or one of its three sibling contract functions by name.
+#       The sibling alternative exists because `toggle()` reaches the panel
+#       only through `open()`/`close()`, never `panelLoader` itself --
+#       requiring the literal name everywhere would fail on that legitimate
+#       body, not just on the empty one this check exists to catch.
+#
+#       Deliberately shallow, per ruling: this does not verify which
+#       panelLoader call is made, or that the sibling a function calls is
+#       the *right* one, only that the body is not a no-op. Going further --
+#       verifying what the forwarded call does, or hardening against a dead
+#       string literal naming panelLoader without using it -- is the shape
+#       arms-race this file's own header already says this project
+#       abandoned.
+function_body() {
+  # $1 = comment-stripped content, $2 = function name. Brace-depth
+  # extraction, same style as the watchdog block extraction above.
+  awk -v fn="$2" '
+    BEGIN { capturing = 0; depth = 0; started = 0 }
+    {
+      line = $0
+      if (!capturing) {
+        if (line !~ "(^|[^A-Za-z0-9_])function[[:space:]]+" fn "[[:space:]]*\\(") next
+        capturing = 1; depth = 0; started = 0
+      }
+      print line
+      n = length(line)
+      for (i = 1; i <= n; i++) {
+        c = substr(line, i, 1)
+        if (c == "{") { depth++; started = 1 }
+        else if (c == "}") {
+          depth--
+          if (started && depth <= 0) { capturing = 0; i = n + 1 }
+        }
+      }
+    }
+  ' <<<"$1"
+}
+
+lifecycle_fns="open close toggle closeForPopoutSwitch"
+reach_boundary='(^|[^A-Za-z0-9_])'
+for fn in $lifecycle_fns; do
+  body="$(function_body "$stripped_barwidget" "$fn")"
+  if [[ -z "$body" ]]; then
+    bad "BarWidget: $fn() forwards to the panel" \
+        "no 'function $fn(...) { ... }' block found"
+    continue
+  fi
+  reaches=0
+  if grep -qE "${reach_boundary}panelLoader([^A-Za-z0-9_]|\$)" <<<"$body"; then
+    reaches=1
+  else
+    for sibling in $lifecycle_fns; do
+      [[ "$sibling" == "$fn" ]] && continue
+      if grep -qE "${reach_boundary}${sibling}[[:space:]]*\(" <<<"$body"; then
+        reaches=1
+        break
+      fi
+    done
+  fi
+  if (( reaches )); then
+    ok "BarWidget: $fn() forwards to the panel"
+  else
+    bad "BarWidget: $fn() forwards to the panel" \
+        "body never mentions panelLoader or a sibling lifecycle function: $body"
   fi
 done
 
