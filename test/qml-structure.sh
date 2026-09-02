@@ -116,7 +116,7 @@ fi
 #      comment-stripping) is joined with the line after it, and the joined
 #      text must reference one of the helpers by name -- a bare array,
 #      wrapped or not, has nothing there to match.
-helper_pat='(^|[^A-Za-z0-9_.])(runner|runnerOut|runnerErr|hypr|tool)\('
+helper_pat='(^|[^A-Za-z0-9_])(runner|runnerOut|runnerErr|hypr|tool)\('
 hits=""
 for f in $(qml_files); do
   mapfile -t lines < <(strip_comments "$f")
