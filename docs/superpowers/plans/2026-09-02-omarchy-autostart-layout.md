@@ -479,10 +479,15 @@ cd "$(dirname "$0")"
 test_sandbox_contains_every_path() {
     setup_sandbox
     for var in HOME XDG_CONFIG_HOME XDG_STATE_HOME XDG_DATA_HOME XDG_RUNTIME_DIR; do
-        local value="${!var}"
+        local value="${!var-}"
         assert_eq "sandbox: \$$var lies under the sandbox" \
                   "$(case "$value" in "$SANDBOX"/*) echo inside ;; *) echo "OUTSIDE: $value" ;; esac)" \
                   "inside"
+        # Exported, not merely set: a child process sees only the exported ones,
+        # and the code under test always runs as a child.
+        assert_eq "sandbox: \$$var is exported to child processes" \
+                  "$(declare -p "$var" 2>/dev/null | grep -q '^declare -x' && echo exported || echo "NOT EXPORTED")" \
+                  "exported"
     done
     teardown_sandbox
 }
@@ -500,7 +505,8 @@ TESTS_FAILED=0
 SANDBOX=""
 
 setup_sandbox() {
-    SANDBOX="$(mktemp -d)"
+    SANDBOX="$(mktemp -d)" || { echo "setup_sandbox: mktemp -d failed" >&2; return 1; }
+    [[ -n "$SANDBOX" && "$SANDBOX" == /tmp/?* ]] || { echo "setup_sandbox: implausible sandbox path ${SANDBOX@Q}" >&2; SANDBOX=""; return 1; }
     export HOME="$SANDBOX/home"
     export XDG_CONFIG_HOME="$SANDBOX/config"
     export XDG_STATE_HOME="$SANDBOX/state"
@@ -513,7 +519,20 @@ setup_sandbox() {
 }
 
 teardown_sandbox() {
-    [[ -n "$SANDBOX" && "$SANDBOX" == /tmp/* ]] && rm -rf "$SANDBOX"
+    local resolved
+    if [[ -z "${SANDBOX:-}" ]]; then
+        SANDBOX=""
+        return 0
+    fi
+    # A glob does not resolve "..": "/tmp/.." matches /tmp/* and would make
+    # this line "rm -rf /". Resolve first, then require the resolved path to
+    # be unchanged and genuinely under /tmp.
+    resolved="$(realpath -m -- "$SANDBOX")"
+    if [[ "$resolved" == "$SANDBOX" && "$resolved" == /tmp/?* && "$resolved" != */../* && "$resolved" != */.. ]]; then
+        rm -rf -- "$SANDBOX"
+    else
+        printf 'teardown_sandbox: refusing to delete %q -- not a plain path under /tmp\n' "$SANDBOX" >&2
+    fi
     SANDBOX=""
 }
 
@@ -537,7 +556,10 @@ assert_status() {
 assert_contains() {
     local name="$1" haystack="$2" needle="$3"
     TESTS_RUN=$((TESTS_RUN + 1))
-    if [[ "$haystack" == *"$needle"* ]]; then
+    if [[ -z "$needle" ]]; then
+        TESTS_FAILED=$((TESTS_FAILED + 1))
+        printf 'FAIL %s\n       needle is empty (every string contains the empty string)\n' "$name"
+    elif [[ "$haystack" == *"$needle"* ]]; then
         printf 'ok   %s\n' "$name"
     else
         TESTS_FAILED=$((TESTS_FAILED + 1))
@@ -594,7 +616,7 @@ Expected: `FAIL sandbox: $XDG_STATE_HOME lies under the sandbox`, `got "OUTSIDE:
 - [ ] **Step 4: Laufen lassen und Grün sehen**
 
 Run: `./test/run-tests.sh`
-Expected: fünf `ok`, `total=5 failed=0`, Status 0.
+Expected: zehn `ok` (je Variable Wert **und** Export), `total=10 failed=0`, Status 0.
 
 - [ ] **Step 5: Commit**
 
