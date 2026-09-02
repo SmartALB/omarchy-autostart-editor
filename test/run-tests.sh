@@ -587,9 +587,57 @@ test_windows_survives_an_unreachable_compositor() {
     teardown_sandbox
 }
 
+test_windows_survives_an_array_of_non_objects() {
+    setup_sandbox; fake_hyprctl_json
+    printf '[1,2,3]\n' > "$FAKE_CLIENTS"
+    local out; out="$("$WINDOWS_BIN")"
+    assert_eq "windows: an array of non-objects yields an empty array" "$out" "[]"
+    assert_eq "windows: and it is still exactly one JSON array" \
+              "$(jq -s 'length' <<<"$out" 2>/dev/null || echo BADJSON)" "1"
+    teardown_sandbox
+}
+
+test_windows_filters_before_capping() {
+    setup_sandbox; fake_hyprctl_json
+    # 100 scratchpad windows first, then 420 normal ones: 520 raw items.
+    # Filter-then-cap keeps all 420 normal windows. Cap-then-filter would
+    # take the first 500 raw items -- 100 special plus 400 normal -- and
+    # then drop the specials, leaving 400. The count tells the two apart.
+    jq -nc '[range(0;100) | {address:("0xs"+(.|tostring)),class:"s",title:"t",
+                             workspace:{id:-99},monitor:0}]
+            + [range(0;420) | {address:("0xn"+(.|tostring)),class:"n",title:"t",
+                               workspace:{id:1},monitor:0}]' > "$FAKE_CLIENTS"
+    assert_eq "windows: the special-workspace filter runs before the cap" \
+              "$(jq -r 'length' <<<"$("$WINDOWS_BIN")")" "420"
+    teardown_sandbox
+}
+
+test_windows_survives_a_failing_hyprctl() {
+    setup_sandbox
+    mkdir -p "$SANDBOX/bin"
+    printf '#!/usr/bin/env bash\nexit 1\n' > "$SANDBOX/bin/hyprctl"
+    chmod +x "$SANDBOX/bin/hyprctl"
+    export HYPRCTL="$SANDBOX/bin/hyprctl"
+    assert_eq "windows: a hyprctl that exits non-zero yields an empty array" \
+              "$("$WINDOWS_BIN")" "[]"
+    teardown_sandbox
+}
+
+test_windows_survives_valid_json_that_is_not_an_array() {
+    setup_sandbox; fake_hyprctl_json
+    printf '{"not":"an array"}\n' > "$FAKE_CLIENTS"
+    assert_eq "windows: valid JSON that is not an array yields an empty array" \
+              "$("$WINDOWS_BIN")" "[]"
+    teardown_sandbox
+}
+
 test_windows_resolves_the_monitor_name
 test_windows_drops_special_workspaces
 test_windows_caps_the_count
 test_windows_survives_an_unreachable_compositor
+test_windows_survives_an_array_of_non_objects
+test_windows_filters_before_capping
+test_windows_survives_a_failing_hyprctl
+test_windows_survives_valid_json_that_is_not_an_array
 
 summary

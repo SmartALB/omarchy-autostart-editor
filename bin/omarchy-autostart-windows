@@ -23,7 +23,14 @@ fi
 jq -e 'type == "array"' <<<"$monitors" >/dev/null 2>&1 || monitors="[]"
 
 jq -c --argjson mon "$monitors" --argjson max "$MAX_WINDOWS" '
-    ( $mon | map({ key: (.id | tostring), value: .name }) | from_entries ) as $names
+    # monitors travels through --argjson (argv) while clients is streamed
+    # through stdin to respect the MAX_ARG_STRLEN limit. A monitor list is
+    # bounded by physical hardware and will never approach that limit;
+    # streaming a second input here would need a temporary file with its own
+    # cleanup -- more machinery than the inconsistency costs. Kept on purpose.
+    ( $mon | map(select(type == "object"))
+           | map({ key: (.id | tostring), value: .name }) | from_entries ) as $names
+    | map(select(type == "object"))
     | map(select((.workspace.id // 0) > 0))
     | .[0:$max]
     | map({
