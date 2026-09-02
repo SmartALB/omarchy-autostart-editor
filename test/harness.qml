@@ -120,6 +120,25 @@ QtObject {
                   (Model.validate(cfg([prog({ command: "" })])).rejected[0] || {}).reason, "command-invalid");
             check("validate rejects a command of 501 characters",
                   Model.validate(cfg([prog({ command: new Array(502).join("x") })])).rejected.length, 1);
+
+            // "&&", "||" and "|" leave a shell command incomplete -- a syntax
+            // error in any context, which no wrapping in launchCommand can
+            // rescue. "&" and ";" are legitimate terminators and must still
+            // be accepted.
+            check("validate rejects a command ending in &&",
+                  (Model.validate(cfg([prog({ command: "myapp &&" })])).rejected[0] || {}).reason,
+                  "command-incomplete");
+            check("validate rejects a command ending in ||",
+                  (Model.validate(cfg([prog({ command: "myapp ||" })])).rejected[0] || {}).reason,
+                  "command-incomplete");
+            check("validate rejects a command ending in a pipe",
+                  (Model.validate(cfg([prog({ command: "myapp |" })])).rejected[0] || {}).reason,
+                  "command-incomplete");
+            check("validate accepts a command ending in &",
+                  Model.validate(cfg([prog({ command: "myapp &" })])).programs.length, 1);
+            check("validate accepts a command ending in a semicolon",
+                  Model.validate(cfg([prog({ command: "myapp;" })])).programs.length, 1);
+
             check("validate rejects a bad id",
                   (Model.validate(cfg([prog({ id: "P 1!" })])).rejected[0] || {}).reason, "id-invalid");
 
@@ -340,14 +359,19 @@ QtObject {
                   Model.launchCommand("cursor").indexOf("uwsm-app -- cursor") !== -1, true);
             check("launchCommand: detaches every standard stream",
                   Model.launchCommand("cursor"),
-                  "{ uwsm-app -- cursor ; } </dev/null >/dev/null 2>&1");
+                  "{ uwsm-app -- cursor\n} </dev/null >/dev/null 2>&1");
             check("launchCommand: the redirection covers a compound command, not just its last part",
                   (function() {
                       // The group must close AFTER the whole command, so everything in
                       // it is inside the braces rather than trailing behind them.
                       var s = Model.launchCommand("sleep 2 && myapp");
-                      return s.indexOf("{ uwsm-app -- sleep 2 && myapp ; }") === 0;
+                      return s.indexOf("{ uwsm-app -- sleep 2 && myapp\n}") === 0;
                   })(), true);
+            check("launchCommand: a trailing & does not break the group",
+                  // "; }" after a trailing "&" is a syntax error -- the group
+                  // must be closed by a newline, not by "; ".
+                  Model.launchCommand("myapp &"),
+                  "{ uwsm-app -- myapp &\n} </dev/null >/dev/null 2>&1");
 
             // --- workspaceMoves ------------------------------------------------
             check("workspaceMoves: a workspace on the wrong monitor moves",

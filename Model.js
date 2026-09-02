@@ -76,6 +76,11 @@ function programProblem(p) {
     if (typeof p.enabled !== "boolean")                    return "enabled-invalid";
     if (!isString(p.command) || p.command.length < 1
         || p.command.length > MAX_COMMAND)                 return "command-invalid";
+    // A command ending in "&&", "||" or "|" is an incomplete shell command and
+    // a syntax error in any context -- no wrapping can rescue it. Refusing it
+    // by name is better than letting it reach the shell, where it would be one
+    // more entry that fails at login with nobody watching.
+    if (/(\|\||&&|\|)\s*$/.test(p.command))                return "command-incomplete";
     if (!isString(p["class"]) || !CLASS_RE.test(p["class"])) return "class-not-allowed";
     return placementProblem(p.placement);
 }
@@ -306,9 +311,18 @@ function effectiveMonitor(program, workspaces) {
 // percent sign and becomes one; codes we do not know are left alone rather
 // than guessed at, because a wrong guess produces a command that fails at
 // login with no one watching.
+//
+// This does not track quoting, so a field code inside a quoted argument is
+// stripped too (the freedesktop specification explicitly leaves that case
+// undefined) and the whitespace collapse below can turn a double space
+// inside a quoted argument into a single one. Accepted: the collapse is what
+// cleans up the gap a removed code leaves behind, and a deliberate double
+// space inside a quoted Exec= argument is essentially unheard of.
 function stripFieldCodes(exec) {
-    var known = { "f": 1, "F": 1, "u": 1, "U": 1, "d": 1, "D": 1,
-                  "n": 1, "N": 1, "i": 1, "c": 1, "k": 1, "v": 1, "m": 1 };
+    var known = Object.create(null);
+    known["f"] = 1; known["F"] = 1; known["u"] = 1; known["U"] = 1;
+    known["d"] = 1; known["D"] = 1; known["n"] = 1; known["N"] = 1;
+    known["i"] = 1; known["c"] = 1; known["k"] = 1; known["v"] = 1; known["m"] = 1;
     var out = "", i = 0;
     while (i < exec.length) {
         if (exec.charAt(i) === "%" && i + 1 < exec.length) {
@@ -338,7 +352,12 @@ function launchCommand(command) {
     // stdout and stderr, and Quickshell tears those down when the chain
     // ends, taking the application with it. Grouping also makes the
     // entries safe to join with `&` when several are launched at once.
-    return "{ uwsm-app -- " + command + " ; } </dev/null >/dev/null 2>&1";
+    //
+    // Terminated by a newline, not by "; ": a command ending in "&", ";" or a
+    // trailing #comment is a legitimate shell command line, and "; }" after it
+    // is a syntax error -- the group then never runs and the program never
+    // starts, silently. A newline closes the list in every one of those cases.
+    return "{ uwsm-app -- " + command + "\n} </dev/null >/dev/null 2>&1";
 }
 
 // Workspace rules only take effect when a workspace is CREATED, so a workspace
