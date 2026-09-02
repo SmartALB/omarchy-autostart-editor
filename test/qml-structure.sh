@@ -69,7 +69,7 @@ hits="$(grep_stripped_all "$interp_pat" || true)"
 # 2 -- the three absolute binaries are the only ones named, in either quote
 #      style.
 stripped_runners="$(strip_comments Runners.qml)"
-for expected in /usr/bin/timeout /usr/bin/bash /usr/bin/hyprctl; do
+for expected in /usr/bin/timeout /usr/bin/bash /usr/bin/hyprctl /usr/bin/setsid; do
   bin_pat="[\"']${expected}[\"']"
   grep -qE "$bin_pat" <<<"$stripped_runners" \
     && ok "Runners.qml names $expected absolutely" \
@@ -370,6 +370,51 @@ done < <(grep -nE 'hl\.(window_rule|workspace_rule|dsp\.[a-z_.]+)\(\{' <<<"$stri
 hits="$(sed '/^$/d' <<<"$hits")"
 [[ -z "$hits" ]] && ok "every apparent rule-building site in Model.js at least mentions luaBytes (coarse; see harness.qml for the real per-value guarantee)" \
                  || bad "every apparent rule-building site in Model.js at least mentions luaBytes (coarse; see harness.qml for the real per-value guarantee)" "$hits"
+
+# 8 -- the watchdog Timer's own kill must retire the run it just killed, not
+#      merely stop the four Processes. Round 1's watchdog stopped them
+#      without bumping generation first: each Process still fires its own
+#      terminal signal once actually killed, and without the bump that
+#      signal's ctx.gen still matches root.generation, so e.g. evalProc's
+#      onExited went on to call nextChunk(ctx) -- resuming the very
+#      sequence the watchdog exists to end, straight through
+#      claimAndLaunch/launchAll. Same brace-depth block extraction as check
+#      6's teardown scan (a `Timer { id: watchdog ... }` on however many
+#      lines), scanned for "generation += 1" or "generation++" -- either
+#      spelling counts, since both retire the run before any queued signal
+#      from it can be delivered.
+for file in $(qml_files); do
+  clean="$(strip_comments "$file")"
+  grep -qE '(^|[^A-Za-z0-9_])id:[[:space:]]*watchdog([^A-Za-z0-9_]|$)' <<<"$clean" || continue
+  block="$(awk '
+      BEGIN { capturing = 0; depth = 0 }
+      {
+          line = $0
+          if (!capturing) {
+              if (line !~ /(^|[^A-Za-z0-9_])id:[[:space:]]*watchdog([^A-Za-z0-9_]|$)/) next
+              capturing = 1
+              depth = 0
+          }
+          print line
+          n = length(line)
+          for (i = 1; i <= n; i++) {
+              c = substr(line, i, 1)
+              if (c == "{") depth++
+              else if (c == "}") {
+                  depth--
+                  if (depth <= 0 && depth != "") { capturing = 0; i = n + 1 }
+              }
+          }
+      }
+  ' <<<"$clean")"
+  gen_bump_pat='(^|[^A-Za-z0-9_.])(root\.)?generation[[:space:]]*(\+=[[:space:]]*1|\+\+)([^A-Za-z0-9_]|$)'
+  if grep -qE "$gen_bump_pat" <<<"$block"; then
+    ok "$file: the watchdog retires its own run (bumps generation) before stopping it"
+  else
+    bad "$file: the watchdog retires its own run (bumps generation) before stopping it" \
+        "no 'generation += 1' (or '++') found inside the watchdog's block -- a killed Process's own terminal signal would still match ctx.gen and resume the sequence"
+  fi
+done
 
 printf '\nqml structure: total=%d failed=%d\n' "$run" "$failed"
 (( failed == 0 ))

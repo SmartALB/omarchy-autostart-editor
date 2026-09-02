@@ -28,12 +28,23 @@ Item {
     // Process objects and stomp on each other: the reset chunk that always
     // opens buildRuleChunks()'s output could land AFTER an earlier run's
     // rule chunks instead of before them, silently switching every rule
-    // back off. rulesOnly and the pending-chunk state belong to the run
-    // context object (ctx) passed through the chain below, not to this
-    // component, precisely so an old run's leftover callback has its own
-    // copy to read -- and the ctx.gen check in every handler still refuses
-    // to act once a newer run exists, even reading its own copy.
+    // back off. The pending-chunk state belongs to the run context object
+    // (ctx) passed through the chain below, not to this component,
+    // precisely so an old run's leftover callback has its own copy to
+    // read -- and the ctx.gen check in every handler still refuses to act
+    // once a newer run exists, even reading its own copy.
     property int generation: 0
+
+    // Session start (the claim + the launch) is a SEPARATE obligation from
+    // "apply the rules", and generation is the wrong thing to carry it:
+    // generation identifies the latest run, but a run that gets superseded
+    // before it ever reaches claimAndLaunch must not take the obligation
+    // down with it -- its successor has to pick it up, or the user's
+    // programs never start for the whole session, exactly the original
+    // defect this plugin exists to prevent. True until a claim attempt has
+    // actually RUN and reported a real (not watchdog-killed) result --
+    // see markerProc.onExited, which is the only place this turns false.
+    property bool sessionStartOwed: true
 
     // Quickshell exposes no error signal for a Process, so one that never
     // emits `exited` -- a bad binDir resolution, a hung producer, an
@@ -42,12 +53,25 @@ Item {
     // try to be clever about which Process is stuck; it stops all four for
     // the run in flight and reports once. Restarted on every load() and
     // cancelled at every point a run actually finishes, below.
+    //
+    // The kill itself must ALSO retire the run it just killed: bumping
+    // generation first means every one of these four Processes' OWN
+    // `onExited`/`onStreamFinished` -- which WILL still fire once each
+    // process actually dies -- reads a ctx whose .gen no longer matches
+    // root.generation, and returns immediately instead of resuming the
+    // sequence it was just told to abandon. Before this, a killed evalProc
+    // still called nextChunk(ctx), which still saw pendingIndex short of
+    // pendingChunks.length (or fast-forwarded, but lastError already set,
+    // which does not stop nextChunk itself) and carried on through
+    // claimAndLaunch/launchAll -- the watchdog resuming the very sequence
+    // it exists to end.
     readonly property int watchdogSeconds: 30
     Timer {
         id: watchdog
         interval: root.watchdogSeconds * 1000
         repeat: false
         onTriggered: {
+            root.generation += 1
             root.lastError = "the apply sequence did not finish within "
                             + root.watchdogSeconds + "s -- a Process may be stuck"
             readProc.running = false
@@ -64,27 +88,58 @@ Item {
         markerProc.running = false
     }
 
-    Component.onCompleted: root.load(false)
+    Component.onCompleted: root.load()
 
-    function load(onlyRules) {
+    // Whether readProc is between being dispatched and its OWN onExited
+    // firing for that dispatch. load() must never reassign runCtx/command
+    // on a Process while this is true: a stale signal already queued for
+    // the CURRENT dispatch would then be delivered after the reassignment
+    // and read the NEW ctx, passing the ctx.gen check meant to catch it --
+    // reachable exactly here, because load() is the one place that used to
+    // stop and immediately re-dispatch the same Process in a single
+    // synchronous block. Set true only in dispatchRead(), set false only
+    // in readProc.onExited -- the actual terminal signal for a dispatch,
+    // not merely "we asked it to stop".
+    property bool readBusy: false
+    // A load() that arrived while readBusy is true. readProc.onExited
+    // consumes this once the in-flight dispatch has genuinely finished, so
+    // the newer request is never dropped and never reassigned early.
+    property var pendingLoad: null
+
+    function load() {
         root.generation += 1
         var gen = root.generation
-        // Any earlier run's Processes are stopped outright, not just
-        // out-voted by the generation check below: reassigning `command`
-        // and `running` on a Process that is still actually running is not
-        // something to rely on behaving cleanly, so the slate is cleared
-        // first and the ctx.gen check only has to catch a callback that was
-        // already queued before this line ran.
-        readProc.running = false
-        evalProc.running = false
-        markerProc.running = false
-        launchProc.running = false
-
         root.lastError = ""
         watchdog.stop()
         watchdog.start()
 
-        var ctx = { gen: gen, rulesOnly: onlyRules, pendingChunks: [], pendingIndex: 0 }
+        if (root.readBusy) {
+            // Do not touch readProc.runCtx/command/running here -- it may
+            // still emit one more signal for its CURRENT dispatch, and
+            // reassigning now is exactly the F3(a) race. Ask it to stop and
+            // let its own onExited hand off to this request once it is
+            // genuinely free.
+            root.pendingLoad = { gen: gen }
+            readProc.running = false
+            return
+        }
+
+        // evalProc/markerProc/launchProc are never re-dispatched from here
+        // in the same synchronous block -- only readProc is, immediately
+        // below -- so stopping them here and letting the FRESH readProc
+        // cycle (a real subprocess round trip) reach them later leaves any
+        // already-queued signal from their previous dispatch ample time to
+        // arrive and be rejected by its own (still unchanged) ctx.gen
+        // check before either Process is touched again.
+        evalProc.running = false
+        markerProc.running = false
+        launchProc.running = false
+        root.dispatchRead(gen)
+    }
+
+    function dispatchRead(gen) {
+        root.readBusy = true
+        var ctx = { gen: gen, rulesOnly: !root.sessionStartOwed, pendingChunks: [], pendingIndex: 0 }
         readProc.runCtx = ctx
         readProc.command = run.tool("omarchy-autostart-config", "read")
         readProc.running = true
@@ -124,7 +179,9 @@ Item {
                 // and applying anyway would pick a silent winner inside the
                 // compositor. rejected is the other case: a named, visible
                 // omission with the rest still applied. blocked stops the
-                // whole apply instead.
+                // whole apply instead -- sessionStartOwed is left untouched,
+                // so a LATER run (once the user fixes the conflict) still
+                // attempts the claim and launch this one never reached.
                 if (checked.blocked && checked.blocked.length > 0) {
                     root.blocked = checked.blocked
                     root.lastError = "configuration blocked: " + checked.blocked.length
@@ -134,6 +191,22 @@ Item {
                 }
                 root.blocked = []
                 root.applyRules(ctx, checked)
+            }
+        }
+        onExited: function(exitCode, exitStatus) {
+            // The terminal signal for THIS dispatch, regardless of whether
+            // it was stale (ctx.gen mismatch, handled above and in the
+            // callers of this Process) -- readBusy comes down unconditionally
+            // so a queued load() is never stuck waiting on a dispatch that
+            // has, in fact, already finished.
+            root.readBusy = false
+            if (root.pendingLoad) {
+                var p = root.pendingLoad
+                root.pendingLoad = null
+                evalProc.running = false
+                markerProc.running = false
+                launchProc.running = false
+                root.dispatchRead(p.gen)
             }
         }
     }
@@ -151,8 +224,11 @@ Item {
             // Reached even after a rule chunk failed above (pendingIndex
             // was fast-forwarded to the end, see evalProc below): a mistake
             // in the PLACEMENT rules should not also stop the user's
-            // programs from starting. rulesOnly (a reload) never reaches
-            // here regardless -- a reload does not restart a session.
+            // programs from starting. ctx.rulesOnly reflects whether
+            // session start was already owed when THIS run was dispatched
+            // (see dispatchRead) -- not whether this run happens to be a
+            // reload, so a startup run that gets superseded before this
+            // point still leaves the obligation for its successor.
             if (!ctx.rulesOnly) root.claimAndLaunch(ctx)
             else watchdog.stop()
             return
@@ -217,10 +293,28 @@ Item {
         onExited: function(exitCode, exitStatus) {
             var ctx = markerProc.runCtx
             if (!ctx || ctx.gen !== root.generation) return
-            // Only a successful claim launches anything. Every other
-            // outcome skips the autostart on purpose -- see
-            // bin/omarchy-autostart-marker: it fails closed, and a doubled
-            // session is worse than one that did not start.
+            // Qt documents exitCode as meaningful only when exitStatus is a
+            // NORMAL exit -- a process killed by a signal (the watchdog, or
+            // a superseded generation stopping it) can still report an
+            // exitCode of 0 from whatever partial state it was in when
+            // killed, which would read as a GRANTED claim it never actually
+            // made. The marker fails closed by design
+            // (bin/omarchy-autostart-marker); this reader must not undo
+            // that by trusting a code that is not meaningful here.
+            //
+            // NormalExit's exact QML spelling in the installed Quickshell.Io
+            // API is UNVERIFIED from here (nothing in this tree can load
+            // Quickshell.Io) -- 0 is QProcess::NormalExit's numeric value,
+            // which Quickshell.Io's Process is modelled on; confirm the
+            // named form resolves (or fall back to the literal 0) on the
+            // manual checklist.
+            if (exitStatus !== Process.NormalExit) {
+                // Not a real attempt: the claim's actual outcome is
+                // unknown, so sessionStartOwed stays true and the next run
+                // retries it instead of silently skipping session start.
+                return
+            }
+            root.sessionStartOwed = false
             if (exitCode === 0) root.launchAll(ctx)
             else watchdog.stop()
         }
@@ -264,9 +358,32 @@ Item {
         // programs themselves is `setsid -f` forking and handing off -- the
         // TRACKED job exits once the program is launched, not once the
         // program quits.
+        //
+        // The redirection at the end of each entry -- `</dev/null >/dev/null
+        // 2>&1` on the `setsid` invocation ITSELF, not only inside
+        // launchCommand's own `{ ... }` group -- exists because launchCommand
+        // only redirects the INNER compound command, never the `bash`
+        // process in front of it. Without this, the fork+exec chain between
+        // `setsid -f` and that inner group briefly (and, for the LIFETIME of
+        // whatever it execs into, not briefly at all) keeps a copy of this
+        // wrapper's own stdout/stderr open -- measured, an 8 s stand-in
+        // program: wrapper process exits at 0 s, but stderr EOF (what
+        // launchProc's own StdioCollector is waiting for) does not arrive
+        // until 8 s, i.e. for as long as the program the entry started keeps
+        // running. With `waitForEnd: true` below, that meant `exited` itself
+        // waited on stream completion, so watchdog.stop() at the bottom of
+        // launchProc's onExited was never reached until the LAST launched
+        // program quit -- the 30 s watchdog firing a false error on every
+        // login. Redirecting the `setsid` invocation's own stdio closes the
+        // gap: measured, the same shape now shows stderr EOF at 0 s, and a
+        // deliberate syntax error in the OUTER line (this wrapper's own
+        // construction, not the entry's inner group) still reaches stderr
+        // unaffected, because that redirection is per-entry, not on the
+        // outer `bash -c '... & ... & wait'` this wrapper itself runs.
         var isolated = []
         for (var j = 0; j < commands.length; j++) {
-            isolated.push(run.binSetsid + " -f " + run.binBash + " -c " + Model.shellQuote(commands[j]))
+            isolated.push(run.binSetsid + " -f " + run.binBash + " -c "
+                        + Model.shellQuote(commands[j]) + " </dev/null >/dev/null 2>&1")
         }
         launchProc.runCtx = ctx
         launchProc.command = run.launcher(isolated.join(" & ") + " & wait")
@@ -276,6 +393,20 @@ Item {
     Process {
         id: launchProc
         property var runCtx: null
+        // waitForEnd stays true: with every entry's own stdio now
+        // redirected away from this wrapper (see launchAll), the stream
+        // reaches EOF as soon as the OUTER wrapper line itself finishes --
+        // measured at 0 s, not gated on any launched program's lifetime any
+        // more -- so this still reliably captures a genuine error from the
+        // wrapper's OWN construction (a bad isolated.join(), a shellQuote
+        // bug) without re-introducing the hang N3 fixed. What a user can
+        // still see on this stream: any such outer-wrapper-level error.
+        // What stays dropped, unchanged from before this round and by
+        // launchCommand's own explicit design: each entry's OWN command's
+        // stdout/stderr (the launched application's own output), which
+        // launchCommand redirects to /dev/null on purpose so that
+        // Quickshell tearing down ITS pipes can never reach the
+        // application through them.
         stderr: StdioCollector {
             waitForEnd: true
             onStreamFinished: {
@@ -294,14 +425,15 @@ Item {
 
     // hyprctl reload is not only something a user can run by hand --
     // Omarchy's own migrations call it too -- and it throws every runtime
-    // rule away. This puts them back: rules only, never the programs (a
-    // reload does not restart a session). load()'s generation guard above
-    // is what keeps a reload landing mid-startup from corrupting the run
-    // already in flight instead of cleanly superseding it.
+    // rule away. This puts them back: rules only, never the programs, UNLESS
+    // sessionStartOwed says an earlier run never got that far -- see
+    // dispatchRead(). load()'s generation guard above is what keeps a
+    // reload landing mid-startup from corrupting the run already in flight
+    // instead of cleanly superseding it.
     Connections {
         target: Hyprland
         function onRawEvent(event) {
-            if (String(event.name) === "configreloaded") root.load(true)
+            if (String(event.name) === "configreloaded") root.load()
         }
     }
 }
