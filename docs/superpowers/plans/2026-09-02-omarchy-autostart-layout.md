@@ -2266,7 +2266,8 @@ timeout for JavaScript, so matching happens in Hyprland and in grep -E."
   - `omarchy-autostart-windows --workspaces` → `[{"workspace":"1","monitor":"DP-4"}]`.
   - `omarchy-autostart-windows --match-file <path>` — Datei mit je Zeile `<id>\t<class-regex>` → `[{"id":…,"address":"0x…","class":…,"workspace":…,"monitor":…}]`, ein Eintrag je getroffenem Fenster.
   - `Model.ADDRESS_RE` = `/^0x[0-9a-f]{1,16}$/`.
-  - `Model.buildReconcileChunks(model, workspacesNow, matches) -> [string]` — Dispatcher-Ausdrücke, je Element **ein** `hyprctl dispatch`. Wirft bei einer Adresse, die `ADDRESS_RE` nicht erfüllt.
+  - `Model.buildReconcileChunks(model, workspacesNow, matches) -> [string]` — fertige Ausdrücke, je Element **ein** hyprctl-Aufruf. Wirft bei einer Adresse, die `ADDRESS_RE` nicht erfüllt.
+  - `Model.verbFor(payload) -> "eval" | "dispatch"` — welches hyprctl-Verb eine Nutzlast braucht. Task 1 hat gemessen, dass die beiden Umzugsarten **verschiedene** Verben verlangen; diese Funktion ist die einzige Stelle, an der das entschieden wird, und Task 15 ruft sie statt selbst am Präfix zu schnüffeln.
   - `Model.missingIds(model, matches) -> [id]` — `enabled`-Programme ohne ein einziges getroffenes Fenster; Grundlage für `[Launch missing]`.
   - Task 13 und 15 rufen alle drei.
 
@@ -2375,19 +2376,29 @@ In `test/harness.qml`:
               Model.buildReconcileChunks(Model.validate(cfg([prog({ placement: { kind: "none" } })], [])),
                                          [], [{ id: "p1", address: "0xbeef" }]).length, 0);
 
-        // The counterpart to the rule-block test in task 9: Panel.qml routes
-        // anything starting with hl.dsp. to the dispatch verb.
-        check("reconcile: every expression starts with hl.dsp. -- the panel sends these to dispatch",
-              (function() {
-                  var m = Model.validate(cfg([prog({ id: "p1" })], [{ workspace: "2", monitor: "DP-3" }]));
-                  var c = Model.buildReconcileChunks(m, [{ workspace: "2", monitor: "DP-4" }],
-                                                     [{ id: "p1", address: "0xbeef" }]);
-                  if (c.length === 0) return "no expressions produced";
-                  for (var i = 0; i < c.length; i++) {
-                      if (c[i].indexOf("hl.dsp.") !== 0) return "expression " + i;
-                  }
-                  return "all";
-              })(), "all");
+        // --- verbFor: the three measured shapes ----------------------------
+        //
+        // Task 1 measured that the two move kinds need DIFFERENT hyprctl
+        // verbs. verbFor is the only place that decides, so it is the only
+        // place that has to be right -- and Panel.qml calls it rather than
+        // repeating the rule.
+        check("verbFor: a rule block goes to eval",
+              Model.verbFor(Model.buildRuleChunks(Model.validate(cfg([], []))) [0]), "eval");
+        check("verbFor: a window move goes to eval (hl.dispatch wrapper)",
+              Model.verbFor(Model.buildReconcileChunks(
+                  Model.validate(cfg([prog({ id: "p1" })], [])),
+                  [], [{ id: "p1", address: "0xbeef" }])[0]), "eval");
+        check("verbFor: a workspace move goes to dispatch (bare dispatcher)",
+              Model.verbFor(Model.buildReconcileChunks(
+                  Model.validate(cfg([], [{ workspace: "2", monitor: "DP-3" }])),
+                  [{ workspace: "2", monitor: "DP-4" }], [])[0]), "dispatch");
+
+        // And the window move really does carry the object form. A plain
+        // address string was measured not to work.
+        check("reconcile: the window field is an object, not an address string",
+              /window = hl\.get_window\(string\.char\(/.test(
+                  Model.buildReconcileChunks(Model.validate(cfg([prog({ id: "p1" })], [])),
+                                             [], [{ id: "p1", address: "0xbeef" }])[0]), true);
 
         checkThrows("reconcile: a malformed address is refused",
                     function() {
@@ -2493,17 +2504,34 @@ esac
 // hyprctl's output is not ours.
 var ADDRESS_RE = /^0x[0-9a-f]{1,16}$/;
 
-// Replace the two expressions below with whatever task 1 answered. They are
-// written as the dispatch-verb forms, one hyprctl dispatch per element.
+// Both expressions are the forms task 1 measured against a real window.
+//
+// They are NOT symmetric, and that is a measured fact rather than a style
+// choice: moving a window needed `hyprctl eval` wrapping the dispatcher in
+// hl.dispatch(...), while moving a workspace needed `hyprctl dispatch` with
+// the bare dispatcher. verbFor() below is the single place that knows which
+// is which.
+//
+// The window field must be an OBJECT -- hl.get_window(address). A plain
+// address string was measured NOT to work.
 function windowMoveExpression(address, placement) {
     var field = (placement.kind === "workspace") ? "workspace" : "monitor";
-    return "hl.dsp.window.move({ " + field + " = " + luaBytes(placement.value)
-         + ", window = " + luaBytes(address) + ", follow = false })";
+    return "hl.dispatch(hl.dsp.window.move({ " + field + " = " + luaBytes(placement.value)
+         + ", window = hl.get_window(" + luaBytes(address) + "), follow = false }))";
 }
 
 function workspaceMoveExpression(move) {
     return "hl.dsp.workspace.move({ workspace = " + luaBytes(move.workspace)
          + ", monitor = " + luaBytes(move.monitor) + " })";
+}
+
+// Which hyprctl verb a payload needs. Three shapes exist and each was
+// measured: a rule block (starts with `do`) goes to eval; a window move
+// (wrapped in hl.dispatch) goes to eval; a bare dispatcher expression goes to
+// dispatch. Keeping this in one tested function is why Panel.qml does not
+// carry the rule as an inline string comparison.
+function verbFor(payload) {
+    return String(payload).indexOf("hl.dsp.") === 0 ? "dispatch" : "eval";
 }
 
 function buildReconcileChunks(model, workspacesNow, matches) {
@@ -2699,7 +2727,10 @@ hits="$(grep -nE 'hl\.(window_rule|workspace_rule)' ./*.qml 2>/dev/null || true)
 
 # 7b -- and in Model.js every line that builds a rule encodes its values.
 #       A quoted value there would be code inside the compositor.
-hits="$(grep -nE 'hl\.(window_rule|workspace_rule|dsp)' Model.js \
+# Only lines that CONSTRUCT something -- an hl call immediately followed by a
+# table literal. verbFor() mentions the string "hl.dsp." for a comparison and
+# is not a construction, so it must not be caught here.
+hits="$(grep -nE 'hl\.(window_rule|workspace_rule|dsp\.[a-z_.]+)\(\{' Model.js \
         | grep -v 'luaBytes(' || true)"
 [[ -z "$hits" ]] && ok "every rule-building line in Model.js uses luaBytes" \
                  || bad "every rule-building line in Model.js uses luaBytes" "$hits"
@@ -3619,13 +3650,13 @@ Item {
         root.nextChunk()
     }
 
-    // Rule blocks go through eval, dispatcher expressions through dispatch.
-    // The two verbs are not interchangeable.
+    // The two hyprctl verbs are not interchangeable, and which payload needs
+    // which was measured in task 1. Model.verbFor is the single place that
+    // knows -- do not inline the rule here.
     function nextChunk() {
         if (root.pendingIndex >= root.pendingChunks.length) { root.refreshLive(); return }
         var payload = root.pendingChunks[root.pendingIndex]
-        var verb = (payload.indexOf("hl.dsp.") === 0) ? "dispatch" : "eval"
-        evalProc.command = run.hypr(verb, payload)
+        evalProc.command = run.hypr(Model.verbFor(payload), payload)
         root.pendingIndex += 1
         evalProc.running = true
     }
