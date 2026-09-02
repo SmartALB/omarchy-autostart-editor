@@ -276,6 +276,14 @@ QtObject {
             // question that matters: does any configured value survive into the payload
             // as readable text? Distinctive values are used so a hit cannot be
             // coincidence.
+            //
+            // NOT covered here: the workspace field. WORKSPACE_RE permits only bare
+            // digits ("77"), so no distinctive value can be chosen for it -- any digits
+            // used here would collide with incidental ones elsewhere in the payload
+            // (chunk lengths, string.char counts, etc). That gap is why the stronger
+            // "nothing numeric survives outside string.char()" check exists right below:
+            // it covers class, monitor, address AND workspace at once, with no
+            // distinctive value needed for any of them.
             check("chunks: no configured value appears literally in the payload",
                   (function() {
                       var m = Model.validate(cfg(
@@ -288,6 +296,25 @@ QtObject {
                           if (all.indexOf(v) !== -1) leaked.push(v);
                       });
                       return leaked.length === 0 ? "clean" : "leaked: " + leaked.join(",");
+                  })(), "clean");
+
+            // Stronger than looking for distinctive values: the Lua skeleton these
+            // chunks are built from contains no digit anywhere, and every configured
+            // value is supposed to arrive as string.char(<digits>). So remove the
+            // string.char(...) groups and NOTHING numeric may remain. This catches an
+            // unencoded class, monitor, address or workspace alike -- including the
+            // workspace, which cannot be given a distinctive value because
+            // WORKSPACE_RE permits only digits.
+            check("chunks: nothing numeric survives outside string.char()",
+                  (function() {
+                      var m = Model.validate(cfg(
+                          [prog({ id: "p1", "class": "^(QQQZZZ)$",
+                                  placement: { kind: "workspace", value: "77" } })],
+                          [{ workspace: "42", monitor: "ZZTOPMON" }]));
+                      var all = Model.buildRuleChunks(m).join("\n")
+                                    .replace(/string\.char\([0-9,]*\)/g, "");
+                      var m2 = all.match(/[0-9]/g);
+                      return m2 === null ? "clean" : "digits left: " + m2.join("");
                   })(), "clean");
 
             check("chunks: no chunk carries more than 20 rules",
@@ -437,6 +464,11 @@ QtObject {
             // path: a distinctive monitor (workspace move) and a distinctive
             // address (window move), neither of which may appear as readable
             // text in the payload -- both must arrive as string.char(...).
+            //
+            // NOT covered here either: the workspace field of the workspace move
+            // (move.workspace) -- same reason as the buildRuleChunks version above,
+            // WORKSPACE_RE permits only digits so no distinctive value exists. The
+            // "nothing numeric survives" version right below covers it.
             check("reconcile: no configured value appears literally in the payload",
                   (function() {
                       var m = Model.validate(cfg(
@@ -450,6 +482,24 @@ QtObject {
                           if (all.indexOf(v) !== -1) leaked.push(v);
                       });
                       return leaked.length === 0 ? "clean" : "leaked: " + leaked.join(",");
+                  })(), "clean");
+
+            // Same "nothing numeric survives" question as buildRuleChunks, for the
+            // reconcile path. Distinctive workspace/monitor values are used for the
+            // workspace ROW and window placement so the "clean" result is not an
+            // accident of an unused field; workspace "77" itself is exactly the kind
+            // of value this check does not need to be distinctive to catch.
+            check("reconcile: nothing numeric survives outside string.char()",
+                  (function() {
+                      var m = Model.validate(cfg(
+                          [prog({ id: "p1", placement: { kind: "monitor", value: "ZZTOPMON" } })],
+                          [{ workspace: "77", monitor: "YYWORKMON" }]));
+                      var all = Model.buildReconcileChunks(m,
+                          [{ workspace: "77", monitor: "XXCURRENTMON" }],
+                          [{ id: "p1", address: "0xdeadbeefcafe" }]).join("\n")
+                                    .replace(/string\.char\([0-9,]*\)/g, "");
+                      var m2 = all.match(/[0-9]/g);
+                      return m2 === null ? "clean" : "digits left: " + m2.join("");
                   })(), "clean");
 
             // Wrapped in try/catch, not a bare call: a mutation that lets a
