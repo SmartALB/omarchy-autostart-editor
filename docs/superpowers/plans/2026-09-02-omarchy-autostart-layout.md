@@ -1568,36 +1568,134 @@ Expected: die vier neuen Tests rot.
 set -uo pipefail
 
 HYPRCTL="${HYPRCTL:-hyprctl}"
+
+# Absolute, and a named seam like HYPRCTL -- not a PATH lookup. The linear
+# time guarantee that lets this script evaluate an untrusted regex belongs
+# to a POSIX ERE automaton, and "grep" does not always mean that: on the
+# machine this was written on, `grep` is a shell function wrapping ugrep
+# while /usr/bin/grep is GNU grep. A non-interactive shell resolves to the
+# latter, but the guarantee should not depend on that.
+GREP="${GREP:-/usr/bin/grep}"
+
 MAX_WINDOWS=500
+MAX_WORKSPACES=99
+MAX_PROGRAMS=200
 
-monitors="$("$HYPRCTL" -j monitors 2>/dev/null)" || monitors=""
-clients="$("$HYPRCTL" -j clients  2>/dev/null)" || clients=""
+cmd_list_json() {
+    local monitors clients
+    monitors="$("$HYPRCTL" -j monitors 2>/dev/null)" || monitors=""
+    clients="$("$HYPRCTL" -j clients  2>/dev/null)" || clients=""
 
-if [[ -z "$clients" ]] || ! jq -e 'type == "array"' <<<"$clients" >/dev/null 2>&1; then
-    echo "[]"
-    exit 0
-fi
-jq -e 'type == "array"' <<<"$monitors" >/dev/null 2>&1 || monitors="[]"
+    if [[ -z "$clients" ]] || ! jq -e 'type == "array"' <<<"$clients" >/dev/null 2>&1; then
+        echo "[]"
+        return 0
+    fi
+    jq -e 'type == "array"' <<<"$monitors" >/dev/null 2>&1 || monitors="[]"
 
-jq -c --argjson mon "$monitors" --argjson max "$MAX_WINDOWS" '
-    # monitors travels through --argjson (argv) while clients is streamed
-    # through stdin to respect the MAX_ARG_STRLEN limit. A monitor list is
-    # bounded by physical hardware and will never approach that limit;
-    # streaming a second input here would need a temporary file with its own
-    # cleanup -- more machinery than the inconsistency costs. Kept on purpose.
-    ( $mon | map(select(type == "object"))
-           | map({ key: (.id | tostring), value: .name }) | from_entries ) as $names
-    | map(select(type == "object"))
-    | map(select((.workspace.id // 0) > 0))
-    | .[0:$max]
-    | map({
-        address:   (.address // ""),
-        class:     (.class // ""),
-        title:     (.title // ""),
-        workspace: ((.workspace.id // 0) | tostring),
-        monitor:   ($names[(.monitor // -1) | tostring] // "")
-      })
-' <<<"$clients"
+    jq -c --argjson mon "$monitors" --argjson max "$MAX_WINDOWS" '
+        # monitors travels through --argjson (argv) while clients is streamed
+        # through stdin to respect the MAX_ARG_STRLEN limit. A monitor list is
+        # bounded by physical hardware and will never approach that limit;
+        # streaming a second input here would need a temporary file with its own
+        # cleanup -- more machinery than the inconsistency costs. Kept on purpose.
+        ( $mon | map(select(type == "object"))
+               | map({ key: (.id | tostring), value: .name }) | from_entries ) as $names
+        | map(select(type == "object"))
+        | map(select((.workspace.id // 0) > 0))
+        | .[0:$max]
+        # class and title are sanitized here, once, so the one-line-per-window
+        # invariant holds for every consumer of cmd_list_json -- not only
+        # cmd_match_file, which resolves a grep hit back to a window by line
+        # number and would otherwise misattribute a match whenever an earlier
+        # window has a class or title containing an embedded newline. Wayland
+        # app_id and X11 WM_CLASS are set by the client, so a buggy or
+        # hostile one can put arbitrary bytes there -- this is not exotic.
+        #
+        # Squashed to a space, not dropped, for the same reason task 6 kept
+        # a tab inside a .desktop value rather than deleting it. The trade
+        # this makes is real: a window whose actual class contains a control
+        # character is reported with a sanitized class, so From window
+        # produces a pattern that will not match it and that window cannot
+        # be placed. That is the acceptable side of the trade -- a window
+        # that cannot be placed, never a different window moved instead.
+        | map({
+            address:   (.address // ""),
+            class:     ((.class // "") | gsub("[[:cntrl:]]"; " ")),
+            title:     ((.title // "") | gsub("[[:cntrl:]]"; " ")),
+            workspace: ((.workspace.id // 0) | tostring),
+            monitor:   ($names[(.monitor // -1) | tostring] // "")
+          })
+    ' <<<"$clients"
+}
+
+cmd_workspaces() {
+    local workspaces
+    workspaces="$("$HYPRCTL" -j workspaces 2>/dev/null)" || workspaces=""
+    if [[ -z "$workspaces" ]] || ! jq -e 'type == "array"' <<<"$workspaces" >/dev/null 2>&1; then
+        echo "[]"; exit 0
+    fi
+    jq -c --argjson max "$MAX_WORKSPACES" '
+        map(select((.id // 0) > 0))
+        | .[0:$max]
+        | map({ workspace: ((.id // 0) | tostring), monitor: (.monitor // "") })
+    ' <<<"$workspaces"
+}
+
+# Match each program's class regex against the open windows.
+#
+# The regex is evaluated HERE, by grep -E, and nowhere else. grep -E runs an
+# automaton: it does not backtrack, so a class such as ^(a+)+$ costs linear
+# time instead of hanging the caller. JavaScript RegExp would backtrack, and
+# QML gives JavaScript no timeout to be rescued by.
+cmd_match_file() {
+    local file="$1"
+    [[ -f "$file" ]] || { echo "[]"; exit 0; }
+
+    local windows; windows="$(cmd_list_json)"
+    local classes; classes="$(jq -r '.[] | .class' <<<"$windows")"
+
+    # The hand-over file carries `id<TAB>class-regex` per line. That is only
+    # unambiguous because the class allowlist in Model.js contains no tab --
+    # anyone widening it must revisit this, or a tab in a class would split a
+    # line into the wrong fields. Task 6 was bitten by exactly that shape when
+    # a value from /usr/share/applications contained a tab. The id side is
+    # ours ([a-z0-9]{1,16}), and `read` assigns the remainder of the line to
+    # the last variable, so a tab surviving into the regex would stay intact
+    # rather than shift a field.
+    local lines=0
+    {
+        # The "|| [[ -n "$id$regex" ]]" is load-bearing, not defensive
+        # decoration: `read` returns failure on the final line of a file with
+        # no trailing newline, so a bare "while read; do" silently drops that
+        # last line -- its program then shows as not running for no visible
+        # reason. The panel happens to write a trailing newline today, but a
+        # reader must not depend on what its caller happens to do.
+        while IFS=$'\t' read -r id regex || [[ -n "$id$regex" ]]; do
+            [[ -n "$id" && -n "$regex" ]] || continue
+            lines=$((lines + 1))
+            (( lines > MAX_PROGRAMS )) && break
+            # Feed the classes in and keep the line numbers, so the match maps
+            # back to the window without a second pass over the JSON.
+            while IFS= read -r hit; do
+                printf '%s\t%s\n' "$id" "$hit"
+            done < <(printf '%s\n' "$classes" | "$GREP" -n -E -- "$regex" 2>/dev/null | cut -d: -f1)
+        done < "$file"
+    } | jq -R -s --argjson w "$windows" '
+        split("\n") | map(select(length > 0) | split("\t"))
+        | map({ id: .[0], window: $w[(.[1] | tonumber) - 1] })
+        | map(select(.window != null))
+        | map({ id, address: .window.address, class: .window.class,
+                workspace: .window.workspace, monitor: .window.monitor })
+    '
+}
+
+case "${1:-}" in
+    "")           cmd_list_json ;;
+    --workspaces) cmd_workspaces ;;
+    --match-file) shift; [[ -n "${1:-}" ]] || { echo "usage: ${0##*/} --match-file <path>" >&2; exit 2; }
+                  cmd_match_file "$1" ;;
+    *)            echo "usage: ${0##*/} [--workspaces | --match-file <path>]" >&2; exit 2 ;;
+esac
 ```
 
 Zur Auswahl `(.workspace.id // 0) > 0`: Hyprlands Spezial-Workspaces (Scratchpad) haben negative Ids. Ein Fenster dort ist für dieses Plugin keine Platzierung, sondern ein Sonderfall, den es nicht anfassen soll.
@@ -3035,7 +3133,13 @@ function buildReconcileChunks(model, workspacesNow, matches) {
     var moves = workspaceMoves(model, workspacesNow);
     for (i = 0; i < moves.length; i++) out.push(workspaceMoveExpression(moves[i]));
 
-    var byId = {};
+    // Object.create(null), not {} -- the same reason as everywhere else in
+    // this file. ID_RE forbids the underscore in "__proto__", so a plain {}
+    // would in fact be safe for this particular map today, but that safety
+    // would depend on a fact living in a different function; keeping every
+    // map in this file prototype-less is what makes that reasoning
+    // unnecessary to redo on every read.
+    var byId = Object.create(null);
     var programs = (model && model.programs) || [];
     for (i = 0; i < programs.length; i++) byId[programs[i].id] = programs[i];
 
