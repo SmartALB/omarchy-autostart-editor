@@ -1,0 +1,43 @@
+#!/usr/bin/env bash
+# The start marker: it decides whether the autostart programs are launched.
+#
+# Without it, `omarchy-restart-shell` -- which is needed after every QML change
+# and is therefore run constantly -- would launch the whole session a second
+# time. The marker is bound to HYPRLAND_INSTANCE_SIGNATURE so that a genuinely
+# new session does not find an old one, and it lives under XDG_RUNTIME_DIR,
+# which is wiped per boot.
+#
+# It fails closed: no signature, or a directory it cannot write, means no
+# claim -- and no claim means the autostart is SKIPPED. A doubled session is
+# worse than one that did not start.
+set -uo pipefail
+
+sig="${HYPRLAND_INSTANCE_SIGNATURE:-}"
+[[ -n "$sig" ]] || { echo "no HYPRLAND_INSTANCE_SIGNATURE" >&2; exit 1; }
+
+# The signature comes from the compositor, but it ends up in a path, so it is
+# checked rather than trusted.
+[[ "$sig" =~ ^[A-Za-z0-9._:-]{1,128}$ ]] || { echo "implausible signature" >&2; exit 1; }
+
+dir="${XDG_RUNTIME_DIR:-/run/user/$(id -u)}/smartalb.autostart"
+marker="$dir/$sig"
+
+case "${1:-}" in
+    claim)
+        mkdir -p "$dir" 2>/dev/null || { echo "cannot create $dir" >&2; exit 1; }
+        # O_EXCL through noclobber: the check and the create are one step, so
+        # two shells starting at once cannot both win.
+        if (set -o noclobber; : > "$marker") 2>/dev/null; then
+            exit 0
+        fi
+        exit 1
+        ;;
+    release)
+        rm -f "$marker" 2>/dev/null
+        exit 0
+        ;;
+    *)
+        echo "usage: ${0##*/} claim | release" >&2
+        exit 2
+        ;;
+esac

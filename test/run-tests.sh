@@ -832,4 +832,49 @@ test_qml_structure() {
 
 test_qml_structure
 
+MARKER_BIN="$PWD/../bin/omarchy-autostart-marker"
+
+test_marker_claims_once_per_hyprland_instance() {
+    setup_sandbox
+    export HYPRLAND_INSTANCE_SIGNATURE="sig-a"
+    assert_status "marker: the first claim succeeds"   0 "$MARKER_BIN" claim
+    assert_status "marker: the second claim is refused" 1 "$MARKER_BIN" claim
+    export HYPRLAND_INSTANCE_SIGNATURE="sig-b"
+    assert_status "marker: a new instance claims again" 0 "$MARKER_BIN" claim
+    teardown_sandbox
+}
+
+test_marker_refuses_when_it_cannot_write() {
+    setup_sandbox
+    export HYPRLAND_INSTANCE_SIGNATURE="sig-a"
+    chmod 500 "$XDG_RUNTIME_DIR"
+    # Refusing means the autostart is SKIPPED. A doubled session is worse than
+    # one that did not start: without a marker a shell restart launches
+    # everything a second time.
+    assert_status "marker: an unwritable runtime dir refuses the claim" 1 "$MARKER_BIN" claim
+    chmod 700 "$XDG_RUNTIME_DIR"
+    teardown_sandbox
+}
+
+test_marker_refuses_without_a_signature() {
+    setup_sandbox
+    unset HYPRLAND_INSTANCE_SIGNATURE
+    assert_status "marker: no instance signature, no claim" 1 "$MARKER_BIN" claim
+    teardown_sandbox
+}
+
+test_marker_release_allows_a_new_claim() {
+    setup_sandbox
+    export HYPRLAND_INSTANCE_SIGNATURE="sig-a"
+    "$MARKER_BIN" claim >/dev/null
+    assert_status "marker: release succeeds" 0 "$MARKER_BIN" release
+    assert_status "marker: after release a claim works again" 0 "$MARKER_BIN" claim
+    teardown_sandbox
+}
+
+test_marker_claims_once_per_hyprland_instance
+test_marker_refuses_when_it_cannot_write
+test_marker_refuses_without_a_signature
+test_marker_release_allows_a_new_claim
+
 summary
