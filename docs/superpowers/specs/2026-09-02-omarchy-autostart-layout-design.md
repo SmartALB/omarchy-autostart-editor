@@ -183,11 +183,27 @@ Schritte 1–3, danach der Abgleich:
            end
          end end
 
-  Damit ist „kein Treffer" von der Bauweise her ein No-op. Diese Form ist zum
-  Zeitpunkt dieser Fassung **noch nicht gemessen**; Task 1 muss sie belegen,
-  bevor Task 11 sie benutzt. Belegt sie sich nicht, entfällt das Verschieben
-  bereits offener Fenster ganz und die Platzierung greift erst beim nächsten
-  Öffnen — als bekannte Grenze ins README.
+  Damit ist „kein Treffer" von der Bauweise her ein No-op: auf dem Fehlpfad
+  wird gar kein Dispatcher aufgerufen.
+
+  **Gemessen und belegt** (5 Läufe × 7 Versuche, je mit Negativkontrolle):
+  diese Form trifft 35/35 und lässt die Negativkontrolle 5/5 unberührt. Die
+  Ursache der Vorfälle ist damit auch geklärt: `hl.get_window("<nackte hex>")`
+  liefert **immer `nil`**, ein `window`-Feld mit `nil` bedeutet „Schlüssel
+  fehlt", und dann wirkt `window.move` auf das **aktive** Fenster.
+
+  Zwei kürzere Fassungen sind ebenfalls sauber gemessen —
+  `window = "address:<hex>"` als Zeichenkette und
+  `hl.get_window("address:<hex>")` mit `if w then`. Sie werden **nicht**
+  benutzt: ihre Sicherheit hängt daran, dass Hyprland eine unauflösbare
+  Zeichenkette folgenlos behandelt, also an einer Eigenschaft der Laufzeit.
+  Die Aufzählungsform hängt an der Form des eigenen Codes. Nach dem, was diese
+  Frage gekostet hat, ist das der Unterschied, der zählt.
+
+  Der lehrreichste Messwert ist eine Form, die **nicht** benutzt wird:
+  `hl.get_window("address:<hex>")` **ohne** `if w then` trifft 7 von 7 gültigen
+  Adressen und verschob in der Negativkontrolle Signal. Nur die
+  Negativkontrolle unterscheidet sie von den sicheren Fassungen.
 - Der Abgleich startet **nichts**. Ein separater Knopf `[Launch missing]`
   startet die `enabled`-Programme, die noch nicht laufen. Speichern soll
   keine Fenster aufmachen.

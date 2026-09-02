@@ -2519,19 +2519,27 @@ var ADDRESS_RE = /^0x[0-9a-f]{1,16}$/;
 // A window is NEVER addressed by a string here, and the loop below is the
 // whole reason this function exists in the shape it does.
 //
-// Measured on 2026-09-02 with a counting instrument (7 trials per form,
-// aborting on the first collateral event), three runs, same result each time:
-// hl.get_window("<hex>") is either inert (0/7) or -- passed on as the window
-// field -- hits an UNRELATED window from the second trial onwards. It moved
-// the user's Chatterbox window and two of his terminals. A resolution guard
-// (`if w then`) does not help, because w is not nil; it is the wrong window.
-// The likely reason, untested: a bare hex string is not a valid window
-// selector and hl.get_window falls back to something else, plausibly the
-// active window.
+// Measured on 2026-09-02 with a counting instrument -- 5 runs of 7 trials per
+// form, each with a negative control using an address that does not exist,
+// aborting on the first collateral event. This form: 35/35 moved the right
+// window, negative control clean 5/5.
 //
-// So the object comes out of hl.get_windows() -- a list the compositor
-// itself produced -- and the address is compared on the object's own field.
-// No match then means no move, by construction rather than by a guard.
+// The mechanism behind three separate incidents, in which the probe moved the
+// user's Chatterbox window, two of his terminals and his Signal window:
+// hl.get_window("<bare hex>") always returns nil, a window field set to nil
+// means the KEY IS ABSENT, and window.move then acts on the ACTIVE window.
+// A bare hex address is not a valid selector; "address:<hex>" is.
+//
+// Two shorter forms measured clean as well -- window = "address:<hex>" as a
+// plain string, and hl.get_window("address:<hex>") behind an `if w then`.
+// Neither is used here. Their safety rests on Hyprland no-oping an
+// unresolvable string, a property of the runtime. This form's safety rests on
+// the shape of our own code: on the miss path no dispatcher is called at all.
+//
+// And the most instructive measurement is of a form NOT used:
+// hl.get_window("address:<hex>") WITHOUT the guard scored 7/7 on live
+// addresses and moved Signal on its negative control. Nothing but the
+// negative control separates it from the safe forms.
 function windowMoveExpression(address, placement) {
     var field = (placement.kind === "workspace") ? "workspace" : "monitor";
     return "do for _, w in ipairs(hl.get_windows({})) do "
