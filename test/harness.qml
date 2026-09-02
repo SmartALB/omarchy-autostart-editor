@@ -403,8 +403,24 @@ QtObject {
             // --- newId ---------------------------------------------------------
             check("newId: avoids an id in use",
                   Model.newId([{ id: "p1" }]) !== "p1", true);
-            check("newId: satisfies the id rule",
-                  Model.ID_RE.test(Model.newId([])), true);
+            // NOT "ID_RE.test(newId([]))" any more. That assertion could not
+            // fail: "p1" satisfies ID_RE whether or not newId checks it, so
+            // removing the check left it green (measured: 0 red). What is worth
+            // holding is that every id this generator hands out is one
+            // validate() ACCEPTS -- an independent judge, over a run of ids
+            // rather than the first one. Probed: changing the candidate to
+            // "P" + i turns this red and the old assertion did not notice.
+            check("newId: every id it answers with is one validate() accepts",
+                  (function() {
+                      var existing = [], refused = [], i;
+                      for (i = 0; i < 60; i++) {
+                          var fresh = Model.newId(existing);
+                          if (Model.validate(cfg([prog({ id: fresh })])).programs.length !== 1)
+                              refused.push(fresh);
+                          existing.push({ id: fresh });
+                      }
+                      return refused.join(",");
+                  })(), "");
             check("newId: still finds one after many",
                   (function() {
                       var many = [], i;
@@ -420,8 +436,49 @@ QtObject {
                   "^(nimbus\\-web\\.chat\\.com__\\-Default)$");
             check("classLiteral: a plain class",
                   Model.classLiteral("cursor"), "^(cursor)$");
-            check("classLiteral: the result passes the allowlist",
-                  Model.CLASS_RE.test(Model.classLiteral("LM-Studio")), true);
+            // NOT "CLASS_RE.test(classLiteral(...))" any more: classLiteral
+            // THROWS unless the allowlist passes, so that assertion was true by
+            // construction and stayed green with the allowlist check removed.
+            // What the pattern is FOR is identifying one window and not its
+            // neighbours, so that is what is asserted -- the same property the
+            // shell suite measures through the real grep -E, asserted here over
+            // generated patterns instead of one hand-copied literal. RegExp is
+            // used on a FIXED fixture, never on a user pattern (Panel.qml is
+            // barred from it by a structural check, for the backtracking
+            // hazard). Probed: unescaped -> red, unanchored -> red.
+            check("classLiteral: the pattern matches the class it was built from",
+                  (function() {
+                      var classes = ["cursor", "LM-Studio", "nimbus-chat.example.org__-Default",
+                                     "org.gnome.Nautilus", "code-url-handler", "steam_app_570",
+                                     "1Password", "a b"];
+                      var missed = [], i;
+                      for (i = 0; i < classes.length; i++) {
+                          if (!new RegExp(Model.classLiteral(classes[i])).test(classes[i]))
+                              missed.push(classes[i]);
+                      }
+                      return missed.join(",");
+                  })(), "");
+            check("classLiteral: and matches neither a near miss nor a longer class",
+                  (function() {
+                      var cases = [["nimbus-chat.example.org__-Default",
+                                    "nimbus-webXchatYcom__-Default"],
+                                   ["nimbus-chat.example.org__-Default",
+                                    "a-nimbus-chat.example.org__-Default-suffix"],
+                                   ["cursor", "cursor2"],
+                                   ["org.gnome.Nautilus", "orgXgnomeXNautilus"],
+                                   ["LM-Studio", "LM-Studio-Beta"]];
+                      var wrong = [], i;
+                      for (i = 0; i < cases.length; i++) {
+                          if (new RegExp(Model.classLiteral(cases[i][0])).test(cases[i][1]))
+                              wrong.push(cases[i][0] + " matched " + cases[i][1]);
+                      }
+                      return wrong.join(",");
+                  })(), "");
+            checkThrows("classLiteral: an empty class is refused, and the refusal says what to do",
+                        function() { Model.classLiteral(""); },
+                        /refusing an empty window class .* type the class by hand/);
+            check("classLiteral: the empty pattern it used to produce is one the allowlist accepts",
+                  Model.CLASS_RE.test("^()$"), true);
             checkThrows("classLiteral: a class with a quote is refused",
                         function() { Model.classLiteral('a"b'); }, /classLiteral: refusing/);
             checkThrows("classLiteral: a non-ascii class is refused",
@@ -514,10 +571,90 @@ QtObject {
                       [{ address: "0x1", class: "cursor", title: "a", workspace: "1", monitor: "DP-4" },
                        { address: "0x2", class: "cursor", title: "b", workspace: "2", monitor: "DP-4" }],
                       [], apps).programs.length, 1);
-            check("import: an unknown class falls back to itself as the command",
+            // THE INJECTION PATH THAT WAS HERE. This function used to fall back
+            // to the window's own class as the command when the application
+            // list matched nothing -- and a class is set by the client, so a
+            // window calling itself "$(reboot)" imported as an entry whose
+            // COMMAND was "$(reboot)", accepted by validate() and rendered
+            // verbatim by launchCommand. The class PATTERN is escaped and was
+            // never the hole; the command field cannot be, because it is a
+            // shell command line by design. Three assertions, because the fix
+            // has three halves: nothing from the class reaches the command, the
+            // entry is still imported, and it is imported VISIBLY broken.
+            check("import: a class the app list does not know reaches the command field never",
                   Model.importFromSession(
-                      [{ address: "0x1", class: "somethingelse", title: "t", workspace: "1", monitor: "DP-4" }],
-                      [], apps).programs[0].command, "somethingelse");
+                      [{ address: "0x1", class: "$(reboot)", title: "t",
+                         workspace: "1", monitor: "DP-4" }],
+                      [], apps).programs[0].command, "");
+            check("import: an unmatched window is still imported, not dropped",
+                  Model.importFromSession(
+                      [{ address: "0x1", class: "somethingelse", title: "t",
+                         workspace: "1", monitor: "DP-4" }],
+                      [], apps).programs.length, 1);
+            check("import: and it arrives visibly incomplete rather than plausibly wrong",
+                  (function() {
+                      var config = Model.importFromSession(
+                          [{ address: "0x1", class: "somethingelse", title: "t",
+                             workspace: "1", monitor: "DP-4" }], [], apps);
+                      var checked = Model.validate(config);
+                      return checked.programs.length + ":"
+                           + (checked.rejected[0] || {}).reason;
+                  })(), "0:command-invalid");
+            check("import: a window with no class at all is left out, since no pattern can name it",
+                  Model.importFromSession(
+                      [{ address: "0x1", class: "", title: "t", workspace: "1", monitor: "DP-4" },
+                       { address: "0x2", class: "cursor", title: "t", workspace: "1", monitor: "DP-4" }],
+                      [], apps).programs.length, 1);
+            // The unvalidated config reader permits a null entry and validate()
+            // names that shape by itself, so none of these may throw on it.
+            check("import: a null window entry is skipped, not fatal",
+                  Model.importFromSession(
+                      [null, { address: "0x2", class: "cursor", title: "t",
+                               workspace: "1", monitor: "DP-4" }],
+                      [null, { workspace: "2", monitor: "DP-3" }], apps).programs.length, 1);
+            check("import: and the null workspace row is skipped too",
+                  Model.importFromSession(
+                      [], [null, { workspace: "2", monitor: "DP-3" }], apps).workspaces.length, 1);
+            check("newId: a null entry in the list in use is not fatal",
+                  Model.newId([null, { id: "p1" }]), "p2");
+            check("programFromApp: a null entry in the list in use is not fatal",
+                  Model.programFromApp(apps[0], [null, { id: "p1" }]).id, "p2");
+
+            // --- appsProblem ---------------------------------------------------
+            // Two facts, three outcomes. The point of the pair is that "too
+            // long" and "broken" are not the same sentence: the first is
+            // something the user can act on. The panel could only ever say the
+            // second one until the stderr marker was collected.
+            check("appsProblem: nothing wrong, nothing said",
+                  Model.appsProblem(false, false), "");
+            check("appsProblem: too long to read in full says so",
+                  Model.appsProblem(true, true).indexOf("too long to read in full") !== -1, true);
+            check("appsProblem: a broken answer does NOT claim it was too long",
+                  Model.appsProblem(true, false).indexOf("too long") , -1);
+            check("appsProblem: a broken answer says it could not be read",
+                  Model.appsProblem(true, false),
+                  "Could not read the list of installed applications.");
+            check("appsProblem: cut short but usable is its own third case",
+                  Model.appsProblem(false, true).indexOf("may be missing from it") !== -1, true);
+            check("appsProblem: the three cases are three different sentences",
+                  (function() {
+                      var a = Model.appsProblem(true, true), b = Model.appsProblem(true, false),
+                          c = Model.appsProblem(false, true);
+                      return (a !== b && b !== c && a !== c) ? "distinct" : "collapsed";
+                  })(), "distinct");
+
+            // --- isEmptyConfig -------------------------------------------------
+            // The condition [Import current session] is gated on. BOTH lists,
+            // because the import replaces the whole configuration: a draft with
+            // workspace rows and no programs would lose them.
+            check("isEmptyConfig: nothing at all",
+                  Model.isEmptyConfig(cfg([], [])), true);
+            check("isEmptyConfig: a program makes it non-empty",
+                  Model.isEmptyConfig(cfg([prog({})], [])), false);
+            check("isEmptyConfig: a workspace row alone makes it non-empty",
+                  Model.isEmptyConfig(cfg([], [{ workspace: "2", monitor: "DP-3" }])), false);
+            check("isEmptyConfig: an absent configuration counts as empty",
+                  Model.isEmptyConfig(undefined), true);
             check("import: a workspace row the allowlist refuses is left out of the table",
                   Model.importFromSession([], [{ workspace: "0", monitor: "DP-4" },
                                                { workspace: "2", monitor: 'a"b' },

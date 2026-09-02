@@ -462,10 +462,21 @@ function stripFieldCodes(exec) {
 // The lowest free "p<n>". ID_RE is checked rather than assumed: it is the
 // rule validate() will judge the entry by, and a change to it that this
 // generator did not follow would otherwise produce entries the panel refuses
-// the moment it creates them.
+// the moment it creates them. What holds that claim is not this check --
+// "p<n>" satisfies ID_RE whatever the check does -- but the assertion that
+// walks 60 consecutive ids through validate(), which goes red the moment the
+// candidate shape changes. See test/harness.qml.
+//
+// The list this is handed is a DRAFT's program list, which comes from a file a
+// human may have edited: `null` is a shape validate() names by itself
+// ("not-an-object"), so it must not throw here either. Reading `.id` off null
+// is a TypeError, and it would take the whole add or import with it.
 function newId(existing) {
     var used = Object.create(null), i;
-    for (i = 0; i < (existing || []).length; i++) used[existing[i].id] = true;
+    for (i = 0; i < (existing || []).length; i++) {
+        var entry = existing[i];
+        if (entry && typeof entry === "object") used[entry.id] = true;
+    }
     for (i = 1; i <= 100000; i++) {
         var candidate = "p" + i;
         if (!used[candidate] && ID_RE.test(candidate)) return candidate;
@@ -479,6 +490,18 @@ function newId(existing) {
 // it is handed back -- a class picked from a window is not more trustworthy
 // than one typed in.
 function classLiteral(windowClass) {
+    // AN EMPTY CLASS IS REFUSED, and not because the allowlist would catch it:
+    // it would not. "^()$" satisfies CLASS_RE, and as a Hyprland match it says
+    // "a class that is the empty string" -- a pattern that identifies no
+    // particular window and, put through a matcher, is answered by whatever
+    // reports no class at all. A window can genuinely have none (Wayland
+    // app_id is set by the client, or not), so this is a real input, not a
+    // hypothetical one. The message says what to do instead, because this is
+    // the one refusal a user reaches by clicking rather than by typing.
+    if (String(windowClass) === "") {
+        throw new Error("classLiteral: refusing an empty window class -- it cannot"
+                        + " identify a window; type the class by hand or pick another window");
+    }
     var escaped = String(windowClass).replace(/[.^$()|\[\]?*+\\:-]/g, "\\$&");
     var pattern = "^(" + escaped + ")$";
     if (!CLASS_RE.test(pattern)) {
@@ -540,6 +563,22 @@ function programFromApp(app, existing) {
 // just seen must not open by itself at the next login. A window whose class
 // cannot be encoded is skipped rather than aborting the whole import -- one odd
 // window should not cost the other twenty.
+//
+// THE COMMAND IS NEVER GUESSED FROM THE CLASS. An earlier version of this
+// function fell back to the class name when guessCommand found nothing, and
+// that was an injection path, measured end to end: a window class is set by
+// the client, so a window calling itself `$(reboot)` imported as an entry
+// whose COMMAND was `$(reboot)`. The class pattern is escaped and that path is
+// defended; the command cannot be, because the command field is a shell
+// command line by design -- launchCommand renders it verbatim. No allowlist
+// can rescue that, so the value simply never comes from the window.
+//
+// The entry is still imported, with an empty command. validate() names it
+// "command-invalid", the row says so on screen (task 15), and the user types
+// the command -- which is exactly the situation: the plugin could not map this
+// window to a program, and only the user knows what started it. Dropping the
+// entry instead would hide the window that most needs attention; a
+// plausible-looking wrong command would hide that it was ever a guess.
 function importFromSession(windows, workspacesNow, apps) {
     var config = { schemaVersion: 1, programs: [], workspaces: [] };
     // Object.create(null), not {}: a window whose class is "__proto__" would
@@ -548,6 +587,9 @@ function importFromSession(windows, workspacesNow, apps) {
 
     for (i = 0; i < (workspacesNow || []).length; i++) {
         var row = workspacesNow[i];
+        // The same shape guard as newId's, for the same reason: a row that is
+        // not an object is a shape validate() names, not one that may throw.
+        if (!row || typeof row !== "object") continue;
         if (WORKSPACE_RE.test(row.workspace) && MONITOR_RE.test(row.monitor)) {
             config.workspaces.push({ workspace: row.workspace, monitor: row.monitor });
         }
@@ -555,11 +597,14 @@ function importFromSession(windows, workspacesNow, apps) {
 
     for (i = 0; i < (windows || []).length; i++) {
         var window = windows[i];
+        if (!window || typeof window !== "object") continue;
         if (seen[window["class"]]) continue;
         var pattern, command;
         try { pattern = classLiteral(window["class"]) } catch (e) { continue }
+        // The only source for a command is the installed application list.
+        // When nothing there matches, the field stays empty -- see the note
+        // above this function.
         command = guessCommand(window["class"], apps);
-        if (command === "") command = String(window["class"]);
         if (command.length > MAX_COMMAND) continue;
         seen[window["class"]] = true;
         config.programs.push({
@@ -574,6 +619,52 @@ function importFromSession(windows, workspacesNow, apps) {
         });
     }
     return config;
+}
+
+// What to tell the user about an application list that did not arrive whole.
+//
+// Two facts, three outcomes, and they are NOT interchangeable: "too long" is
+// something a user can act on and "broken" is not, and the previous round
+// could only say the second one because the panel threw away the marker that
+// distinguishes them. "" means nothing went wrong and nothing is said.
+//
+// Here rather than in Panel.qml for the reason reasonText and envelopeText are
+// here: wording in QML is wording no suite in this project can execute, and
+// this one is not merely wording -- it is a decision over two inputs.
+//
+// The substring Panel.qml looks for on stderr is Runners.qml's own truncation
+// marker; test/qml-structure.sh binds those two files together so a reworded
+// marker cannot silently stop being recognised.
+function appsProblem(unparseable, truncated) {
+    if (unparseable && truncated) {
+        return "The list of installed applications is too long to read in full, so it"
+             + " could not be used. Nothing else is affected.";
+    }
+    if (unparseable) {
+        return "Could not read the list of installed applications.";
+    }
+    if (truncated) {
+        // Parsed, but cut short: the picker works and is incomplete, which is a
+        // third thing again -- saying "broken" here would be false and saying
+        // nothing would leave an application mysteriously absent from the list.
+        return "The list of installed applications was cut short, so an application"
+             + " may be missing from it.";
+    }
+    return "";
+}
+
+// Is there anything in this configuration at all? The panel offers
+// [Import current session] only for an empty one and refuses the import
+// otherwise, and BOTH lists have to be empty for that: the import returns a
+// whole configuration, workspace table included, so running it over a draft
+// that has workspace rows but no programs would discard them.
+//
+// Here rather than in Panel.qml because it is the condition on a destructive
+// action, and a condition in QML is one no suite in this project can execute.
+function isEmptyConfig(config) {
+    var programs   = (config && config.programs)   || [];
+    var workspaces = (config && config.workspaces) || [];
+    return programs.length === 0 && workspaces.length === 0;
 }
 
 // The command field is a shell command line by design -- the same trust level

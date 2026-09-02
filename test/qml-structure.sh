@@ -1472,5 +1472,33 @@ else
   fi
 fi
 
+# 26 -- the truncation marker Panel.qml watches for is the text Runners.qml
+#       actually writes.
+#
+#       Runners.qml catches the producer's SIGPIPE (141) and turns it into a
+#       success, because output past the cap is truncation and not failure --
+#       and it says so on stderr. Panel.qml's appsProc collects that stream and
+#       recognises the announcement by substring, which is what lets it tell
+#       "the list was too long" from "the list was broken". Reword the marker in
+#       one file and the recognition in the other stops working: the panel would
+#       go back to reporting a merely-long list as broken, with every suite
+#       green -- there is no runtime here to notice.
+#
+#       Both sides are checked against ONE literal named here, comment-stripped
+#       like everything else in this file, so a comment quoting the marker
+#       cannot stand in for either the writer or the reader.
+truncation_marker="producer output exceeded the cap"
+marker_missing=""
+grep -qF "$truncation_marker" <<<"$stripped_runners" \
+  || marker_missing="$marker_missing Runners.qml(writer)"
+grep -qF "$truncation_marker" <<<"$stripped_panel" \
+  || marker_missing="$marker_missing Panel.qml(reader)"
+if [[ -z "$marker_missing" ]]; then
+  ok "the truncation marker is the same text in the file that writes it and the file that reads it"
+else
+  bad "the truncation marker is the same text in the file that writes it and the file that reads it" \
+      "the literal '$truncation_marker' is absent from:$marker_missing -- a reworded marker stops being recognised and a merely-long application list is reported as broken"
+fi
+
 printf '\nqml structure: total=%d failed=%d\n' "$run" "$failed"
 (( failed == 0 ))

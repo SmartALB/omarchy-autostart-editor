@@ -187,6 +187,18 @@ Panel {
     property bool appsPending: false
     property bool importPending: false
 
+    // The two things that can go wrong with the application list, tracked
+    // apart because the user can act on one of them and not on the other.
+    // appsTruncated comes from runnerOut's own marker on stderr -- which this
+    // panel used to throw away, and that is the whole reason the previous
+    // round could only say "broken" for a list that was merely too long. At
+    // roughly 137 bytes per entry the script's 2000-file bound reaches 230-270
+    // KB against runnerOut's 256 KiB cap, so this is a reachable state, not a
+    // theoretical one.
+    property bool appsTruncated: false
+    property bool appsUnparseable: false
+    property string appsProblemText: ""
+
     // Which program row is currently taking its class from a window that is
     // open right now.
     //
@@ -574,13 +586,26 @@ Panel {
     // command, the whole imported configuration -- because a decision in this
     // file is a decision no suite in this project can execute.
 
-    // [+ Add] -- pick from the installed .desktop entries.
-    function openAdd() {
+    // Both flows read the same list through the same Process, so each entry
+    // point disarms the other's flag: pressing [+ Add] while an import was
+    // waiting for that answer must not import. The alternative -- a requester
+    // id on the Process -- buys nothing here, because the two requests want
+    // the identical answer and only differ in what is done with it.
+    function startAppsRead() {
         root.errorText = ""
-        root.addOpen = true
         root.appsPending = true
+        root.appsTruncated = false
+        root.appsUnparseable = false
+        root.appsProblemText = ""
         appsProc.command = run.tool("omarchy-autostart-apps")
         appsProc.running = true
+    }
+
+    // [+ Add] -- pick from the installed .desktop entries.
+    function openAdd() {
+        root.importPending = false
+        root.addOpen = true
+        root.startAppsRead()
     }
 
     function closeAdd() {
@@ -604,18 +629,20 @@ Panel {
             waitForEnd: true
             onStreamFinished: {
                 root.appsPending = false
-                try { root.apps = JSON.parse(String(text || "[]")) }
-                catch (e) {
-                    // NOT silent. The answer is capped on the way out
-                    // (runnerOut's head -c), and a document cut off mid-string
-                    // is unparseable -- which would otherwise show as an empty
-                    // picker with no explanation at all, the dead end this
-                    // message exists to prevent. Truncation is not a failure
-                    // either, so the exit status is 0 and onExited says nothing.
-                    root.apps = []
-                    if (root.errorText === "")
-                        root.errorText = "Could not read the list of installed applications"
+                try {
+                    root.apps = JSON.parse(String(text || "[]"))
+                    root.appsUnparseable = false
                 }
+                catch (e) {
+                    // NOT silent, and no longer guessing which of the two
+                    // things happened: the stderr collector below carries
+                    // runnerOut's truncation marker, and reportAppsProblem
+                    // words the two cases differently. An empty picker with no
+                    // explanation is the dead end this exists to prevent.
+                    root.apps = []
+                    root.appsUnparseable = true
+                }
+                root.reportAppsProblem()
                 // The import waits for THIS, not for onExited: it needs
                 // root.apps, and this is where root.apps arrives. Which of the
                 // two signals Quickshell emits first is not something any file
@@ -625,6 +652,25 @@ Panel {
                     root.importPending = false
                     root.finishImport()
                 }
+            }
+        }
+        // runnerOut announces a truncated answer HERE and nowhere else -- it
+        // catches the producer's SIGPIPE (141) and turns it into a success,
+        // precisely because output past the cap is truncation and not failure.
+        // Without this collector that announcement went to nobody, and a list
+        // that was merely too long was reported as broken.
+        //
+        // Matched with indexOf on a fixed substring, not a regular expression:
+        // the text is Runners.qml's own and this is a stream of bytes from a
+        // process, so there is nothing to be gained by handing it to a regex
+        // engine.
+        stderr: StdioCollector {
+            waitForEnd: true
+            onStreamFinished: {
+                if (String(text || "").indexOf("producer output exceeded the cap") !== -1) {
+                    root.appsTruncated = true
+                }
+                root.reportAppsProblem()
             }
         }
         onExited: function(exitCode, exitStatus) {
@@ -643,11 +689,32 @@ Panel {
                 // set would fire on whatever the NEXT reader of this Process
                 // collects, which is the [+ Add] picker.
                 root.importPending = false
-                if (root.errorText === "") {
-                    root.errorText = "Could not read the list of installed applications"
-                }
+                // A script that failed produced no usable list, which is the
+                // unparseable case -- routed through the same one function so
+                // the three sentences live in one place.
+                root.appsUnparseable = true
+                root.reportAppsProblem()
             }
         }
+    }
+
+    // The verdict on an application read, derived from both facts rather than
+    // decided by whichever handler runs first: two StdioCollectors on one
+    // Process emit in an order this project cannot execute a file to discover,
+    // so neither handler is allowed to conclude alone. Called from both, it
+    // reaches the same wording whichever arrives last.
+    //
+    // It only ever replaces its OWN earlier sentence (appsProblemText), never
+    // an error some other flow put on screen.
+    function reportAppsProblem() {
+        // The wording, and the choice between the three cases, is
+        // Model.appsProblem's -- the same rule as reasonText and envelopeText.
+        var message = Model.appsProblem(root.appsUnparseable, root.appsTruncated)
+        if (message === "") return
+        if (root.errorText === "" || root.errorText === root.appsProblemText) {
+            root.errorText = message
+        }
+        root.appsProblemText = message
     }
 
     // [From window] -- fill a program's class from a window that is open right
@@ -676,23 +743,14 @@ Panel {
     }
 
     // [Import current session] -- the answer to an empty panel on first run.
-    //
-    // Guarded on the WHOLE draft being empty, not only on the program list:
-    // the import returns a complete configuration, workspace table included,
-    // so running it over a draft that already has workspace rows would discard
-    // them. An empty panel is what this button is for.
-    function draftIsEmpty() {
-        return (root.draft.programs || []).length === 0
-            && (root.draft.workspaces || []).length === 0
-    }
-
+    // The condition is Model.isEmptyConfig, not a comparison written here: it
+    // is the guard on a destructive action (the import replaces the whole
+    // configuration, workspace table included), and a guard in QML is a guard
+    // no suite in this project can execute.
     function importSession() {
-        if (!root.draftIsEmpty()) return
-        root.errorText = ""
+        if (!Model.isEmptyConfig(root.draft)) return
         root.importPending = true
-        root.appsPending = true
-        appsProc.command = run.tool("omarchy-autostart-apps")
-        appsProc.running = true
+        root.startAppsRead()
     }
 
     // Reached from appsProc once the application list is in. Nothing is
@@ -701,7 +759,7 @@ Panel {
     // The guard is repeated because the draft can have changed while the
     // script ran.
     function finishImport() {
-        if (!root.draftIsEmpty()) return
+        if (!Model.isEmptyConfig(root.draft)) return
         var next = Model.importFromSession(root.openWindows, root.workspacesNow, root.apps)
         root.setExpandedRow(-1)
         root.commitDraft(next)
@@ -1254,7 +1312,17 @@ Panel {
 
                                             Button {
                                                 text: String(windowEntry.modelData["class"]
-                                                             || "(no class)")
+                                                             || "(no window class)")
+                                                // A window with no class cannot be
+                                                // picked: the pattern for it would be
+                                                // "^()$", which identifies no window in
+                                                // particular. Model.classLiteral refuses
+                                                // it at the source; this stops the user
+                                                // walking into that refusal by making
+                                                // the row visibly unavailable instead.
+                                                enabled: String(windowEntry.modelData["class"]
+                                                                || "") !== ""
+                                                opacity: enabled ? 1.0 : 0.4
                                                 foreground: root.fg
                                                 fontFamily: root.fontFam
                                                 leftAlign: true
@@ -1525,7 +1593,7 @@ Panel {
 
                     Button {
                         text: "Import current session"
-                        visible: root.draftIsEmpty()
+                        visible: Model.isEmptyConfig(root.draft)
                         foreground: root.fg
                         fontFamily: root.fontFam
                         bordered: true
