@@ -83,6 +83,12 @@ Panel {
         // path that forgets the setter.
         root.setExpandedRow(-1)
         root.editorsFocused = 0
+        // A closed panel offers nothing: the picker does not come back open on
+        // the next click with a stale application list behind it, and a pending
+        // import is cancelled rather than landing in a draft nobody is looking
+        // at (reload() would replace it on the next open anyway).
+        root.addOpen = false
+        root.importPending = false
         root.controller.hide()
     }
 
@@ -156,6 +162,11 @@ Panel {
     // first; it is what the first one was waiting for.
     function setExpandedRow(next) {
         if (keyCatcher) keyCatcher.forceActiveFocus()
+        // Any window pick in progress ends here too. pickForRow is an INDEX,
+        // and every caller of this setter -- collapse, remove, reload, revert,
+        // close -- can make that index mean a different row than the one the
+        // user opened the picker on.
+        root.pickForRow = -1
         root.expandedRow = next
     }
 
@@ -169,9 +180,24 @@ Panel {
     // any other empty-id row was clicked.
     property int expandedRow: -1
 
-    // Task 16 fills this in: the id of the program whose class is to be taken
-    // from a window that is open right now.
-    property string pickForId: ""
+    // The installed applications, as read for the [+ Add] picker and for the
+    // first-run import. Empty until one of the two asks for them.
+    property var apps: []
+    property bool addOpen: false
+    property bool appsPending: false
+    property bool importPending: false
+
+    // Which program row is currently taking its class from a window that is
+    // open right now.
+    //
+    // BY ROW, not by id, for the same reason expandedRow is (see there): the
+    // rows are the DRAFT's entries, and a draft entry's id can be missing,
+    // malformed or shared with another entry -- that is precisely what
+    // validate() rejects it for. Keyed by id, picking a class would write it
+    // into EVERY row sharing that id, placing a program the user never picked
+    // for, and a row with an empty id would pick whenever any other empty-id
+    // row did.
+    property int pickForRow: -1
 
     function markDirty() {
         var a = JSON.stringify(root.saved), b = JSON.stringify(root.draft)
@@ -286,9 +312,16 @@ Panel {
     }
 
     // --- live state -------------------------------------------------------
-    function refreshLive() {
+    // Split out of refreshLive: [From window] needs the window list to be
+    // current -- a program started since the panel opened must be pickable --
+    // and it has no business re-running the match query to get it.
+    function refreshWindows() {
         windowsProc.command = run.tool("omarchy-autostart-windows")
         windowsProc.running = true
+    }
+
+    function refreshLive() {
+        root.refreshWindows()
         workspacesProc.command = run.tool("omarchy-autostart-windows", "--workspaces")
         workspacesProc.running = true
         root.refreshMatches()
@@ -527,20 +560,151 @@ Panel {
         }
     }
 
-    // Placeholder for task 16's app picker, declared here so this file's
-    // teardown covers it from the start rather than a task later.
-    Process { id: appsProc }
+    // --- the three ways a program gets into the list ----------------------
+    //
+    // All three change root.draft and nothing else. Saving happens on [Apply]
+    // and nowhere near here: adding a program must not write the file, and it
+    // must certainly not move windows across screens.
+    //
+    // NOTHING ARRIVES SWITCHED ON. A list the user has only just been handed
+    // must not open programs by itself at the next login, so every route
+    // creates disabled entries and the user turns on what they meant.
+    //
+    // The decisions all sit in Model.js -- the free id, the pattern, the
+    // command, the whole imported configuration -- because a decision in this
+    // file is a decision no suite in this project can execute.
 
-    // Task 16 replaces these two with the real flows. They exist now so the
-    // buttons the layout calls for are wired to something that is there -- a
-    // call into a missing function is a runtime TypeError nothing in this
-    // project can execute to find -- and each says plainly that it is not
-    // available yet rather than doing nothing at all.
+    // [+ Add] -- pick from the installed .desktop entries.
     function openAdd() {
-        root.errorText = "Adding a program is not available in this build yet"
+        root.errorText = ""
+        root.addOpen = true
+        root.appsPending = true
+        appsProc.command = run.tool("omarchy-autostart-apps")
+        appsProc.running = true
     }
+
+    function closeAdd() {
+        root.addOpen = false
+    }
+
+    function addFromApp(app) {
+        var next = root.draftCopy()
+        var programs = next.programs || []
+        programs.push(Model.programFromApp(app, programs))
+        next.programs = programs
+        root.addOpen = false
+        root.commitDraft(next)
+    }
+
+    // One Process for both flows that need the application list: they ask the
+    // same question of the same script, and the answer serves whichever asked.
+    Process {
+        id: appsProc
+        stdout: StdioCollector {
+            waitForEnd: true
+            onStreamFinished: {
+                root.appsPending = false
+                try { root.apps = JSON.parse(String(text || "[]")) }
+                catch (e) {
+                    // NOT silent. The answer is capped on the way out
+                    // (runnerOut's head -c), and a document cut off mid-string
+                    // is unparseable -- which would otherwise show as an empty
+                    // picker with no explanation at all, the dead end this
+                    // message exists to prevent. Truncation is not a failure
+                    // either, so the exit status is 0 and onExited says nothing.
+                    root.apps = []
+                    if (root.errorText === "")
+                        root.errorText = "Could not read the list of installed applications"
+                }
+                // The import waits for THIS, not for onExited: it needs
+                // root.apps, and this is where root.apps arrives. Which of the
+                // two signals Quickshell emits first is not something any file
+                // in this project can be executed to find out, so the import
+                // is not built on an ordering nobody measured.
+                if (root.importPending) {
+                    root.importPending = false
+                    root.finishImport()
+                }
+            }
+        }
+        onExited: function(exitCode, exitStatus) {
+            // Cleared here as well as in onStreamFinished, because a process
+            // that fails to START emits no stream signal at all -- Qt sends no
+            // finished() for that case, which is the same gap Service.qml
+            // needs its watchdog for. Whichever of the two arrives first, the
+            // panel stops claiming it is still reading.
+            root.appsPending = false
+            // Live for the first time: through run.tool the script's own status
+            // now survives the pipe (see Runners.qml), and 141 -- output past
+            // the cap -- is already turned into 0 there, so a non-zero status
+            // here is a real failure of the script.
+            if (exitCode !== 0) {
+                // The import is abandoned rather than left armed: a flag still
+                // set would fire on whatever the NEXT reader of this Process
+                // collects, which is the [+ Add] picker.
+                root.importPending = false
+                if (root.errorText === "") {
+                    root.errorText = "Could not read the list of installed applications"
+                }
+            }
+        }
+    }
+
+    // [From window] -- fill a program's class from a window that is open right
+    // now. This is the route on which webapps and LM-Studio come out right
+    // without the user having to know how either of them names itself.
+    function pickClass(rowIndex, windowClass) {
+        var next = root.draftCopy()
+        var programs = next.programs || []
+        if (rowIndex < 0 || rowIndex >= programs.length) return
+        var pattern
+        // A class picked from a window is not more trustworthy than one typed
+        // in: it goes through Model.classLiteral, which escapes every
+        // metacharacter and then puts the result through the same allowlist.
+        // A refusal is shown rather than swallowed -- and it costs nothing,
+        // because next is a copy and nothing has been written to the draft yet.
+        try { pattern = Model.classLiteral(windowClass) }
+        catch (e) {
+            root.errorText = "That window class cannot be used: " + String(e.message)
+            return
+        }
+        programs[rowIndex]["class"] = pattern
+        next.programs = programs
+        root.pickForRow = -1
+        root.errorText = ""
+        root.commitDraft(next)
+    }
+
+    // [Import current session] -- the answer to an empty panel on first run.
+    //
+    // Guarded on the WHOLE draft being empty, not only on the program list:
+    // the import returns a complete configuration, workspace table included,
+    // so running it over a draft that already has workspace rows would discard
+    // them. An empty panel is what this button is for.
+    function draftIsEmpty() {
+        return (root.draft.programs || []).length === 0
+            && (root.draft.workspaces || []).length === 0
+    }
+
     function importSession() {
-        root.errorText = "Importing the current session is not available in this build yet"
+        if (!root.draftIsEmpty()) return
+        root.errorText = ""
+        root.importPending = true
+        root.appsPending = true
+        appsProc.command = run.tool("omarchy-autostart-apps")
+        appsProc.running = true
+    }
+
+    // Reached from appsProc once the application list is in. Nothing is
+    // written: the button offers a list to review, not a finished
+    // configuration, so this ends in the draft with [Apply] still to press.
+    // The guard is repeated because the draft can have changed while the
+    // script ran.
+    function finishImport() {
+        if (!root.draftIsEmpty()) return
+        var next = Model.importFromSession(root.openWindows, root.workspacesNow, root.apps)
+        root.setExpandedRow(-1)
+        root.commitDraft(next)
     }
 
     // --- derived lists for the widgets ------------------------------------
@@ -749,6 +913,110 @@ Panel {
                         }
                     }
 
+                    // --- the [+ Add] picker -------------------------------------------
+                    // A plain list. Filtering it would be one more derivation,
+                    // and a derivation belongs in Model.js where a suite can
+                    // reach it; the list is bounded by the script (2000 files)
+                    // and scrolls with the rest of the panel.
+                    Column {
+                        id: appPicker
+                        width: body.width
+                        visible: root.addOpen
+                        spacing: Style.spacing.xs
+
+                        Row {
+                            width: appPicker.width
+                            spacing: Style.spacing.controlGap
+
+                            Text {
+                                textFormat: Text.PlainText
+                                text: root.appsPending ? "Reading the installed applications..."
+                                                       : "Pick an installed application"
+                                color: root.fg
+                                font.family: root.fontFam
+                                font.pixelSize: Style.font.caption
+                                elide: Text.ElideRight
+                                width: Math.max(Style.space(60),
+                                                appPicker.width - cancelAddButton.implicitWidth
+                                                - parent.spacing)
+                                anchors.verticalCenter: parent.verticalCenter
+                            }
+
+                            Button {
+                                id: cancelAddButton
+                                text: "Cancel"
+                                foreground: root.fg
+                                fontFamily: root.fontFam
+                                bordered: true
+                                anchors.verticalCenter: parent.verticalCenter
+                                onClicked: root.closeAdd()
+                            }
+                        }
+
+                        // Only once the answer is actually in: "no applications"
+                        // and "not read yet" are different things, and the first
+                        // one is a claim this panel should not make while a
+                        // process is still running.
+                        Text {
+                            textFormat: Text.PlainText
+                            width: appPicker.width
+                            visible: !root.appsPending && root.apps.length === 0
+                            text: "No installed applications were found."
+                            color: root.fg
+                            opacity: 0.7
+                            font.family: root.fontFam
+                            font.pixelSize: Style.font.caption
+                            wrapMode: Text.WordWrap
+                        }
+
+                        Repeater {
+                            // A JavaScript array model here, unlike the program
+                            // rows: these delegates hold no text cursor, so the
+                            // rebuild on every change costs nothing at all.
+                            model: root.apps
+
+                            delegate: Row {
+                                id: appEntry
+                                required property var modelData
+                                width: appPicker.width
+                                spacing: Style.spacing.controlGap
+
+                                Button {
+                                    text: String(appEntry.modelData.name || "(no name)")
+                                    foreground: root.fg
+                                    fontFamily: root.fontFam
+                                    leftAlign: true
+                                    width: Math.max(Style.space(80),
+                                                    appPicker.width - Style.space(180))
+                                    anchors.verticalCenter: parent.verticalCenter
+                                    onClicked: root.addFromApp(appEntry.modelData)
+                                }
+
+                                // What the entry declares as its window class,
+                                // shown because it is what decides whether the
+                                // new row can be placed at all: an application
+                                // without one arrives with an empty class and
+                                // has to be finished with [From window].
+                                Text {
+                                    textFormat: Text.PlainText
+                                    text: String(appEntry.modelData.wmclass || "no window class")
+                                    color: root.fg
+                                    opacity: 0.6
+                                    font.family: root.fontFam
+                                    font.pixelSize: Style.font.caption
+                                    elide: Text.ElideRight
+                                    width: Style.space(170)
+                                    anchors.verticalCenter: parent.verticalCenter
+                                }
+                            }
+                        }
+
+                        PanelSeparator {
+                            width: appPicker.width
+                            foreground: root.fg
+                        }
+                    }
+
                     Text {
                         textFormat: Text.PlainText
                         width: body.width
@@ -780,6 +1048,12 @@ Panel {
                             id: programRow
                             width: body.width
                             spacing: Style.spacing.xs
+
+                            // The outer index, captured under a name of its own:
+                            // a nested Repeater's delegate has an `index` of its
+                            // own that shadows this one (see the window picker
+                            // below).
+                            readonly property int rowIndex: index
 
                             readonly property var program: (root.draft.programs || [])[index]
                                                            || root.blankProgram()
@@ -933,9 +1207,91 @@ Panel {
                                         fontFamily: root.fontFam
                                         bordered: true
                                         anchors.verticalCenter: parent.verticalCenter
-                                        onClicked: root.pickForId = programRow.program.id
+                                        onClicked: {
+                                            root.pickForRow = (root.pickForRow === programRow.rowIndex)
+                                                              ? -1 : programRow.rowIndex
+                                            // The list has to be current: a program
+                                            // started since the panel opened must be
+                                            // pickable, or the one route that gets a
+                                            // webapp's class right is closed for it.
+                                            root.refreshWindows()
+                                        }
                                     }
                                 }
+
+                                // --- [From window]'s own list -------------
+                                // The windows that are open right now, class
+                                // first because the class is what is being
+                                // picked; the title is there to tell two
+                                // windows of one application apart.
+                                Column {
+                                    id: windowPicker
+                                    width: programRow.width
+                                    visible: root.pickForRow === programRow.rowIndex
+                                    spacing: Style.spacing.xs
+
+                                    Text {
+                                        textFormat: Text.PlainText
+                                        width: windowPicker.width
+                                        text: root.openWindows.length === 0
+                                              ? "No open windows were found."
+                                              : "Pick the window this program opens"
+                                        color: root.fg
+                                        opacity: 0.7
+                                        font.family: root.fontFam
+                                        font.pixelSize: Style.font.caption
+                                        wrapMode: Text.WordWrap
+                                    }
+
+                                    Repeater {
+                                        model: root.openWindows
+
+                                        delegate: Row {
+                                            id: windowEntry
+                                            required property var modelData
+                                            width: windowPicker.width
+                                            spacing: Style.spacing.controlGap
+
+                                            Button {
+                                                text: String(windowEntry.modelData["class"]
+                                                             || "(no class)")
+                                                foreground: root.fg
+                                                fontFamily: root.fontFam
+                                                leftAlign: true
+                                                width: Math.max(Style.space(80),
+                                                                windowPicker.width - Style.space(180))
+                                                anchors.verticalCenter: parent.verticalCenter
+                                                // programRow.rowIndex, NEVER `index`.
+                                                // Inside this delegate `index` is THIS
+                                                // Repeater's index over the window list
+                                                // and shadows the program row's own --
+                                                // measured offscreen on a nested
+                                                // Repeater of exactly this shape:
+                                                //   outer/inner 2/0 -> index reads 0
+                                                //   it differs from the row index in
+                                                //   4 of 6 delegates
+                                                // Written as `index` it looks right and
+                                                // silently picks the class for whichever
+                                                // row happens to sit at that position.
+                                                onClicked: root.pickClass(programRow.rowIndex,
+                                                                          windowEntry.modelData["class"])
+                                            }
+
+                                            Text {
+                                                textFormat: Text.PlainText
+                                                text: String(windowEntry.modelData.title || "")
+                                                color: root.fg
+                                                opacity: 0.6
+                                                font.family: root.fontFam
+                                                font.pixelSize: Style.font.caption
+                                                elide: Text.ElideRight
+                                                width: Style.space(170)
+                                                anchors.verticalCenter: parent.verticalCenter
+                                            }
+                                        }
+                                    }
+                                }
+
 
                                 Row {
                                     spacing: Style.spacing.controlGap
@@ -1169,7 +1525,7 @@ Panel {
 
                     Button {
                         text: "Import current session"
-                        visible: (root.draft.programs || []).length === 0
+                        visible: root.draftIsEmpty()
                         foreground: root.fg
                         fontFamily: root.fontFam
                         bordered: true

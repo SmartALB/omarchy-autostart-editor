@@ -794,12 +794,49 @@ JSON
     teardown_sandbox
 }
 
+# The other half of a class claim that spans two suites, the same
+# construction as the envelope-wording pair further down.
+#
+# test/harness.qml proves Model.classLiteral("nimbus-chat.example.org__-Default")
+# produces exactly the pattern spelled out below; this proves that pattern,
+# fed through the REAL matcher, finds the window it was built from and only
+# that one. Neither half alone is worth much: the harness cannot run grep, and
+# a shell test cannot reach Model.js -- and what [From window] promises is
+# precisely that the two agree. If the escaping changes, the harness
+# assertion goes red and this one has to be brought along.
+#
+# Escaping every metacharacter is what makes the middle window a NON-match:
+# unescaped, the dots would be wildcards and "nimbus-webXchatYcom__-Default"
+# would match a pattern the user believes names one specific webapp. GNU grep
+# warns about the stray "\" before "-" and ":" (the script sends grep's stderr
+# to /dev/null) but honours both as literals, which is what this measures.
+test_windows_match_accepts_a_class_literal_from_a_window() {
+    setup_sandbox; fake_hyprctl_json
+    cat > "$FAKE_CLIENTS" <<'JSON'
+[{"address":"0x1","class":"nimbus-chat.example.org__-Default","title":"a","workspace":{"id":6},"monitor":1},
+ {"address":"0x2","class":"nimbus-webXchatYcom__-Default","title":"b","workspace":{"id":1},"monitor":0},
+ {"address":"0x3","class":"a-nimbus-chat.example.org__-Default-suffix","title":"c","workspace":{"id":1},"monitor":0}]
+JSON
+    printf 'p1\t^(nimbus\\-web\\.chat\\.com__\\-Default)$\n' > "$SANDBOX/match"
+    local out; out="$("$WINDOWS_BIN" --match-file "$SANDBOX/match")"
+    assert_eq "match: a class literal from [From window] matches exactly one window" \
+              "$(jq -r 'length' <<<"$out")" "1"
+    assert_eq "match: and it is the window the literal was built from" \
+              "$(jq -r '.[0].address' <<<"$out")" "0x1"
+    assert_eq "match: the escaped dots are literal, so the near-miss is not matched" \
+              "$(jq -r '[.[] | select(.address=="0x2")] | length' <<<"$out")" "0"
+    assert_eq "match: and the anchors keep the longer class out" \
+              "$(jq -r '[.[] | select(.address=="0x3")] | length' <<<"$out")" "0"
+    teardown_sandbox
+}
+
 test_windows_workspaces_mode
 test_windows_match_file
 test_match_is_bounded_against_a_backtracking_regex
 test_windows_match_file_uses_the_grep_seam
 test_windows_match_is_not_confused_by_a_newline_in_a_class
 test_windows_match_file_survives_no_trailing_newline
+test_windows_match_accepts_a_class_literal_from_a_window
 
 test_generated_lua_compiles() {
     local out_default out_many status_default status_many

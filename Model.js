@@ -451,6 +451,131 @@ function stripFieldCodes(exec) {
     return out.replace(/\s+/g, " ").replace(/^ | $/g, "");
 }
 
+// --- adding entries -------------------------------------------------------
+//
+// The three ways a program gets into the list -- picked from the installed
+// application list, picked from an open window, imported from the session --
+// all end here rather than in Panel.qml: every one of them derives something
+// (a free id, a pattern, a command, a whole configuration), and a derivation
+// in QML is a derivation no suite in this project can execute.
+
+// The lowest free "p<n>". ID_RE is checked rather than assumed: it is the
+// rule validate() will judge the entry by, and a change to it that this
+// generator did not follow would otherwise produce entries the panel refuses
+// the moment it creates them.
+function newId(existing) {
+    var used = Object.create(null), i;
+    for (i = 0; i < (existing || []).length; i++) used[existing[i].id] = true;
+    for (i = 1; i <= 100000; i++) {
+        var candidate = "p" + i;
+        if (!used[candidate] && ID_RE.test(candidate)) return candidate;
+    }
+    throw new Error("newId: no free id");
+}
+
+// Turn a window class into an anchored literal pattern. Every character that
+// is a regex metacharacter is escaped, so what looks like a pattern in a class
+// name stays a class name. The result is checked against the allowlist before
+// it is handed back -- a class picked from a window is not more trustworthy
+// than one typed in.
+function classLiteral(windowClass) {
+    var escaped = String(windowClass).replace(/[.^$()|\[\]?*+\\:-]/g, "\\$&");
+    var pattern = "^(" + escaped + ")$";
+    if (!CLASS_RE.test(pattern)) {
+        throw new Error("classLiteral: refusing " + windowClass);
+    }
+    return pattern;
+}
+
+// The command a window's class suggests, or "" when nothing does. String()
+// around every value read out of the app list: the list is built from files
+// this plugin does not own, and an entry whose Exec= went missing would
+// otherwise throw inside stripFieldCodes and take the whole import with it.
+function guessCommand(windowClass, apps) {
+    var wanted = String(windowClass).toLowerCase(), i;
+    var list = apps || [];
+    for (i = 0; i < list.length; i++) {
+        if (list[i] && list[i].wmclass && String(list[i].wmclass).toLowerCase() === wanted) {
+            return stripFieldCodes(String(list[i].exec === undefined ? "" : list[i].exec));
+        }
+    }
+    // Second pass: the leading word of Exec often IS the class.
+    for (i = 0; i < list.length; i++) {
+        var exec = stripFieldCodes(String((list[i] && list[i].exec) === undefined ? "" : list[i].exec));
+        var first = exec.split(" ")[0];
+        if (first && first.toLowerCase() === wanted) return exec;
+    }
+    return "";
+}
+
+// One entry built from a picked .desktop application.
+//
+// Everything the panel would otherwise decide for itself is here: the free
+// id, the length cap the schema enforces, the field codes that must never
+// reach a shell, and the class pattern. It arrives DISABLED -- putting a
+// program in the list is not the same act as switching it on.
+//
+// An application with no usable StartupWMClass gets an EMPTY class rather
+// than one guessed from its name: validate() then names the entry as left
+// out and the row says so on screen, which is a dead end the user can close
+// with [From window]. A guessed class would match nothing -- or something
+// else -- and say nothing at all.
+function programFromApp(app, existing) {
+    var source = app || {};
+    var pattern = "";
+    if (source.wmclass) {
+        try { pattern = classLiteral(source.wmclass); } catch (e) { pattern = ""; }
+    }
+    return {
+        id: newId(existing),
+        name: String(source.name === undefined ? "" : source.name).substring(0, MAX_NAME),
+        enabled: false,
+        command: stripFieldCodes(String(source.exec === undefined ? "" : source.exec)),
+        "class": pattern,
+        placement: { kind: "none" }
+    };
+}
+
+// The first-run import. Everything arrives disabled: a list the user has only
+// just seen must not open by itself at the next login. A window whose class
+// cannot be encoded is skipped rather than aborting the whole import -- one odd
+// window should not cost the other twenty.
+function importFromSession(windows, workspacesNow, apps) {
+    var config = { schemaVersion: 1, programs: [], workspaces: [] };
+    // Object.create(null), not {}: a window whose class is "__proto__" would
+    // read back as already-seen from a plain object and be skipped silently.
+    var seen = Object.create(null), i;
+
+    for (i = 0; i < (workspacesNow || []).length; i++) {
+        var row = workspacesNow[i];
+        if (WORKSPACE_RE.test(row.workspace) && MONITOR_RE.test(row.monitor)) {
+            config.workspaces.push({ workspace: row.workspace, monitor: row.monitor });
+        }
+    }
+
+    for (i = 0; i < (windows || []).length; i++) {
+        var window = windows[i];
+        if (seen[window["class"]]) continue;
+        var pattern, command;
+        try { pattern = classLiteral(window["class"]) } catch (e) { continue }
+        command = guessCommand(window["class"], apps);
+        if (command === "") command = String(window["class"]);
+        if (command.length > MAX_COMMAND) continue;
+        seen[window["class"]] = true;
+        config.programs.push({
+            id: newId(config.programs),
+            name: String(window["class"]).substring(0, MAX_NAME),
+            enabled: false,
+            command: command,
+            "class": pattern,
+            placement: WORKSPACE_RE.test(window.workspace)
+                     ? { kind: "workspace", value: window.workspace }
+                     : { kind: "none" }
+        });
+    }
+    return config;
+}
+
 // The command field is a shell command line by design -- the same trust level
 // as a line in ~/.config/hypr/autostart.lua -- and it is handed to bash as one
 // single argv element, never pasted into a larger command line.

@@ -400,6 +400,131 @@ QtObject {
             check("stripFieldCodes: nothing to strip",
                   Model.stripFieldCodes("modelbox"), "modelbox");
 
+            // --- newId ---------------------------------------------------------
+            check("newId: avoids an id in use",
+                  Model.newId([{ id: "p1" }]) !== "p1", true);
+            check("newId: satisfies the id rule",
+                  Model.ID_RE.test(Model.newId([])), true);
+            check("newId: still finds one after many",
+                  (function() {
+                      var many = [], i;
+                      for (i = 1; i <= 250; i++) many.push({ id: "p" + i });
+                      var fresh = Model.newId(many);
+                      for (i = 0; i < many.length; i++) if (many[i].id === fresh) return "collides";
+                      return "free";
+                  })(), "free");
+
+            // --- classLiteral --------------------------------------------------
+            check("classLiteral: anchors and escapes the dots",
+                  Model.classLiteral("nimbus-chat.example.org__-Default"),
+                  "^(nimbus\\-web\\.chat\\.com__\\-Default)$");
+            check("classLiteral: a plain class",
+                  Model.classLiteral("cursor"), "^(cursor)$");
+            check("classLiteral: the result passes the allowlist",
+                  Model.CLASS_RE.test(Model.classLiteral("LM-Studio")), true);
+            checkThrows("classLiteral: a class with a quote is refused",
+                        function() { Model.classLiteral('a"b'); }, /classLiteral: refusing/);
+            checkThrows("classLiteral: a non-ascii class is refused",
+                        function() { Model.classLiteral("café"); }, /classLiteral: refusing/);
+
+            // --- guessCommand --------------------------------------------------
+            var apps = [{ name: "Cursor", exec: "cursor %U", wmclass: "cursor", icon: "" },
+                        { name: "Modelbox", exec: "modelbox", wmclass: "LM-Studio", icon: "" },
+                        { name: "Files", exec: "nautilus %U", wmclass: "", icon: "" }];
+
+            check("guessCommand: matches StartupWMClass and strips field codes",
+                  Model.guessCommand("cursor", apps), "cursor");
+            check("guessCommand: matches case-insensitively",
+                  Model.guessCommand("modelbox", apps), "modelbox");
+            check("guessCommand: no match, no guess",
+                  Model.guessCommand("firefox", apps), "");
+            // The app list is built from files this plugin does not own. An
+            // entry that lost its Exec= used to reach stripFieldCodes as
+            // undefined and throw from inside .length, which would have taken
+            // the whole import down with it rather than one entry.
+            check("guessCommand: an app entry with no Exec does not throw",
+                  Model.guessCommand("cursor", [{ name: "Broken", wmclass: "cursor" }]), "");
+
+            // --- programFromApp ------------------------------------------------
+            check("programFromApp: arrives disabled",
+                  Model.programFromApp(apps[0], []).enabled, false);
+            check("programFromApp: the field codes are gone from the command",
+                  Model.programFromApp(apps[0], []).command, "cursor");
+            check("programFromApp: StartupWMClass becomes a literal pattern",
+                  Model.programFromApp(apps[1], [])["class"], "^(LM\\-Studio)$");
+            check("programFromApp: an unusable class leaves the field empty rather than refusing the entry",
+                  Model.programFromApp({ name: "Odd", exec: "odd", wmclass: "café" }, [])["class"], "");
+            check("programFromApp: no StartupWMClass leaves the field empty",
+                  Model.programFromApp(apps[2], [])["class"], "");
+            check("programFromApp: the id avoids the ids in use",
+                  Model.programFromApp(apps[0], [{ id: "p1" }, { id: "p2" }]).id, "p3");
+            check("programFromApp: a very long name is cut to the schema's limit",
+                  Model.programFromApp({ name: new Array(400).join("x"), exec: "a",
+                                         wmclass: "a" }, []).name.length, 100);
+            check("programFromApp: the entry survives its own validation",
+                  (function() {
+                      var checked = Model.validate(cfg([Model.programFromApp(apps[0], [])]));
+                      return checked.programs.length === 1 && checked.blocked.length === 0;
+                  })(), true);
+            // An entry with no usable class is NOT quietly workable: the row
+            // says so on screen and the omissions list names it, which is the
+            // dead end [From window] exists to close.
+            check("programFromApp: an entry with no class is named as left out",
+                  (function() {
+                      var checked = Model.validate(cfg([Model.programFromApp(apps[2], [])]));
+                      return (checked.rejected[0] || {}).reason;
+                  })(), "class-not-allowed");
+
+            // --- importFromSession ---------------------------------------------
+            check("import: builds one program per window",
+                  Model.importFromSession(
+                      [{ address: "0x1", class: "cursor", title: "t", workspace: "6", monitor: "HDMI-A-1" }],
+                      [{ workspace: "6", monitor: "HDMI-A-1" }], apps).programs.length, 1);
+            check("import: everything arrives disabled",
+                  Model.importFromSession(
+                      [{ address: "0x1", class: "cursor", title: "t", workspace: "6", monitor: "HDMI-A-1" }],
+                      [], apps).programs[0].enabled, false);
+            check("import: the workspace table comes from the live state",
+                  Model.importFromSession([], [{ workspace: "2", monitor: "DP-3" }], apps).workspaces.length, 1);
+            check("import: placement follows the window's workspace",
+                  Model.importFromSession(
+                      [{ address: "0x1", class: "cursor", title: "t", workspace: "6", monitor: "HDMI-A-1" }],
+                      [], apps).programs[0].placement.value, "6");
+            check("import: the result survives its own validation",
+                  (function() {
+                      var config = Model.importFromSession(
+                          [{ address: "0x1", class: "cursor", title: "t", workspace: "6", monitor: "HDMI-A-1" },
+                           { address: "0x2", class: "LM-Studio", title: "t", workspace: "1", monitor: "DP-4" }],
+                          [{ workspace: "6", monitor: "HDMI-A-1" }], apps);
+                      var checked = Model.validate(config);
+                      return checked.rejected.length === 0 && checked.blocked.length === 0;
+                  })(), true);
+            check("import: a window whose class cannot be encoded is skipped, not fatal",
+                  Model.importFromSession(
+                      [{ address: "0x1", class: "café", title: "t", workspace: "1", monitor: "DP-4" },
+                       { address: "0x2", class: "cursor", title: "t", workspace: "1", monitor: "DP-4" }],
+                      [], apps).programs.length, 1);
+            // Two windows of one class are one entry: a second Nimbus window
+            // would otherwise arrive as a second program with the SAME class,
+            // which validate() blocks the moment their placements differ --
+            // the import would hand the user a configuration that cannot be
+            // applied.
+            check("import: a second window of the same class does not add a second entry",
+                  Model.importFromSession(
+                      [{ address: "0x1", class: "cursor", title: "a", workspace: "1", monitor: "DP-4" },
+                       { address: "0x2", class: "cursor", title: "b", workspace: "2", monitor: "DP-4" }],
+                      [], apps).programs.length, 1);
+            check("import: an unknown class falls back to itself as the command",
+                  Model.importFromSession(
+                      [{ address: "0x1", class: "somethingelse", title: "t", workspace: "1", monitor: "DP-4" }],
+                      [], apps).programs[0].command, "somethingelse");
+            check("import: a workspace row the allowlist refuses is left out of the table",
+                  Model.importFromSession([], [{ workspace: "0", monitor: "DP-4" },
+                                               { workspace: "2", monitor: 'a"b' },
+                                               { workspace: "3", monitor: "DP-4" }], apps).workspaces.length, 1);
+            check("import: nothing at all is not an error",
+                  Model.importFromSession([], [], apps).programs.length, 0);
+
             // --- launchCommand -------------------------------------------------
             check("launchCommand: goes through uwsm-app",
                   Model.launchCommand("cursor").indexOf("uwsm-app -- cursor") !== -1, true);
