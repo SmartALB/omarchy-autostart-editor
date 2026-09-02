@@ -3091,32 +3091,53 @@ sed -i 's|^        if (!ADDRESS_RE.test(hits\[i\].address)) {|        if (false)
 ./test/run-qml-tests.sh; echo "A status=$?"
 git checkout Model.js
 
-# Probe B -- statt grep -E das Backtracking-Werkzeug nehmen
-sed -i 's/grep -n -E -- "$regex"/grep -n -P -- "$regex"/' bin/omarchy-autostart-windows
-./test/run-tests.sh; echo "B status=$?"
-git checkout bin/omarchy-autostart-windows
+# Probe B -- die Entwurfsannahme messen, nicht grep gegen grep.
+#
+# Gemessen am 02.09.2026: `grep -P` HAENGT NICHT. Modernes PCRE2 traegt ein
+# Backtracking-Limit und scheitert schnell (Status 2 nach 15 ms), GNU
+# `grep -E` braucht 1 ms. Der Kontrast, um den es hier geht, liegt also
+# nicht zwischen den grep-Modi, sondern zwischen `grep -E` und
+# **JavaScript**, das kein Limit hat -- und genau deshalb haelt der Entwurf
+# den Regex aus JavaScript heraus.
+python3 - <<'MEASURE'
+import subprocess, time, io
+io.open("/tmp/redos-probe.txt", "w").write("a"*40 + "b\n")
+t = time.time()
+subprocess.run(["/usr/bin/grep", "-cE", "^(a+)+$", "/tmp/redos-probe.txt"],
+               capture_output=True, timeout=20)
+print("  grep -E:            %d ms" % int((time.time()-t)*1000))
+t = time.time()
+r = subprocess.run(["node", "-e",
+    "const s='a'.repeat(40)+'b'; /^(a+)+$/.test(s); console.log('fertig')"],
+    capture_output=True, timeout=20)
+print("  JavaScript RegExp:  %s" % ("fertig nach %d ms" % int((time.time()-t)*1000)
+                                    if r.returncode == 0 else "TIMEOUT"))
+MEASURE
 
 # Probe C -- auch Programme ohne Platzierung verschieben
 sed -i 's|^        if (!placement \|\| placement.kind === "none") continue;|        if (false) continue;|' Model.js
 ./test/run-qml-tests.sh; echo "C status=$?"
 git checkout Model.js
 
-# Probe D -- die Auflösungswache entfernen. Die wichtigste Probe dieser Aufgabe.
+# Probe D -- die Aufzaehlung durch einen direkten Selektor ersetzen. Die
+# wichtigste Probe dieser Aufgabe: sie stellt genau die Form her, die am
+# 02.09.2026 drei fremde Fenster verschoben hat.
 python3 - <<'MUT'
-import io
+import io, re
 p = "Model.js"; s = io.open(p, encoding="utf-8").read()
-old = '"do local w = hl.get_window(" + luaBytes(address) + ") "\n         + "if w then hl.dispatch(hl.dsp.window.move({ "'
-new = '"hl.dispatch(hl.dsp.window.move({ "'
-assert old in s, "Mutationsziel nicht gefunden -- Model.js hat sich geaendert"
-s = s.replace(old, new, 1)
-s = s.replace(' + field + " = " + luaBytes(placement.value) + ", window = w, follow = false })) end end";',
-              ' + field + " = " + luaBytes(placement.value) + ", window = hl.get_window(" + luaBytes(address) + "), follow = false }))";', 1)
-io.open(p, "w", encoding="utf-8").write(s)
+# Den Rumpf von windowMoveExpression durch die unsichere Direktform ersetzen.
+m = re.search(r'(function windowMoveExpression\(address, placement\) \{)(.*?)(\n\})', s, re.S)
+assert m, "windowMoveExpression nicht gefunden"
+unsafe = ('\n    var field = (placement.kind === "workspace") ? "workspace" : "monitor";\n'
+          '    return "hl.dispatch(hl.dsp.window.move({ " + field + " = "\n'
+          '         + luaBytes(placement.value) + ", window = hl.get_window("\n'
+          '         + luaBytes(address) + "), follow = false }))";')
+io.open(p, "w", encoding="utf-8").write(s[:m.start(2)] + unsafe + s[m.end(2):])
 MUT
 ./test/run-qml-tests.sh; echo "D status=$?"
 git checkout Model.js
 ```
-Expected: A → `reconcile: a malformed address is refused` rot. B → `match: it returned in under 5 seconds` rot (PCRE backtrackt; falls die installierte `grep`-Fassung kein `-P` kennt, statt dessen den Match in ein kleines Node- oder QML-Schnipsel mit `RegExp` verlegen und dieses messen). C → `reconcile: a program without placement is not moved` rot. D → beide Wachen-Tests rot **und** `verbFor: a window move goes to eval` rot, weil die ungeschützte Form nicht mehr mit `do` beginnt.
+Expected: A → `reconcile: a malformed address is refused` rot. B → `match: it returned in under 5 seconds` rot (PCRE backtrackt; falls die installierte `grep`-Fassung kein `-P` kennt, statt dessen den Match in ein kleines Node- oder QML-Schnipsel mit `RegExp` verlegen und dieses messen). C → `reconcile: a program without placement is not moved` rot. D → beide Wachen-Tests rot. **Nicht** `verbFor`: das prüft auf das Präfix `hl.dsp.`, und weder die geschützte noch die ungeschützte Fensterumzugsform beginnt damit — beide gehen so oder so an `eval`. (Diese Vorhersage stand hier falsch und wurde am 02.09.2026 vom Umsetzer widerlegt.)
 
 - [ ] **Step 7: Commit**
 
