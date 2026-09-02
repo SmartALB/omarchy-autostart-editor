@@ -615,5 +615,39 @@ $hit -- reads '$operand', declared as: $(tr '\n' ';' <<<"$wrong")"
                        || bad "the exitStatus comparison reads a constant declared 0" "$norm_bad"
 fi
 
+# 8 -- the plugin lifecycle contract from the develop guide.
+for needed in "function open()" "function close()" "function toggle()" \
+              "function closeForPopoutSwitch()" \
+              "readonly property bool opened" \
+              "readonly property bool popoutSwitchClosing"; do
+  grep -qF "$needed" BarWidget.qml \
+    && ok "BarWidget declares $needed" \
+    || bad "BarWidget declares $needed" "not found"
+done
+
+# 9 -- the bar glyph is present as an escape and not as a literal PUA
+#      character. Checked on the FILE, because a literal glyph does not
+#      survive the trip through documents and tools, and an empty text is not
+#      a button without an icon -- it is no button at all.
+if grep -qE 'barGlyph:[[:space:]]*"\\u[0-9a-fA-F]{4}"' BarWidget.qml; then
+  ok "BarWidget: bar glyph is written as a \\u escape"
+else
+  bad "BarWidget: bar glyph is written as a \\u escape" \
+      "$(grep -n 'barGlyph' BarWidget.qml || echo 'no barGlyph at all')"
+fi
+# python3 rather than grep -P: with LC_ALL=C, PCRE rejects \x{} values above
+# 0xFF outright, so the check would end in an error instead of a result.
+if python3 - BarWidget.qml <<'PUA'
+import io, sys
+text = io.open(sys.argv[1], encoding="utf-8", errors="replace").read()
+sys.exit(1 if any(0xE000 <= ord(c) <= 0xF8FF for c in text) else 0)
+PUA
+then
+  ok "BarWidget: no literal private-use character in the file"
+else
+  bad "BarWidget: no literal private-use character in the file" \
+      "found a raw PUA codepoint -- write it as \\uXXXX"
+fi
+
 printf '\nqml structure: total=%d failed=%d\n' "$run" "$failed"
 (( failed == 0 ))
