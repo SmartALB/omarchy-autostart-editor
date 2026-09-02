@@ -34,14 +34,22 @@ Item {
 
     // The limit belongs on the producing side, so the bytes are never held in
     // the first place.
+    //
+    // Terminated by a newline, not by "; }": the autostart command field is a
+    // shell command line by design (see launchCommand in Model.js), and a
+    // command legitimately ending in "&", ";", "&&" or a trailing #comment
+    // makes "; }" after it a syntax error -- the group then never runs and
+    // nothing is collected, silently. A newline closes the list in every one
+    // of those cases, the same fix as launchCommand.
     function runnerOut(cmd) {
-        return root.runner("{ " + cmd + " ; } | head -c " + root.maxOutBytes)
+        return root.runner("{ " + cmd + "\n} | head -c " + root.maxOutBytes)
     }
 
     // Process substitution rather than a pipe: a pipe would replace the exit
-    // status of the command itself, and callers read it.
+    // status of the command itself, and callers read it. Newline-terminated
+    // for the same reason as runnerOut.
     function runnerErr(cmd) {
-        return root.runner("{ " + cmd + " ; } 2> >(head -c " + root.maxOutBytes + " >&2)")
+        return root.runner("{ " + cmd + "\n} 2> >(head -c " + root.maxOutBytes + " >&2)")
     }
 
     // Without a shell. Both hyprctl verbs take a Lua string; handing it over as

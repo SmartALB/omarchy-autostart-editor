@@ -271,6 +271,25 @@ QtObject {
                       return (c.match(/string\.char\(/g) || []).length >= 4;
                   })(), true);
 
+            // A grep over source cannot tell whether the SPECIFIC value was encoded --
+            // one luaBytes( call anywhere on the line satisfies it. This asks the only
+            // question that matters: does any configured value survive into the payload
+            // as readable text? Distinctive values are used so a hit cannot be
+            // coincidence.
+            check("chunks: no configured value appears literally in the payload",
+                  (function() {
+                      var m = Model.validate(cfg(
+                          [prog({ id: "p1", "class": "^(QQQZZZ)$",
+                                  placement: { kind: "monitor", value: "ZZTOPMON" } })],
+                          [{ workspace: "77", monitor: "YYWORKMON" }]));
+                      var all = Model.buildRuleChunks(m).join("\n");
+                      var leaked = [];
+                      ["QQQZZZ", "ZZTOPMON", "YYWORKMON"].forEach(function(v) {
+                          if (all.indexOf(v) !== -1) leaked.push(v);
+                      });
+                      return leaked.length === 0 ? "clean" : "leaked: " + leaked.join(",");
+                  })(), "clean");
+
             check("chunks: no chunk carries more than 20 rules",
                   (function() {
                       var many = [], i;
@@ -412,6 +431,25 @@ QtObject {
                                                          [{ id: "p1", address: "0xbeef" }]);
                       for (var i = 0; i < c.length; i++) if (c[i].indexOf('"') !== -1) return "chunk " + i;
                       return "clean";
+                  })(), "clean");
+
+            // Same shape as the buildRuleChunks version above, for the reconcile
+            // path: a distinctive monitor (workspace move) and a distinctive
+            // address (window move), neither of which may appear as readable
+            // text in the payload -- both must arrive as string.char(...).
+            check("reconcile: no configured value appears literally in the payload",
+                  (function() {
+                      var m = Model.validate(cfg(
+                          [prog({ id: "p1", placement: { kind: "monitor", value: "ZZTOPMON" } })],
+                          [{ workspace: "77", monitor: "YYWORKMON" }]));
+                      var all = Model.buildReconcileChunks(m,
+                          [{ workspace: "77", monitor: "XXCURRENTMON" }],
+                          [{ id: "p1", address: "0xdeadbeefcafe" }]).join("\n");
+                      var leaked = [];
+                      ["ZZTOPMON", "YYWORKMON", "deadbeefcafe"].forEach(function(v) {
+                          if (all.indexOf(v) !== -1) leaked.push(v);
+                      });
+                      return leaked.length === 0 ? "clean" : "leaked: " + leaked.join(",");
                   })(), "clean");
 
             // Wrapped in try/catch, not a bare call: a mutation that lets a
