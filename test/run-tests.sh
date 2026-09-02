@@ -664,10 +664,23 @@ test_windows_survives_a_failing_hyprctl
 test_windows_survives_valid_json_that_is_not_an_array
 
 test_generated_lua_compiles() {
-    local out status
-    out="$(./lua-syntax.sh 2>&1)"; status=$?
-    assert_eq "lua: every generated chunk compiles" "$status" "0"
-    assert_contains "lua: at least three chunks were checked" "$out" "lua chunks: total="
+    local out_default out_many status_default status_many
+    out_default="$(./lua-syntax.sh 2>&1)"; status_default=$?
+    out_many="$(./lua-syntax.sh many 2>&1)"; status_many=$?
+    assert_eq "lua: every chunk of the default config compiles" "$status_default" "0"
+    assert_eq "lua: every chunk of the 25-program config compiles" "$status_many" "0"
+    # Named for what they check, not for a number nobody verified: the
+    # previous version of this test was named "at least three chunks were
+    # checked" but asserted no count at all, only that the substring
+    # "lua chunks: total=" appeared -- a mismatch this project has hit
+    # before. The default config's five rule statements fit in one chunk, so
+    # it never exercised the chunk-boundary packing a real compiler is
+    # needed for; the 25-program config forces the 20-rule cap once,
+    # producing a second rule chunk with its own CHUNK_PRELUDE and "end".
+    assert_eq "lua: the default config compiles both of its chunks" \
+              "$(sed -n 's/^lua chunks: total=\([0-9]*\) .*/\1/p' <<<"$out_default")" "2"
+    assert_eq "lua: a 25-program config compiles all three of its chunks" \
+              "$(sed -n 's/^lua chunks: total=\([0-9]*\) .*/\1/p' <<<"$out_many")" "3"
 }
 
 test_generated_lua_compiles
