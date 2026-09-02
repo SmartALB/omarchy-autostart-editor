@@ -416,5 +416,23 @@ for file in $(qml_files); do
   fi
 done
 
+# 9 -- no bare `Process.<CapitalisedName>` enum reference anywhere in the
+#      qml tree. Round 3's own defect: `Process.NormalExit` reads like a
+#      compile-time constant but the installed Quickshell.Io type
+#      information (quickshell-io.qmltypes) declares ZERO Enum {} blocks on
+#      Process, and "NormalExit" appears in no file at all under
+#      /usr/lib/qt6/qml/ -- so the expression silently evaluates to
+#      `undefined`, every comparison against it behaves as if the branch
+#      were unconditionally taken, and nothing in test/harness.qml or
+#      test/run-tests.sh can see it: Quickshell.Io cannot be loaded outside
+#      the runtime, so this is exactly the class of defect this file's
+#      header says a structural check can catch that no behavioural test
+#      can. Comment-stripped, so a comment naming the old mistake (as this
+#      file's own history now does, and as Service.qml's own comment
+#      explaining the fix does) is not itself a hit.
+hits="$(grep_stripped_all 'Process\.[A-Z][A-Za-z0-9_]*' || true)"
+[[ -z "$hits" ]] && ok "no bare Process.<CapitalisedName> enum reference in any qml file" \
+                 || bad "no bare Process.<CapitalisedName> enum reference in any qml file" "$hits"
+
 printf '\nqml structure: total=%d failed=%d\n' "$run" "$failed"
 (( failed == 0 ))

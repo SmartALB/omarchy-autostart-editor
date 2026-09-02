@@ -90,16 +90,36 @@ Item {
 
     Component.onCompleted: root.load()
 
-    // Whether readProc is between being dispatched and its OWN onExited
-    // firing for that dispatch. load() must never reassign runCtx/command
-    // on a Process while this is true: a stale signal already queued for
-    // the CURRENT dispatch would then be delivered after the reassignment
-    // and read the NEW ctx, passing the ctx.gen check meant to catch it --
-    // reachable exactly here, because load() is the one place that used to
-    // stop and immediately re-dispatch the same Process in a single
-    // synchronous block. Set true only in dispatchRead(), set false only
-    // in readProc.onExited -- the actual terminal signal for a dispatch,
-    // not merely "we asked it to stop".
+    // THE INVARIANT: one Process never carries two runs. A Process must
+    // never have its runCtx/command reassigned while it may still emit one
+    // more signal for a dispatch already in flight -- a stale signal
+    // delivered after such a reassignment would read the NEW ctx and pass
+    // the ctx.gen check meant to catch it. Two Processes enforce this
+    // MECHANICALLY, with a busy flag plus a one-slot pending-request queue
+    // that only the Process's own terminal signal (onExited, never merely
+    // "we asked it to stop") is allowed to consume:
+    //   - readProc: readBusy / pendingLoad, below.
+    //   - evalProc: evalBusy / pendingChunkRun, near nextChunk() -- made
+    //     mechanical in round 3 because it carries pendingIndex across a
+    //     multi-step sequence, so a stale callback reassigned onto a NEWER
+    //     ctx would not just be rejected, it would silently advance the
+    //     WRONG ctx's pendingIndex: the shape in which resetChunk() (always
+    //     chunk 0) lands after the rule chunks instead of before them,
+    //     every rule silently switched off, no error anywhere.
+    // markerProc and launchProc REST ON A TIMING ARGUMENT instead, recorded
+    // here as an accepted assumption rather than left implied: each is only
+    // ever reassigned after a full, real subprocess round trip through a
+    // freshly (and by-then mechanically) dispatched readProc/evalProc
+    // cycle, and any signal already queued for either at the moment it was
+    // stopped is, in every realistic event-loop implementation, delivered
+    // on the very next tick -- long before that round trip completes -- so
+    // it is rejected by its own (still unchanged) ctx.gen check before
+    // either Process is reassigned. This holds because the round trip
+    // outlasts a queued signal's delivery, not because anything prevents
+    // the reassignment; both carry only a single dispatch per run (no
+    // pendingIndex-like state to corrupt), and the ctx.gen check plus
+    // sessionStartOwed bound the outcome either way even if the timing
+    // assumption were ever wrong.
     property bool readBusy: false
     // A load() that arrived while readBusy is true. readProc.onExited
     // consumes this once the in-flight dispatch has genuinely finished, so
@@ -124,13 +144,15 @@ Item {
             return
         }
 
-        // evalProc/markerProc/launchProc are never re-dispatched from here
-        // in the same synchronous block -- only readProc is, immediately
-        // below -- so stopping them here and letting the FRESH readProc
-        // cycle (a real subprocess round trip) reach them later leaves any
+        // markerProc/launchProc are never re-dispatched from here in the
+        // same synchronous block -- only readProc is, immediately below --
+        // so stopping them here and letting the FRESH readProc cycle (a
+        // real subprocess round trip) reach them later leaves any
         // already-queued signal from their previous dispatch ample time to
         // arrive and be rejected by its own (still unchanged) ctx.gen
-        // check before either Process is touched again.
+        // check before either Process is touched again. See the invariant
+        // comment above for why this is accepted for these two and made
+        // mechanical instead for evalProc.
         evalProc.running = false
         markerProc.running = false
         launchProc.running = false
@@ -218,6 +240,17 @@ Item {
         root.nextChunk(ctx)
     }
 
+    // Same shape as readBusy/pendingLoad above, and for evalProc
+    // specifically (see the invariant comment above load()): true from
+    // dispatchChunk() until evalProc's OWN onExited -- its actual terminal
+    // signal -- fires for that dispatch.
+    property bool evalBusy: false
+    // A ctx whose nextChunk() arrived while evalBusy was true. evalProc's
+    // onExited hands off to it once the in-flight dispatch has genuinely
+    // finished, via nextChunk() again (which re-validates ctx.gen and the
+    // chunk bounds rather than assuming they still hold).
+    property var pendingChunkRun: null
+
     function nextChunk(ctx) {
         if (ctx.gen !== root.generation) return
         if (ctx.pendingIndex >= ctx.pendingChunks.length) {
@@ -233,6 +266,19 @@ Item {
             else watchdog.stop()
             return
         }
+        if (root.evalBusy) {
+            // Do not touch evalProc.runCtx/command/running here -- see the
+            // invariant comment above load(). Queue and let evalProc's own
+            // onExited hand off once it is genuinely free.
+            root.pendingChunkRun = ctx
+            evalProc.running = false
+            return
+        }
+        root.dispatchChunk(ctx)
+    }
+
+    function dispatchChunk(ctx) {
+        root.evalBusy = true
         var payload = ctx.pendingChunks[ctx.pendingIndex]
         evalProc.runCtx = ctx
         // The verb is Model.verbFor's call, not an inline comparison here --
@@ -271,13 +317,24 @@ Item {
             }
         }
         onExited: function(exitCode, exitStatus) {
+            // The terminal signal for THIS dispatch, regardless of whether
+            // it was stale -- evalBusy comes down unconditionally, same
+            // reason as readBusy in readProc.onExited: a queued
+            // pendingChunkRun must never be stuck waiting on a dispatch
+            // that has, in fact, already finished.
             var ctx = evalProc.runCtx
-            if (!ctx || ctx.gen !== root.generation) return
-            if (exitCode !== 0 && root.lastError === "") {
+            root.evalBusy = false
+            if (ctx && ctx.gen === root.generation && exitCode !== 0 && root.lastError === "") {
                 root.lastError = "hyprctl eval exited " + exitCode
                 ctx.pendingIndex = ctx.pendingChunks.length
             }
-            root.nextChunk(ctx)
+            if (root.pendingChunkRun) {
+                var next = root.pendingChunkRun
+                root.pendingChunkRun = null
+                root.nextChunk(next)
+                return
+            }
+            if (ctx && ctx.gen === root.generation) root.nextChunk(ctx)
         }
     }
 
@@ -286,6 +343,27 @@ Item {
         markerProc.command = run.tool("omarchy-autostart-marker", "claim")
         markerProc.running = true
     }
+
+    // QProcess::ExitStatus's NORMAL-exit value. Not `Process.NormalExit` --
+    // checked against the installed Quickshell.Io type information
+    // (/usr/lib/qt6/qml/Quickshell/Io/quickshell-io.qmltypes): the `exited`
+    // signal declares `exitStatus` typed `QProcess::ExitStatus`, but the
+    // `Process` Component in that file declares ZERO `Enum {}` blocks (the
+    // file's only `Enum {}` belongs to the unrelated `FileViewError` type),
+    // and the string "NormalExit" appears in no file at all under
+    // /usr/lib/qt6/qml/. So `Process.NormalExit` is `undefined`, and
+    // `exitStatus !== Process.NormalExit` was true for EVERY real value --
+    // checked both: `0 !== undefined` and `1 !== undefined` both hold. The
+    // guard below always took its early return with that spelling:
+    // sessionStartOwed stayed true forever, launchAll() was never called,
+    // and the autostart never ran, in any session, silently. It failed in
+    // the safe direction -- no doubled session -- but the plugin's entire
+    // purpose was dead and nothing in the test suite could see it, because
+    // nothing here can load Quickshell.Io to notice `undefined`.
+    // `QProcess::ExitStatus::NormalExit` is fixed at 0 by Qt; that is what
+    // this compares against, named once here rather than as a bare literal
+    // at the comparison site.
+    readonly property int normalExit: 0
 
     Process {
         id: markerProc
@@ -300,15 +378,10 @@ Item {
             // killed, which would read as a GRANTED claim it never actually
             // made. The marker fails closed by design
             // (bin/omarchy-autostart-marker); this reader must not undo
-            // that by trusting a code that is not meaningful here.
-            //
-            // NormalExit's exact QML spelling in the installed Quickshell.Io
-            // API is UNVERIFIED from here (nothing in this tree can load
-            // Quickshell.Io) -- 0 is QProcess::NormalExit's numeric value,
-            // which Quickshell.Io's Process is modelled on; confirm the
-            // named form resolves (or fall back to the literal 0) on the
-            // manual checklist.
-            if (exitStatus !== Process.NormalExit) {
+            // that by trusting a code that is not meaningful here. See
+            // root.normalExit above for why this is a numeric constant and
+            // not a named Process enum member.
+            if (exitStatus !== root.normalExit) {
                 // Not a real attempt: the claim's actual outcome is
                 // unknown, so sessionStartOwed stays true and the next run
                 // retries it instead of silently skipping session start.
