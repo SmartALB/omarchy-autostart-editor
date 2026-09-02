@@ -159,8 +159,22 @@ Schritte 1–3, danach der Abgleich:
 - **Workspaces:** `hl.get_workspaces()` liefert den Ist-Zustand; liegt ein
   bereits existierender Workspace auf dem falschen Monitor →
   `hl.dsp.workspace.move`. (Workspace-Regeln greifen nur beim *Anlegen*.)
-- **Fenster:** `hl.get_windows{ class = … }` liefert die offenen Treffer,
-  jeder wird auf sein Ziel geschoben.
+- **Fenster:** die offenen Treffer werden über `grep -E` ermittelt (§5a) und
+  jeder über seine **Adresse** verschoben. Der Umzug **muss** die Adresse in
+  Lua erst auflösen und nur bei Erfolg verschieben:
+
+      do local w = hl.get_window(<bytes>)
+         if w then hl.dispatch(hl.dsp.window.move({ … window = w … })) end end
+
+  Der Grund ist gemessen, nicht vermutet: ein `window.move`, dessen Selektor
+  sich **nicht** auflöst, macht **kein** No-op, sondern trifft ein anderes
+  Fenster. Am 02.09.2026 hat das während der Probe zu Task 1 zwei fremde
+  Fenster des Benutzers auf einen Ausweich-Workspace verschoben. Das Plugin
+  ist demselben Fall ausgesetzt, weil zwischen dem Ermitteln der Treffer und
+  dem Verschieben ein Fenster geschlossen werden kann. Ebenfalls gemessen:
+  das `window`-Feld trägt nur als **Objekt** (`hl.get_window(...)`), und der
+  Umzug muss über `eval` laufen — die Form `dispatch` + Objekt griff nur in 2
+  von 7 Versuchen und war diejenige, die das fremde Fenster verschob.
 - Der Abgleich startet **nichts**. Ein separater Knopf `[Launch missing]`
   startet die `enabled`-Programme, die noch nicht laufen. Speichern soll
   keine Fenster aufmachen.

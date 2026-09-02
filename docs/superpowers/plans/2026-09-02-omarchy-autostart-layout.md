@@ -2393,12 +2393,22 @@ In `test/harness.qml`:
                   Model.validate(cfg([], [{ workspace: "2", monitor: "DP-3" }])),
                   [{ workspace: "2", monitor: "DP-4" }], [])[0]), "dispatch");
 
-        // And the window move really does carry the object form. A plain
-        // address string was measured not to work.
-        check("reconcile: the window field is an object, not an address string",
-              /window = hl\.get_window\(string\.char\(/.test(
+        // The window move resolves the address first and moves only if the
+        // window still exists. Without this guard a vanished window makes the
+        // move land on an unrelated one -- measured, not theorised: during
+        // task 1 an unguarded move relocated two of the user's own windows.
+        check("reconcile: the window move resolves the address into an object first",
+              /local w = hl\.get_window\(string\.char\(/.test(
                   Model.buildReconcileChunks(Model.validate(cfg([prog({ id: "p1" })], [])),
                                              [], [{ id: "p1", address: "0xbeef" }])[0]), true);
+        check("reconcile: the window move is guarded by if w then",
+              Model.buildReconcileChunks(Model.validate(cfg([prog({ id: "p1" })], [])),
+                                         [], [{ id: "p1", address: "0xbeef" }])[0]
+                  .indexOf("if w then") !== -1, true);
+        check("reconcile: the window move never uses the bare dispatch route",
+              Model.verbFor(Model.buildReconcileChunks(
+                  Model.validate(cfg([prog({ id: "p1" })], [])),
+                  [], [{ id: "p1", address: "0xbeef" }])[0]), "eval");
 
         checkThrows("reconcile: a malformed address is refused",
                     function() {
@@ -2506,18 +2516,28 @@ var ADDRESS_RE = /^0x[0-9a-f]{1,16}$/;
 
 // Both expressions are the forms task 1 measured against a real window.
 //
-// They are NOT symmetric, and that is a measured fact rather than a style
-// choice: moving a window needed `hyprctl eval` wrapping the dispatcher in
-// hl.dispatch(...), while moving a workspace needed `hyprctl dispatch` with
-// the bare dispatcher. verbFor() below is the single place that knows which
-// is which.
+// THE MOST IMPORTANT LINE IN THIS FILE is the `if w then` below, and it is
+// there because of an incident, not a hunch.
 //
-// The window field must be an OBJECT -- hl.get_window(address). A plain
-// address string was measured NOT to work.
+// A window.move whose `window` selector does not resolve does NOT no-op. It
+// acts on some other window. During task 1 that silently moved two of the
+// user's real, unrelated windows to a scratch workspace. This code is exposed
+// to exactly that: addresses come from a match taken moments earlier, and a
+// window can close in between -- at which point an unguarded move would take
+// an innocent window with it. Resolving first and moving only on success
+// makes the vanished-window case a no-op by construction.
+//
+// Two further measured facts, both load-bearing:
+//   * the `window` field must be an OBJECT (hl.get_window(...)). A plain
+//     address string was measured not to work -- 0 of 7 trials.
+//   * the object form must go through `eval`, never through bare `dispatch`.
+//     dispatch + object worked in only 2 of 7 trials and was the form caught
+//     moving the wrong window. Never use it.
 function windowMoveExpression(address, placement) {
     var field = (placement.kind === "workspace") ? "workspace" : "monitor";
-    return "hl.dispatch(hl.dsp.window.move({ " + field + " = " + luaBytes(placement.value)
-         + ", window = hl.get_window(" + luaBytes(address) + "), follow = false }))";
+    return "do local w = hl.get_window(" + luaBytes(address) + ") "
+         + "if w then hl.dispatch(hl.dsp.window.move({ "
+         + field + " = " + luaBytes(placement.value) + ", window = w, follow = false })) end end";
 }
 
 function workspaceMoveExpression(move) {
@@ -2525,11 +2545,18 @@ function workspaceMoveExpression(move) {
          + ", monitor = " + luaBytes(move.monitor) + " })";
 }
 
-// Which hyprctl verb a payload needs. Three shapes exist and each was
-// measured: a rule block (starts with `do`) goes to eval; a window move
-// (wrapped in hl.dispatch) goes to eval; a bare dispatcher expression goes to
-// dispatch. Keeping this in one tested function is why Panel.qml does not
-// carry the rule as an inline string comparison.
+// Which hyprctl verb a payload needs.
+//
+// Two shapes exist. A block -- a rule block or a guarded window move, both
+// starting with `do` -- goes to eval. A bare dispatcher expression goes to
+// dispatch.
+//
+// To be precise about what was measured, since an earlier version of this
+// comment overstated it: for the WORKSPACE move both verbs work (7 of 7
+// each), so dispatch here is a choice, not a necessity. For the WINDOW move
+// the choice is forced: only the eval route is safe (see
+// windowMoveExpression). Keeping the decision in one tested function is why
+// Panel.qml does not carry it as an inline string comparison.
 function verbFor(payload) {
     return String(payload).indexOf("hl.dsp.") === 0 ? "dispatch" : "eval";
 }
@@ -2595,8 +2622,23 @@ git checkout bin/omarchy-autostart-windows
 sed -i 's|^        if (!placement \|\| placement.kind === "none") continue;|        if (false) continue;|' Model.js
 ./test/run-qml-tests.sh; echo "C status=$?"
 git checkout Model.js
+
+# Probe D -- die Auflösungswache entfernen. Die wichtigste Probe dieser Aufgabe.
+python3 - <<'MUT'
+import io
+p = "Model.js"; s = io.open(p, encoding="utf-8").read()
+old = '"do local w = hl.get_window(" + luaBytes(address) + ") "\n         + "if w then hl.dispatch(hl.dsp.window.move({ "'
+new = '"hl.dispatch(hl.dsp.window.move({ "'
+assert old in s, "Mutationsziel nicht gefunden -- Model.js hat sich geaendert"
+s = s.replace(old, new, 1)
+s = s.replace(' + field + " = " + luaBytes(placement.value) + ", window = w, follow = false })) end end";',
+              ' + field + " = " + luaBytes(placement.value) + ", window = hl.get_window(" + luaBytes(address) + "), follow = false }))";', 1)
+io.open(p, "w", encoding="utf-8").write(s)
+MUT
+./test/run-qml-tests.sh; echo "D status=$?"
+git checkout Model.js
 ```
-Expected: A → `reconcile: a malformed address is refused` rot. B → `match: it returned in under 5 seconds` rot (PCRE backtrackt; falls die installierte `grep`-Fassung kein `-P` kennt, statt dessen den Match in ein kleines Node- oder QML-Schnipsel mit `RegExp` verlegen und dieses messen). C → `reconcile: a program without placement is not moved` rot.
+Expected: A → `reconcile: a malformed address is refused` rot. B → `match: it returned in under 5 seconds` rot (PCRE backtrackt; falls die installierte `grep`-Fassung kein `-P` kennt, statt dessen den Match in ein kleines Node- oder QML-Schnipsel mit `RegExp` verlegen und dieses messen). C → `reconcile: a program without placement is not moved` rot. D → beide Wachen-Tests rot **und** `verbFor: a window move goes to eval` rot, weil die ungeschützte Form nicht mehr mit `do` beginnt.
 
 - [ ] **Step 7: Commit**
 
