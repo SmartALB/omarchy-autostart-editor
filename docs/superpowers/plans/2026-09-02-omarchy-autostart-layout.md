@@ -1817,15 +1817,6 @@ function placementProblem(placement) {
     if (placement.kind === "none") {
         return placement.value === undefined ? null : "placement-invalid";
     }
-    // Note for anyone tempted to add a check here that requires BOTH
-    // placement.monitor and placement.workspace to be present: this brief had
-    // one, and it was dead code. A placement is {kind, value}; nothing ever
-    // sets a .workspace field on it. The invariant is carried entirely by the
-    // two branch checks below -- with kind "workspace" a stray .monitor is
-    // rejected, with kind "monitor" a stray .workspace is. Task 8's
-    // implementer established that by removing the check and showing the
-    // suite stayed green, which is the only way to prove a line dead rather
-    // than argue it.
     if (placement.kind === "workspace") {
         if (placement.monitor !== undefined) return "placement-invalid";
         return WORKSPACE_RE.test(placement.value) ? null : "placement-invalid";
@@ -1856,9 +1847,20 @@ function placementKey(placement) {
 
 function validate(config) {
     var out = { programs: [], workspaces: [], rejected: [], blocked: [] };
-    var programs   = (config && config.programs)   || [];
-    var workspaces = (config && config.workspaces) || [];
     var i, seenIds = Object.create(null), seenWs = Object.create(null);
+
+    // A string has .length and bracket indexing, so a hand-edited
+    // "programs": "cursor" would otherwise be walked character by character
+    // and produce one meaningless rejection per letter. A present-but-wrong
+    // value is named; an absent key is not an error at all.
+    if (config && config.programs !== undefined && !Array.isArray(config.programs)) {
+        out.rejected.push({ kind: "program", label: "programs", reason: "not-a-list" });
+    }
+    if (config && config.workspaces !== undefined && !Array.isArray(config.workspaces)) {
+        out.rejected.push({ kind: "workspace", label: "workspaces", reason: "not-a-list" });
+    }
+    var programs   = (config && Array.isArray(config.programs))   ? config.programs   : [];
+    var workspaces = (config && Array.isArray(config.workspaces)) ? config.workspaces : [];
 
     for (i = 0; i < programs.length; i++) {
         var p = programs[i];
@@ -1904,13 +1906,13 @@ function validate(config) {
     // Two programs matching the same class but wanting different places is a
     // contradiction this code can see, so saving is blocked rather than one of
     // them silently winning inside the compositor.
-    // A plain {} is not safe as a map for strings from the configuration:
-    // "__proto__" reads back as Object.prototype rather than undefined, so the
-    // guard below would skip initialising the array and .push would not exist
-    // -- validate() would THROW, inside the very function that is supposed to
-    // turn bad input into a named rejection. The allowlist deliberately
-    // permits "_" because real classes need it
-    // (nimbus-chat.example.org__-Default), so the map has to tolerate it.
+    //
+    // A plain {} is not safe as a map for strings that come from the
+    // configuration: "__proto__" reads back as Object.prototype rather than
+    // undefined, so the guard below would skip initialising the array and
+    // .push would not exist. The class allowlist deliberately permits "_" --
+    // real classes need it (nimbus-chat.example.org__-Default) -- so the map
+    // has to tolerate it rather than the allowlist forbid it.
     var byClass = Object.create(null);
     for (i = 0; i < out.programs.length; i++) {
         var prog = out.programs[i];
