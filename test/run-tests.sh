@@ -823,4 +823,13 @@ test_generated_lua_compiles() {
 
 test_generated_lua_compiles
 
+test_qml_structure() {
+    local out status
+    out="$(./qml-structure.sh 2>&1)"; status=$?
+    assert_eq "qml: structural checks pass" "$status" "0"
+    assert_contains "qml: the checks actually ran" "$out" "qml structure: total="
+}
+
+test_qml_structure
+
 summary

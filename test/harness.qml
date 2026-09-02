@@ -481,6 +481,15 @@ QtObject {
             check("missingIds: a disabled program is never missing",
                   Model.missingIds(Model.validate(cfg([prog({ id: "p1", enabled: false })], [])), []).length, 0);
 
+            // --- shellQuote ----------------------------------------------------
+            check("shellQuote: plain path",      Model.shellQuote("/a/b"), "'/a/b'");
+            check("shellQuote: a space",         Model.shellQuote("a b"), "'a b'");
+            check("shellQuote: a single quote",  Model.shellQuote("a'b"), "'a'\\''b'");
+            check("shellQuote: a semicolon is inert inside quotes",
+                  Model.shellQuote("a; rm -rf /"), "'a; rm -rf /'");
+            check("shellQuote: a dollar sign is inert inside quotes",
+                  Model.shellQuote("$HOME"), "'$HOME'");
+
             console.warn("total=" + total + " failed=" + failed);
             Qt.exit(failed === 0 ? 0 : 1);
         } catch (e) {

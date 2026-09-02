@@ -487,3 +487,9 @@ function missingIds(model, matches) {
     }
     return out;
 }
+
+// Single-quote for bash -c. Inside single quotes a shell metacharacter is
+// inert; the only thing to handle is the quote itself.
+function shellQuote(s) {
+    return "'" + String(s).replace(/'/g, "'\\''") + "'";
+}
