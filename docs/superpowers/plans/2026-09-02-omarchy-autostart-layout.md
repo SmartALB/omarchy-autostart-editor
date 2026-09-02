@@ -2518,9 +2518,16 @@ In `test/harness.qml` einfügen:
 
         // --- launchCommand -------------------------------------------------
         check("launchCommand: goes through uwsm-app",
-              Model.launchCommand("cursor").indexOf("uwsm-app -- cursor") === 0, true);
+              Model.launchCommand("cursor").indexOf("uwsm-app -- cursor") !== -1, true);
         check("launchCommand: detaches every standard stream",
-              Model.launchCommand("cursor"), "uwsm-app -- cursor </dev/null >/dev/null 2>&1");
+              Model.launchCommand("cursor"),
+              "{ uwsm-app -- cursor ; } </dev/null >/dev/null 2>&1");
+        // A string comparison on the simple case cannot see this class of bug:
+        // the redirection binds to the last command of a chain, so the group
+        // has to close after the WHOLE command.
+        check("launchCommand: the redirection covers a compound command, not just its last part",
+              Model.launchCommand("sleep 2 && myapp")
+                  .indexOf("{ uwsm-app -- sleep 2 && myapp ; }") === 0, true);
 
         // --- workspaceMoves ------------------------------------------------
         check("workspaceMoves: a workspace on the wrong monitor moves",
@@ -2594,7 +2601,17 @@ function stripFieldCodes(exec) {
 // ends Quickshell tears those pipes down and takes the application with it.
 // From a terminal the same command works, because nobody tears anything down.
 function launchCommand(command) {
-    return "uwsm-app -- " + command + " </dev/null >/dev/null 2>&1";
+    // The braces are load-bearing. The command field is a shell command line,
+    // so it may contain `&&`, `;` or a pipe -- and a redirection binds only to
+    // the LAST command of such a chain. Measured:
+    //   echo A && echo B </dev/null >/dev/null 2>&1   -> prints A
+    //   { echo A && echo B ; } </dev/null >/dev/null 2>&1 -> prints nothing
+    // Without the group, `sleep 2 && myapp` leaves `sleep 2` holding
+    // Quickshell's stdout and stderr, and Quickshell tears those down when the
+    // chain ends, taking the application with it -- exactly the trap these
+    // redirections exist to prevent. Grouping also makes the entries safe to
+    // join with `&` when several are launched at once.
+    return "{ uwsm-app -- " + command + " ; } </dev/null >/dev/null 2>&1";
 }
 
 // Workspace rules only take effect when a workspace is CREATED, so a workspace
