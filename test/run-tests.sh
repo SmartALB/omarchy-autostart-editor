@@ -724,9 +724,40 @@ test_match_is_bounded_against_a_backtracking_regex() {
     teardown_sandbox
 }
 
+# GREP is a named seam, exactly like HYPRCTL -- a bare "grep" call would
+# resolve through PATH, and on the machine this was written on that PATH
+# resolves to a shell function wrapping a different regex engine than
+# /usr/bin/grep. This test exercises the seam itself: a stand-in "grep" on
+# $GREP records that it, not some PATH-resolved grep, is what ran, then
+# delegates to the real /usr/bin/grep so the match still has to come out
+# right.
+test_windows_match_file_uses_the_grep_seam() {
+    setup_sandbox; fake_hyprctl_json
+    cat > "$FAKE_CLIENTS" <<'JSON'
+[{"address":"0x1","class":"cursor","title":"a","workspace":{"id":6},"monitor":1}]
+JSON
+    printf 'p1\t^(cursor)$\n' > "$SANDBOX/match"
+    export GREP_MARKER="$SANDBOX/grep-was-here"
+    cat > "$SANDBOX/bin/grep" <<'FAKE'
+#!/usr/bin/env bash
+: > "$GREP_MARKER"
+exec /usr/bin/grep "$@"
+FAKE
+    chmod +x "$SANDBOX/bin/grep"
+    export GREP="$SANDBOX/bin/grep"
+    local out; out="$("$WINDOWS_BIN" --match-file "$SANDBOX/match")"
+    assert_eq "match: the GREP seam is honoured, not a bare PATH grep" \
+              "$([[ -f "$GREP_MARKER" ]] && echo used || echo "NOT USED")" "used"
+    assert_eq "match: and the stand-in still finds the match" \
+              "$(jq -r '.[0].address' <<<"$out")" "0x1"
+    unset GREP GREP_MARKER
+    teardown_sandbox
+}
+
 test_windows_workspaces_mode
 test_windows_match_file
 test_match_is_bounded_against_a_backtracking_regex
+test_windows_match_file_uses_the_grep_seam
 
 test_generated_lua_compiles() {
     local out_default out_many status_default status_many

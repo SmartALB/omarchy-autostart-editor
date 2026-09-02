@@ -11,6 +11,15 @@
 set -uo pipefail
 
 HYPRCTL="${HYPRCTL:-hyprctl}"
+
+# Absolute, and a named seam like HYPRCTL -- not a PATH lookup. The linear
+# time guarantee that lets this script evaluate an untrusted regex belongs
+# to a POSIX ERE automaton, and "grep" does not always mean that: on the
+# machine this was written on, `grep` is a shell function wrapping ugrep
+# while /usr/bin/grep is GNU grep. A non-interactive shell resolves to the
+# latter, but the guarantee should not depend on that.
+GREP="${GREP:-/usr/bin/grep}"
+
 MAX_WINDOWS=500
 MAX_WORKSPACES=99
 MAX_PROGRAMS=200
@@ -91,7 +100,7 @@ cmd_match_file() {
             # back to the window without a second pass over the JSON.
             while IFS= read -r hit; do
                 printf '%s\t%s\n' "$id" "$hit"
-            done < <(printf '%s\n' "$classes" | grep -n -E -- "$regex" 2>/dev/null | cut -d: -f1)
+            done < <(printf '%s\n' "$classes" | "$GREP" -n -E -- "$regex" 2>/dev/null | cut -d: -f1)
         done < "$file"
     } | jq -R -s --argjson w "$windows" '
         split("\n") | map(select(length > 0) | split("\t"))

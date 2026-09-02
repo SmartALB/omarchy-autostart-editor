@@ -414,9 +414,23 @@ QtObject {
                       return "clean";
                   })(), "clean");
 
+            // Wrapped in try/catch, not a bare call: a mutation that lets a
+            // "none"-placement program reach windowMoveExpression makes
+            // luaBytes(placement.value) throw on undefined, and check()
+            // evaluates its "got" argument before it is entered -- an
+            // unguarded call here would abort the whole harness (status 3)
+            // instead of producing this assertion's own red line. Same fix
+            // as task 8.
             check("reconcile: a program without placement is not moved",
-                  Model.buildReconcileChunks(Model.validate(cfg([prog({ placement: { kind: "none" } })], [])),
-                                             [], [{ id: "p1", address: "0xbeef" }]).length, 0);
+                  (function() {
+                      try {
+                          return Model.buildReconcileChunks(
+                              Model.validate(cfg([prog({ placement: { kind: "none" } })], [])),
+                              [], [{ id: "p1", address: "0xbeef" }]).length;
+                      } catch (e) {
+                          return "threw: " + ((e && e.message) || e);
+                      }
+                  })(), 0);
 
             // --- verbFor: the three measured shapes ----------------------------
             //
@@ -426,7 +440,7 @@ QtObject {
             // repeating the rule.
             check("verbFor: a rule block goes to eval",
                   Model.verbFor(Model.buildRuleChunks(Model.validate(cfg([], []))) [0]), "eval");
-            check("verbFor: a window move goes to eval (hl.dispatch wrapper)",
+            check("verbFor: a window move goes to eval (it is a block, not a bare dispatcher expression)",
                   Model.verbFor(Model.buildReconcileChunks(
                       Model.validate(cfg([prog({ id: "p1" })], [])),
                       [], [{ id: "p1", address: "0xbeef" }])[0]), "eval");
