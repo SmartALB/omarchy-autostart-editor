@@ -316,6 +316,59 @@ function firstFreeWorkspace(rows) {
     return String(MAX_WORKSPACES);
 }
 
+// Every code bin/omarchy-autostart-config can answer with. Declared once so
+// two halves can bind the class between them without either being a
+// hand-copied claim: test/harness.qml requires every code IN HERE to have
+// wording, and test/run-tests.sh requires THIS LIST to be exactly the codes
+// grepped out of the script. Neither half alone would notice a code added to
+// the script, and neither would notice wording quietly dropped.
+function envelopeCodes() {
+    return ["bad-schema", "insecure-permissions", "internal", "not-a-file",
+            "not-json", "stale", "too-large", "write-failed"];
+}
+
+// Plain wording for the envelope the bin/ helpers answer with. Every code
+// bin/omarchy-autostart-config can emit has a sentence here; a shell
+// assertion in test/run-tests.sh derives the code list FROM THAT SCRIPT and
+// fails if one turns up without wording, so a code added there cannot reach
+// the user as a bare identifier.
+//
+// This lived in Panel.qml one round after reasonText was moved out of it, for
+// exactly the reason reasonText was moved: wording in QML is wording no suite
+// in this project can execute.
+//
+// THE EMPTY CASE IS EXPLICIT, and it is not hypothetical. Empty stdout is what
+// a missing script, a timeout kill, and any non-zero exit taken outside the
+// script's own two reporters all look like from here -- the QML version
+// printed the literal text "undefined: " for all of them.
+function envelopeText(code, detail) {
+    var extra = (detail === undefined || detail === null || String(detail) === "")
+                ? "" : " " + String(detail);
+    if (code === undefined || code === null || String(code) === "")
+        return "The configuration helper gave no answer at all." + extra;
+    if (code === "insecure-permissions")
+        return "The configuration file can be written by someone else, so it was not used."
+             + " Make it writable only by you." + extra;
+    if (code === "too-large")
+        return "The configuration file is too large to read." + extra;
+    if (code === "not-json")
+        return "The configuration file is not valid JSON, so nothing was changed." + extra;
+    if (code === "bad-schema")
+        return "The configuration file has a version this plugin does not understand." + extra;
+    if (code === "stale")
+        return "The file changed on disk since the panel read it."
+             + " Close and reopen the panel, then apply again." + extra;
+    if (code === "not-a-file")
+        return "The configuration path is not a regular file; a symlink or a directory"
+             + " there is refused." + extra;
+    if (code === "write-failed")
+        return "The configuration could not be written, so nothing was saved." + extra;
+    if (code === "internal")
+        return "The configuration helper could not build its answer." + extra;
+    // Named rather than shown bare, the same rule as reasonText's fallback.
+    return "The configuration helper reported an unknown problem: " + String(code) + "." + extra;
+}
+
 // Plain wording for the reason codes validate() reports, so the omissions list
 // is readable by the person who has to fix the entry rather than by whoever
 // wrote the validator. Every code the functions above can produce has an entry

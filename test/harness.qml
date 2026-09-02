@@ -686,6 +686,46 @@ QtObject {
             check("reasonText: an unknown code is passed through, not guessed at",
                   Model.reasonText("something-new"), "something-new");
 
+            // --- envelopeText --------------------------------------------------
+            //
+            // The class claim is split across two files on purpose (see
+            // Model.envelopeCodes): this half proves every listed code has
+            // wording, and test/run-tests.sh proves the list is the script's.
+            // Same rule as reasonText: not the bare code back, and long enough
+            // to be a sentence rather than a decorated identifier.
+            check("envelopeText: every code the config helper can emit has plain wording",
+                  (function() {
+                      var codes = Model.envelopeCodes(), without = [];
+                      for (var i = 0; i < codes.length; i++) {
+                          var worded = Model.envelopeText(codes[i], "");
+                          if (worded === codes[i] || String(worded).length < 12) without.push(codes[i]);
+                      }
+                      return without.join(",");
+                  })(), "");
+            check("envelopeText: the list it checks is not empty",
+                  Model.envelopeCodes().length, 8);
+
+            // THE EMPTY ENVELOPE. Empty stdout is what a missing script, a
+            // timeout kill and a non-zero exit outside the script's own two
+            // reporters all look like from here; the QML version this replaced
+            // printed the literal text "undefined: ".
+            check("envelopeText: an absent code does not print undefined",
+                  Model.envelopeText(undefined, undefined).indexOf("undefined"), -1);
+            check("envelopeText: an empty code does not print undefined",
+                  Model.envelopeText("", "").indexOf("undefined"), -1);
+            check("envelopeText: an absent code says so in words",
+                  Model.envelopeText(undefined, undefined),
+                  "The configuration helper gave no answer at all.");
+            check("envelopeText: an unknown code is named, not shown bare",
+                  Model.envelopeText("brand-new", ""),
+                  "The configuration helper reported an unknown problem: brand-new.");
+            check("envelopeText: the detail is appended when there is one",
+                  Model.envelopeText("too-large", "300000 bytes"),
+                  "The configuration file is too large to read. 300000 bytes");
+            check("envelopeText: no trailing space when there is no detail",
+                  Model.envelopeText("too-large", ""),
+                  "The configuration file is too large to read.");
+
             // --- shellQuote ----------------------------------------------------
             check("shellQuote: plain path",      Model.shellQuote("/a/b"), "'/a/b'");
             check("shellQuote: a space",         Model.shellQuote("a b"), "'a b'");

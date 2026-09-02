@@ -42,14 +42,14 @@ BarWidget {
 
     readonly property string barGlyph: "\uf135"   // nf-fa-rocket
 
-    // countsKnown stays false until the lazily-loaded panel reports in
-    // (see the Loader below). The Loader is lazy on purpose -- this
-    // component is created and destroyed on every QML change, and building
-    // the whole panel just to read two numbers on every restart is a worse
-    // trade than an honest tooltip. Showing "0 programs, 0 placements"
-    // before that report would be a false statement about the user's
-    // configuration, not merely an unknown one, so the plain name is shown
-    // instead until the real counts are in.
+    // countsKnown stays false until the panel reports in. The Loader below is
+    // EAGER (active: true) since round 1 -- it has to be, because the anchor
+    // is injected from its onLoaded -- so this flag is no longer about lazy
+    // loading. What it is about is that the panel reads the configuration in
+    // open() and not at creation: until the first open there is nothing to
+    // report, and showing "0 programs, 0 placements" before that would be a
+    // false statement about the user's configuration rather than merely an
+    // unknown one. The plain name is shown instead.
     property bool countsKnown: false
     property int programCount: 0
     property int placementCount: 0

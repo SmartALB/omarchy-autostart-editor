@@ -76,7 +76,13 @@ grep_stripped_all() {
 #
 #      Both halves share one verdict: this is one check about one property,
 #      not two checks that each cover half a project.
-interp_names="bash sh timeout hyprctl head jq setsid uwsm-app"
+# EXTEND THIS WHENEVER A BINARY IS ADDED ANYWHERE IN THE PLUGIN. It is a
+# fixed list, task 13's round-4 implementer said so in as many words, and
+# nobody extended it: `mktemp` and `rm` arrived with task 15 and could have
+# been PATH-resolved through all five suites. Check 2b below is the standing
+# answer -- it needs no list at all -- but this one still names what must
+# never appear quoted-and-bare.
+interp_names="bash sh timeout hyprctl head jq setsid mktemp rm uwsm-app"
 
 # THE ONE EXEMPTION, named here so it is argued rather than invisible.
 # `uwsm-app` stays PATH-resolved on purpose, ruled in round 5:
@@ -92,7 +98,7 @@ interp_names="bash sh timeout hyprctl head jq setsid uwsm-app"
 # genuine offender still fails, because each name is scanned on its own.
 interp_exempt="uwsm-app"
 
-interp_pat="[\"'](bash|sh|timeout|hyprctl|head|jq|setsid)[\"']"
+interp_pat="[\"'](bash|sh|timeout|hyprctl|head|jq|setsid|mktemp|rm)[\"']"
 hits="$(grep_stripped_all "$interp_pat" || true)"
 model_clean="$(strip_comments Model.js)"
 for name in $interp_names; do
@@ -114,6 +120,42 @@ for expected in /usr/bin/timeout /usr/bin/bash /usr/bin/hyprctl /usr/bin/setsid;
     && ok "Runners.qml names $expected absolutely" \
     || bad "Runners.qml names $expected absolutely" "not found"
 done
+
+# 2b -- EVERY tool path Runners.qml declares is absolute, whatever it is
+#       called. This is the class-level answer to check 1's fixed list: a
+#       binary added in some future task is covered the moment it is declared,
+#       with nobody having to remember a list in a different file. Any
+#       `property string bin<Something>: "..."` whose value does not start with
+#       "/" is a hit; a value that is not a literal at all is also a hit,
+#       because a computed tool path is exactly what this rule exists to
+#       forbid.
+#
+#       THE ONE EXEMPTION, named here so it is argued rather than invisible,
+#       the same way check 1 names uwsm-app. `binDir` is not a tool, it is the
+#       plugin's own install directory, and it MUST be computed: the path
+#       depends on where the user installed the plugin, which is not knowable
+#       when this file is written. It is exempt BY NAME, so a future
+#       `binSomething` that is computed still fails.
+bin_exempt="binDir"
+bin_props="$(grep -nE '(^|[^A-Za-z0-9_])property[[:space:]]+string[[:space:]]+bin[A-Za-z0-9_]*[[:space:]]*:' \
+             <<<"$stripped_runners" || true)"
+if [[ -z "$bin_props" ]]; then
+  bad "Runners.qml: every declared bin* path is absolute" \
+      "no 'property string bin<Name>:' declarations found at all -- the call helpers cannot be naming their tools"
+else
+  relative=""
+  while IFS= read -r decl; do
+    [[ -z "$decl" ]] && continue
+    name="$(grep -oE 'bin[A-Za-z0-9_]*[[:space:]]*:' <<<"$decl" | head -1 | sed 's/[[:space:]]*:$//')"
+    case " $bin_exempt " in *" $name "*) continue ;; esac
+    grep -qE 'property[[:space:]]+string[[:space:]]+bin[A-Za-z0-9_]*[[:space:]]*:[[:space:]]*"/' <<<"$decl" \
+      || relative="$relative
+$decl"
+  done <<<"$bin_props"
+  relative="$(sed '/^$/d' <<<"$relative")"
+  [[ -z "$relative" ]] && ok "Runners.qml: every declared bin* path is absolute" \
+                       || bad "Runners.qml: every declared bin* path is absolute" "$relative"
+fi
 
 # 3 -- both collecting helpers carry a producer limit, in real code -- a
 #      comment claiming one is stripped before this check ever sees it.
@@ -928,13 +970,23 @@ else
       "first type after the imports is '${panel_root:-<none found>}' -- a bare Item has no controller, no opened and no popup lifecycle, so the panel would load and never open"
 fi
 
-# 14 -- what Panel.qml itself declares. The four lifecycle functions are NOT
-#       all here any more: `closeForPopoutSwitch` comes from the base type
+# 14 -- what Panel.qml itself declares, AND that the bodies do something.
+#       `closeForPopoutSwitch` is not in the list: it comes from the base type
 #       (which also clears the flag through Qt.callLater, better than the
 #       override this file used to carry), while open/close/toggle are
 #       overridden so opening can read the configuration first -- the shipped
 #       idiom, clock/Panel.qml does exactly this. `counted` is this plugin's
 #       own signal and BarWidget.qml connects to it.
+#
+#       DECLARED AND FORWARDING ARE TWO CLAIMS, checked separately. Commit
+#       36886b7 closed this exact gap for the bar widget (check 12) one commit
+#       before this file's Panel checks were written declares-only, so this is
+#       the instance-not-class pattern reaching the same suite twice. An empty
+#       `function close() { }` satisfies a declaration check perfectly, and the
+#       panel would then never close -- it would also never open, because the
+#       base type's `controller.show()` is the only route to the popup and an
+#       override that does not call it replaces the working inherited body
+#       with nothing.
 for needed in "function open()" "function close()" "function toggle()" \
               "signal counted("; do
   grep -qF "$needed" <<<"$stripped_panel" \
@@ -942,20 +994,68 @@ for needed in "function open()" "function close()" "function toggle()" \
     || bad "Panel declares $needed" "not found (comment-stripped)"
 done
 
-# 15 -- and what it must NOT declare. Redeclaring a property the base type
-#       already has is a COMPONENT CREATION ERROR: the panel fails to
-#       instantiate, the bar widget's Loader reports an error, and the plugin
-#       is simply absent. Nothing in this project can execute a file that
-#       imports Quickshell, so this is precisely the class of defect only a
-#       structural check can reach -- the same argument as check 9's.
+# open() and close() must reach the base type's controller -- that IS the
+# popup, and an override that skips it silently disables the panel. toggle()
+# reaches it through the other two, so it is allowed to name them instead
+# (the same sibling allowance check 12 makes for the widget's toggle).
+for fn in open close; do
+  body="$(function_body "$stripped_panel" "$fn")"
+  if [[ -z "$body" ]]; then
+    bad "Panel: $fn() drives the base type's controller" "no 'function $fn(...) { ... }' block found"
+  elif grep -qE '(^|[^A-Za-z0-9_])controller[[:space:]]*\.' <<<"$body"; then
+    ok "Panel: $fn() drives the base type's controller"
+  else
+    bad "Panel: $fn() drives the base type's controller" \
+        "the body never touches controller, so it replaces the working inherited body with nothing: $body"
+  fi
+done
+toggle_body="$(function_body "$stripped_panel" toggle)"
+if [[ -z "$toggle_body" ]]; then
+  bad "Panel: toggle() reaches open() and close()" "no 'function toggle(...) { ... }' block found"
+elif grep -qE '(^|[^A-Za-z0-9_])open[[:space:]]*\(' <<<"$toggle_body" \
+     && grep -qE '(^|[^A-Za-z0-9_])close[[:space:]]*\(' <<<"$toggle_body"; then
+  ok "Panel: toggle() reaches open() and close()"
+else
+  bad "Panel: toggle() reaches open() and close()" \
+      "the body does not call both: $toggle_body"
+fi
+
+# A signal nobody emits is a signal the bar widget waits on forever: its
+# tooltip would stay at the honest-but-permanent "Autostart Layout".
+if grep -qE '(^|[^A-Za-z0-9_.])(root\.)?counted[[:space:]]*\(' \
+     <<<"$(grep -v 'signal[[:space:]]\+counted' <<<"$stripped_panel")"; then
+  ok "Panel: counted is actually emitted, not only declared"
+else
+  bad "Panel: counted is actually emitted, not only declared" \
+      "no call to counted(...) anywhere outside its own signal declaration -- the bar widget's counts would never arrive"
+fi
+
+# 15 -- and what it must NOT declare.
 #
-#       This is also the trap the previous round walked into honestly: those
-#       two booleans were declared by hand here, because the brief asked for
-#       them, before the base type was known to provide them.
+#       THE MECHANISM, MEASURED, because the first version of this comment got
+#       it wrong and an overstated comment has already cost this project two
+#       defects. Redeclaring a property the base type provides is NOT an error:
+#       offscreen qml, a stub base declaring `readonly property bool opened:
+#       controller.open` and a derived component adding `property bool opened:
+#       true`, exits 0 with nothing on either stream. What it does is SHADOW,
+#       silently -- measured on that stub:
+#         inherited            opened=true  controller.open=true  tracks=true
+#         redeclared : true    opened=true  controller.open=false tracks=false
+#         redeclared, no init  opened=false controller.open=true  tracks=false
+#       So the cost is not an absent plugin, it is `opened` no longer tracking
+#       `panelController.open`: the bar reads a value the panel does not mean,
+#       Bar.findPanelWidget routes summon/hide by it, and nothing anywhere
+#       reports a problem. Smaller than the old claim, and still worth a check
+#       -- nothing in this project can execute a file that imports Quickshell,
+#       so this is the only place that divergence can be caught.
+#
+#       The no-initializer form is included deliberately: the third measured
+#       line above is the WORST of the three (the property reads false forever)
+#       and the pattern used to require a colon, so it saw nothing.
 inherited="opened popoutSwitchClosing popoutSwitching bar settings moduleName ipcTarget manageIpc controller"
 redeclared=""
 for member in $inherited; do
-  hit="$(grep -nE "(^|[^A-Za-z0-9_])property[[:space:]]+[A-Za-z_][A-Za-z0-9_<>]*[[:space:]]+${member}[[:space:]]*:" \
+  hit="$(grep -nE "(^|[^A-Za-z0-9_])property[[:space:]]+[A-Za-z_][A-Za-z0-9_<>]*[[:space:]]+${member}([^A-Za-z0-9_]|\$)" \
          <<<"$stripped_panel" || true)"
   [[ -n "$hit" ]] && redeclared="$redeclared
 $member: $hit"
@@ -964,18 +1064,26 @@ redeclared="$(sed '/^$/d' <<<"$redeclared")"
 [[ -z "$redeclared" ]] && ok "Panel redeclares none of the base type's members" \
                        || bad "Panel redeclares none of the base type's members" "$redeclared"
 
-# 16 -- the popup surface exists and is wired to the injected anchor.
+# 16 -- the popup surface exists, is wired to the injected anchor, AND has
+#       something to give keyboard focus to.
 #
-#       A KeyboardPanel is the visible window; without it the root Item paints
-#       wherever its host puts it, which for a bar widget's Loader means
-#       nowhere useful. And an anchorItem that is not the INJECTED one cannot
-#       position the card: KeyboardPanel reads its screen and its origin off
-#       that item, so a hardcoded or missing anchor puts the popup at the
-#       screen corner with no screen resolved. Scoped to the KeyboardPanel's
-#       own block so a decoy binding elsewhere in the file cannot satisfy it.
+#       Round 3 found this blind to two things it should have covered from the
+#       start. `focusTarget` is how KeyboardPanel gets an active-focus target
+#       inside the surface once it maps -- its own comment says layer-shell
+#       grants the SURFACE focus but Qt still needs an item, so without it no
+#       Keys handler ever fires and Escape does nothing. And the
+#       `PanelKeyCatcher` was never required to exist at all, though it is what
+#       owns Escape and Tab in this panel since the hand-rolled
+#       Keys.onEscapePressed was removed.
+#
+#       focusTarget is origin-qualified rather than merely present: it has to
+#       name an id this file actually declares a PanelKeyCatcher with, the same
+#       way check 5b insists a helper call be qualified by the declared Runners
+#       instance. Scoped to the KeyboardPanel's own block so a decoy elsewhere
+#       cannot satisfy it.
 keyboard_block="$(block_of "$stripped_panel" KeyboardPanel)"
 if [[ -z "$keyboard_block" ]]; then
-  bad "Panel: the KeyboardPanel surface is anchored to the injected anchorItem" \
+  bad "Panel: the KeyboardPanel surface is anchored, opened and focusable" \
       "no 'KeyboardPanel { ... }' block in Panel.qml -- the panel then has no window at all"
 else
   surface_missing=""
@@ -983,20 +1091,92 @@ else
     || surface_missing="$surface_missing anchorItem:root.anchorItem"
   grep -qE '(^|[^A-Za-z0-9_.])open:[[:space:]]*root\.opened([^A-Za-z0-9_]|$)' <<<"$keyboard_block" \
     || surface_missing="$surface_missing open:root.opened"
-  if [[ -z "$surface_missing" ]]; then
-    ok "Panel: the KeyboardPanel surface is anchored to the injected anchorItem"
+
+  focus_id="$(grep -oE '(^|[^A-Za-z0-9_.])focusTarget:[[:space:]]*[A-Za-z_][A-Za-z0-9_]*' <<<"$keyboard_block" \
+              | head -1 | sed -E 's/.*focusTarget:[[:space:]]*//')"
+  if [[ -z "$focus_id" ]]; then
+    surface_missing="$surface_missing focusTarget"
   else
-    bad "Panel: the KeyboardPanel surface is anchored to the injected anchorItem" \
-        "not bound inside the KeyboardPanel block:$surface_missing"
+    catcher_block="$(block_of "$keyboard_block" PanelKeyCatcher)"
+    if [[ -z "$catcher_block" ]]; then
+      surface_missing="$surface_missing PanelKeyCatcher-block"
+    elif ! grep -qE "(^|[^A-Za-z0-9_])id:[[:space:]]*${focus_id}([^A-Za-z0-9_]|\$)" <<<"$catcher_block"; then
+      surface_missing="$surface_missing focusTarget-names-no-PanelKeyCatcher($focus_id)"
+    fi
+  fi
+
+  if [[ -z "$surface_missing" ]]; then
+    ok "Panel: the KeyboardPanel surface is anchored, opened and focusable"
+  else
+    bad "Panel: the KeyboardPanel surface is anchored, opened and focusable" \
+        "not wired inside the KeyboardPanel block:$surface_missing"
   fi
 fi
 
-# 17 -- applying is explicit. Moving real windows across real screens must not
-#       be a side effect of a keystroke, so no field may write straight
-#       through to disk.
-hits="$(grep -nE 'onTextChanged:.*(writeProc|applyRules|config-write)' <<<"$stripped_panel" || true)"
-[[ -z "$hits" ]] && ok "Panel: no field writes through on change" \
-                 || bad "Panel: no field writes through on change" "$hits"
+# 16b -- and the key catcher yields while a field has focus, or typing is
+#        swallowed. PanelKeyCatcher runs Keys.priority: Keys.BeforeItem, so it
+#        takes keys even when a descendant has activeFocus: "x" in the Command
+#        field would fire deleteRequested and "j" would never arrive. Its own
+#        header prescribes `blocked: <editor>.activeFocus`; this panel has two
+#        editors per expanded row, created by a Repeater, so the expression is
+#        a count instead of a reference -- what is required here is that
+#        `blocked` is bound to SOMETHING this file declares, never to a
+#        literal, which is check 11's rule applied to the one binding that
+#        decides whether the panel can be typed into at all.
+if [[ -n "$keyboard_block" ]]; then
+  blocked_rhs="$(grep -oE '(^|[^A-Za-z0-9_.])blocked:[[:space:]]*.*' <<<"$keyboard_block" \
+                 | head -1 | sed -E 's/.*blocked:[[:space:]]*//')"
+  if [[ -z "$blocked_rhs" ]]; then
+    bad "Panel: the key catcher yields while a field has focus" \
+        "no 'blocked:' binding inside the KeyboardPanel block -- Keys.BeforeItem would swallow every keystroke meant for a field"
+  elif [[ "$blocked_rhs" =~ ^(true|false)\;?$ ]]; then
+    bad "Panel: the key catcher yields while a field has focus" \
+        "bound to the hardcoded literal '$blocked_rhs'"
+  elif grep -qE "(^|[^A-Za-z0-9_])property[[:space:]]+[A-Za-z_][A-Za-z0-9_<>]*[[:space:]]+$(sed -E 's/^root\.//; s/[^A-Za-z0-9_].*$//' <<<"$blocked_rhs")([^A-Za-z0-9_]|\$)" \
+         <<<"$stripped_panel"; then
+    ok "Panel: the key catcher yields while a field has focus"
+  else
+    bad "Panel: the key catcher yields while a field has focus" \
+        "expression '$blocked_rhs' names no property declared in this file"
+  fi
+fi
+
+# 17 -- applying is explicit: a keystroke or a value change never persists or
+#       moves anything. Moving real windows across real screens, and writing
+#       the file, must be the consequence of a CLICK.
+#
+#       The first version named one handler (`onTextChanged`) and three needles
+#       (`writeProc|applyRules|config-write`), which made it blind twice over:
+#       blind to `root.apply()` -- the one entry point a careless refactor
+#       would actually reach for -- and, once the fields moved to
+#       `onTextEdited` in this very round, blind to the only handler they use.
+#       A check naming the handler it was written against stops covering the
+#       code the moment the code is edited.
+#
+#       So: every handler that fires from INPUT rather than from a deliberate
+#       click is scanned, against every entry point that writes or dispatches.
+#       onClicked and onPressed are deliberately NOT in the list -- the Apply
+#       button's own `onClicked: root.apply()` is the correct shape and must
+#       stay legal.
+input_handlers='on(TextEdited|TextChanged|EditingFinished|Accepted|Changed|ValueChanged|Toggled|ActiveFocusChanged|Modified)'
+persist_calls='(root\.)?(apply|applyRules|nextChunk|launchMissing)[[:space:]]*\(|writeProc|evalProc|launchProc|config-write'
+hits=""
+mapfile -t panel_all <<<"$stripped_panel"
+for ((i = 0; i < ${#panel_all[@]}; i++)); do
+  grep -qE "$input_handlers:" <<<"${panel_all[$i]}" || continue
+  # A window, not the single line: a handler body may wrap onto the next few.
+  window="${panel_all[$i]}"
+  for ((k = 1; k <= 3; k++)); do
+    (( i + k < ${#panel_all[@]} )) && window="$window
+${panel_all[$((i + k))]}"
+  done
+  grep -qE "$persist_calls" <<<"$window" \
+    && hits="$hits
+Panel.qml:$((i + 1)): ${panel_all[$i]}"
+done
+hits="$(sed '/^$/d' <<<"$hits")"
+[[ -z "$hits" ]] && ok "Panel: no input handler writes or dispatches" \
+                 || bad "Panel: no input handler writes or dispatches" "$hits"
 
 # 18 -- the class field is never handed to a JavaScript RegExp. The allowlist
 #       permits nested quantifiers and QML gives JavaScript no timeout.
@@ -1123,6 +1303,30 @@ done
 raw_reasons="$(sed '/^$/d' <<<"$raw_reasons")"
 [[ -z "$raw_reasons" ]] && ok "Panel: every reason code is worded through Model.reasonText" \
                        || bad "Panel: every reason code is worded through Model.reasonText" "$raw_reasons"
+
+# 23 -- an envelope error is never shown to the user raw either, for the same
+#       reason and by the same rule as check 22. `explain()` lived in this file
+#       for a round after reasonText was moved out of it, three of the config
+#       helper's eight codes had no wording at all, and on empty stdout -- a
+#       missing script, a timeout kill, an exit outside the script's own two
+#       reporters -- it printed the literal text "undefined: ". Wording in QML
+#       is wording no suite here can execute.
+env_pat='envelope\.error'
+raw_env=""
+for ((i = 0; i < ${#panel_all[@]}; i++)); do
+  grep -qE "$env_pat" <<<"${panel_all[$i]}" || continue
+  window="${panel_all[$i]}"
+  (( i > 0 )) && window="${panel_all[$((i - 1))]}
+$window"
+  (( i + 1 < ${#panel_all[@]} )) && window="$window
+${panel_all[$((i + 1))]}"
+  grep -qF 'Model.envelopeText(' <<<"$window" \
+    || raw_env="$raw_env
+Panel.qml:$((i + 1)): ${panel_all[$i]}"
+done
+raw_env="$(sed '/^$/d' <<<"$raw_env")"
+[[ -z "$raw_env" ]] && ok "Panel: every envelope error is worded through Model.envelopeText" \
+                    || bad "Panel: every envelope error is worded through Model.envelopeText" "$raw_env"
 
 printf '\nqml structure: total=%d failed=%d\n' "$run" "$failed"
 (( failed == 0 ))

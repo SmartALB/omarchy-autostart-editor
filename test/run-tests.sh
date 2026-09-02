@@ -823,6 +823,29 @@ test_generated_lua_compiles() {
 
 test_generated_lua_compiles
 
+# The other half of the envelope-wording class claim. test/harness.qml proves
+# every code in Model.envelopeCodes() has wording; this proves that list IS the
+# set of codes the script can answer with. Neither half alone would notice a
+# code added to the script with no wording, which is exactly how three of the
+# eight went unworded for two rounds.
+test_envelope_codes_match_the_script() {
+    local script="$PWD/../bin/omarchy-autostart-config"
+    local from_script from_model
+    # Both reporters: `err "<code>"` and the two hardcoded printf fallbacks
+    # that stand in when jq itself cannot build the answer.
+    from_script="$( { grep -o 'err "[a-z-]*"' "$script" | sed 's/err "//; s/"//'
+                      grep -o '"error":"[a-z-]*"' "$script" | sed 's/"error":"//; s/"//'
+                    } | sort -u | tr '\n' ' ')"
+    from_model="$(sed -n '/^function envelopeCodes/,/^}/p' "$PWD/../Model.js" \
+                  | grep -o '"[a-z-]*"' | tr -d '"' | sort -u | tr '\n' ' ')"
+    assert_eq "envelope: Model.envelopeCodes() is exactly what the script can emit" \
+              "$from_model" "$from_script"
+    assert_eq "envelope: the extraction found something at all" \
+              "$([[ -n "${from_script// /}" ]] && echo yes || echo no)" "yes"
+}
+
+test_envelope_codes_match_the_script
+
 test_qml_structure() {
     local out status
     out="$(./qml-structure.sh 2>&1)"; status=$?

@@ -76,13 +76,12 @@ Panel {
     }
 
     function close() {
-        // Collapsing on close is not tidiness. An expanded row left behind a
-        // closed popup keeps its text fields alive with focus, and nothing
-        // then reports the focus loss -- editorsFocused would stay above zero
-        // and the key catcher would be blocked for the rest of the session, so
-        // Escape would stop closing the panel. Nothing inside a closed popup
-        // can hold focus, so zero is a fact here, not a guess.
-        root.expandedRow = -1
+        // setExpandedRow already moves focus off any field, so the counter
+        // comes down on its own. The explicit zero stays as a belt: nothing
+        // inside a closed popup can hold focus, so it is a fact here rather
+        // than a guess, and it also recovers a counter stranded by some future
+        // path that forgets the setter.
+        root.setExpandedRow(-1)
         root.editorsFocused = 0
         root.controller.hide()
     }
@@ -139,6 +138,26 @@ Panel {
     // survive and only their bindings re-evaluate.
     property int programRowCount: 0
     property int workspaceRowCount: 0
+
+    // Every change of the expanded row goes through setExpandedRow(), which
+    // hands focus back to the key catcher FIRST.
+    //
+    // MEASURED, offscreen qml on a stub of this exact shape (a Repeater of
+    // rows, a TextField per expanded row reporting focus into the counter, and
+    // a collapse by visible:false):
+    //   collapsed as it was  -> editorsFocused=1 blocked=true  activeFocusItem=field1 fieldVisible=false
+    //   collapsed via setter -> editorsFocused=0 blocked=false activeFocusItem=keyCatcher
+    // Collapsing clears no focus and fires no activeFocusChanged, so the
+    // counter stuck at 1: Escape was swallowed for the rest of the open
+    // session, and the now-invisible field stayed the window's activeFocusItem
+    // -- keystrokes went on editing the draft with Apply ready to save them.
+    // Moving focus while the field still EXISTS is what makes its own signal
+    // arrive, so this is not a second bookkeeping path bolted on beside the
+    // first; it is what the first one was waiting for.
+    function setExpandedRow(next) {
+        if (keyCatcher) keyCatcher.forceActiveFocus()
+        root.expandedRow = next
+    }
 
     // Which program row is expanded for detail editing. One at a time.
     //
@@ -201,7 +220,7 @@ Panel {
         if (rowIndex < 0 || rowIndex >= programs.length) return
         programs.splice(rowIndex, 1)
         next.programs = programs
-        root.expandedRow = -1
+        root.setExpandedRow(-1)
         root.commitDraft(next)
     }
 
@@ -253,27 +272,17 @@ Panel {
                 catch (e) { root.errorText = "the config reader gave an unreadable answer"; return }
                 if (!envelope.ok) {
                     // A broken file is not overwritten and nothing is applied.
-                    root.errorText = root.explain(envelope.error, envelope.detail)
+                    root.errorText = Model.envelopeText(envelope.error, envelope.detail)
                     return
                 }
                 root.saved = envelope.config
                 root.draft = JSON.parse(JSON.stringify(envelope.config))
                 root.savedMtime = envelope.mtime
-                root.expandedRow = -1
+                root.setExpandedRow(-1)
                 root.markDirty()
                 root.refreshLive()
             }
         }
-    }
-
-    function explain(code, detail) {
-        if (code === "insecure-permissions")
-            return "The configuration file can be written by someone else. " + detail
-        if (code === "too-large")     return "The configuration file is too large. " + detail
-        if (code === "not-json")      return "The configuration file is not valid JSON. " + detail
-        if (code === "bad-schema")    return "Unknown configuration version. " + detail
-        if (code === "stale")         return "The file changed on disk since it was read. " + detail
-        return String(code) + ": " + String(detail || "")
     }
 
     // --- live state -------------------------------------------------------
@@ -399,7 +408,7 @@ Panel {
                 try { envelope = JSON.parse(String(text || "{}")) }
                 catch (e) { root.errorText = "the config writer gave an unreadable answer"; return }
                 if (!envelope.ok) {
-                    root.errorText = root.explain(envelope.error, envelope.detail)
+                    root.errorText = Model.envelopeText(envelope.error, envelope.detail)
                     return
                 }
                 root.saved = JSON.parse(JSON.stringify(root.draft))
@@ -452,7 +461,7 @@ Panel {
     function revert() {
         root.draft = JSON.parse(JSON.stringify(root.saved))
         root.errorText = ""
-        root.expandedRow = -1
+        root.setExpandedRow(-1)
         root.markDirty()
     }
 
@@ -627,6 +636,7 @@ Panel {
     readonly property string glyphExpanded: "\uf078"     // nf-fa-chevron_down
     readonly property string glyphCollapsed: "\uf054"    // nf-fa-chevron_right
     readonly property string glyphRemove: "\uf00d"       // nf-fa-times
+    readonly property string glyphDisabled: "\uf068"     // nf-fa-minus
 
     readonly property color fg: Color.popups.text
     readonly property color warn: Color.urgent
@@ -675,6 +685,18 @@ Panel {
             blocked: root.editorsFocused > 0
             onCloseRequested: root.close()
             onTabRequested: function(direction) { root.switchPanel(direction) }
+
+            // The shipped idiom (audio/Panel.qml:694, monitor/Panel.qml:516):
+            // a ScrollView's inner Flickable stays interactive even when the
+            // content fits, so a drag or a wheel over a list that does not
+            // scroll still grabs the gesture instead of leaving it to the
+            // content. Bound rather than assigned because contentItem is
+            // created by the ScrollView, not by this file.
+            Binding {
+                target: scrollArea.contentItem
+                property: "interactive"
+                value: body.implicitHeight > scrollArea.height
+            }
 
             // A ScrollView so a growing list scrolls instead of being cut
             // off, and because KeyboardPanel brings no availableWidth of its
@@ -784,11 +806,31 @@ Panel {
                                                                     !(programRow.program.enabled === true))
                                 }
 
+                                // THREE states, not two dimmed into each other.
+                                // Reading left to right:
+                                //   disabled          a dash, muted -- this entry
+                                //                     will not be started, so
+                                //                     whether a window matches it
+                                //                     is not a claim being made
+                                //   enabled, matched  a filled circle in the
+                                //                     foreground colour
+                                //   enabled, no match a hollow circle in the
+                                //                     warning colour -- the only
+                                //                     report a mistyped command
+                                //                     ever gets
+                                // Dimming the RUNNING glyph for a disabled entry
+                                // (which is what this did) made a program that is
+                                // switched off look like one that is up, only
+                                // fainter.
                                 Text {
                                     textFormat: Text.PlainText
-                                    text: programRow.isRunning ? root.glyphRunning : root.glyphNotRunning
-                                    color: programRow.isRunning ? root.fg : root.warn
-                                    opacity: programRow.program.enabled === true ? 1.0 : 0.4
+                                    readonly property bool isOn: programRow.program.enabled === true
+                                    text: !isOn ? root.glyphDisabled
+                                          : (programRow.isRunning ? root.glyphRunning
+                                                                  : root.glyphNotRunning)
+                                    color: !isOn ? root.fg
+                                           : (programRow.isRunning ? root.fg : root.warn)
+                                    opacity: isOn ? 1.0 : 0.45
                                     font.family: root.fontFam
                                     font.pixelSize: Style.font.iconSmall
                                     anchors.verticalCenter: parent.verticalCenter
@@ -801,7 +843,7 @@ Panel {
                                     leftAlign: true
                                     width: Math.max(Style.space(80), programRow.width - Style.space(250))
                                     anchors.verticalCenter: parent.verticalCenter
-                                    onClicked: root.expandedRow = programRow.isExpanded ? -1 : index
+                                    onClicked: root.setExpandedRow(programRow.isExpanded ? -1 : index)
                                 }
 
                                 Text {
@@ -820,7 +862,7 @@ Panel {
                                     foreground: root.fg
                                     fontFamily: root.fontFam
                                     anchors.verticalCenter: parent.verticalCenter
-                                    onClicked: root.expandedRow = programRow.isExpanded ? -1 : index
+                                    onClicked: root.setExpandedRow(programRow.isExpanded ? -1 : index)
                                 }
                             }
 
@@ -851,7 +893,21 @@ Panel {
                                     // the file and to hyprctl, because moving real windows
                                     // across real screens must not be a side effect of a
                                     // keystroke.
-                                    onTextChanged: root.setProgramField(index, "command", text)
+                                    // onTextEdited, NOT onTextChanged. Measured, offscreen
+                                    // qml, three collapsed rows and NO user action:
+                                    //   onTextChanged -> 3 write-backs, 3 markDirty,
+                                    //                    3 Qt binding-loop warnings,
+                                    //                    dirtyCount=1
+                                    //   onTextEdited  -> 0, 0, 0, dirtyCount=0
+                                    // `text:` is bound to a value inside the draft and the
+                                    // handler writes back into it, so onTextChanged closes
+                                    // the loop on itself: a stored value that is not a
+                                    // string round-trips through String() to a different
+                                    // one, and a user who opens the panel and touches
+                                    // nothing is told they have unsaved changes.
+                                    // onTextEdited fires only on real user input and is
+                                    // identical while typing.
+                                    onTextEdited: root.setProgramField(index, "command", text)
                                     onActiveFocusChanged: root.noteEditorFocus(activeFocus)
                                 }
 
@@ -866,7 +922,7 @@ Panel {
                                         placeholderText: "Class"
                                         text: String(programRow.program["class"] || "")
                                         foreground: root.fg
-                                        onTextChanged: root.setProgramField(index, "class", text)
+                                        onTextEdited: root.setProgramField(index, "class", text)
                                         onActiveFocusChanged: root.noteEditorFocus(activeFocus)
                                     }
 
