@@ -915,6 +915,14 @@ Die Suite steht am Ende bei 47 Zusicherungen.
 
 - [ ] **Step 5: Zwei Mutationsproben fahren**
 
+**Vor diesen Proben committen.** Sie stellen die Datei am Ende mit
+`git checkout` wieder her, und das setzt voraus, dass die Umsetzung **schon
+committet** ist. Auf einem ersten Durchlauf ist sie das nicht: `git checkout`
+holt dann den Stand von `HEAD` und **vernichtet die gerade geschriebene
+Umsetzung**. Also erst den Commit-Schritt dieser Aufgabe ausführen, dann
+hierher zurückkommen und die Proben gegen den committeten Stand fahren.
+Genau dieser Fehler ist am 02.09.2026 in Task 5 eingetreten.
+
 ```bash
 # Probe A -- ohne MAX+1-Lesung muss der too-large-Test rot werden
 sed -i 's/^    if (( size > MAX_BYTES )); then/    if false; then/' bin/omarchy-autostart-config
@@ -989,9 +997,13 @@ test_write_refuses_an_existing_file_when_expecting_none() {
 test_write_refuses_oversized_input() {
     setup_sandbox
     local out
-    out="$(jq -nc --arg pad "$(head -c 307200 /dev/zero | tr '\0' 'x')" \
-             '{schemaVersion:1,programs:[{id:"p1",name:$pad}],workspaces:[]}' \
-           | "$CONFIG_BIN" write --expect-mtime 0)"
+    # Streamed, not via jq --arg: a 300 KiB argv entry exceeds the kernel's
+    # MAX_ARG_STRLEN (131072) and fails execve before jq runs. Task 4 hit this
+    # and the same mistake was left standing here.
+    out="$( { printf '{"schemaVersion":1,"programs":[{"id":"p1","name":"'
+              head -c 307200 /dev/zero | tr '\0' 'x'
+              printf '"}],"workspaces":[]}'
+            } | "$CONFIG_BIN" write --expect-mtime 0)"
     assert_eq "write: oversized input refused" "$(jq -r .error <<<"$out")" "too-large"
     assert_eq "write: nothing was created" \
               "$([[ -e "$XDG_CONFIG_HOME/omarchy/autostart-layout.json" ]] && echo yes || echo no)" \
@@ -1038,8 +1050,13 @@ test_write_paths_each_yield_one_envelope() {
             create)   out="$(valid_config | "$CONFIG_BIN" write --expect-mtime 0)" ;;
             stale)    valid_config > "$f"; chmod 600 "$f"
                       out="$(valid_config | "$CONFIG_BIN" write --expect-mtime 1)" ;;
-            toolarge) out="$(jq -nc --argjson n 300000 '{schemaVersion:1,programs:[],workspaces:[]}' \
-                              | "$CONFIG_BIN" write --expect-mtime 0)" ;;
+            toolarge) # Streamed, not passed as an argument: a 300 KiB argv entry
+                      # exceeds the kernel's MAX_ARG_STRLEN and fails execve
+                      # before jq even runs.
+                      out="$( { printf '{"schemaVersion":1,"programs":[{"id":"p1","name":"'
+                                head -c 300000 /dev/zero | tr '\0' 'x'
+                                printf '"}],"workspaces":[]}'
+                              } | "$CONFIG_BIN" write --expect-mtime 0)" ;;
             broken)   out="$(printf '{"schemaVersion":1,' | "$CONFIG_BIN" write --expect-mtime 0)" ;;
         esac
         assert_eq "write envelope: $label exits 0" "$?" "0"
@@ -1157,6 +1174,14 @@ Expected: alle Zusicherungen `ok`, `failed=0`.
 
 - [ ] **Step 5: Zwei Mutationsproben fahren**
 
+**Vor diesen Proben committen.** Sie stellen die Datei am Ende mit
+`git checkout` wieder her, und das setzt voraus, dass die Umsetzung **schon
+committet** ist. Auf einem ersten Durchlauf ist sie das nicht: `git checkout`
+holt dann den Stand von `HEAD` und **vernichtet die gerade geschriebene
+Umsetzung**. Also erst den Commit-Schritt dieser Aufgabe ausführen, dann
+hierher zurückkommen und die Proben gegen den committeten Stand fahren.
+Genau dieser Fehler ist am 02.09.2026 in Task 5 eingetreten.
+
 ```bash
 # Probe A -- ohne mtime-Vergleich muessen die zwei stale-Tests rot werden
 sed -i 's/^    \[\[ "$current" == "$expect_mtime" \]\]/    [[ true ]]/' bin/omarchy-autostart-config
@@ -1164,7 +1189,7 @@ sed -i 's/^    \[\[ "$current" == "$expect_mtime" \]\]/    [[ true ]]/' bin/omar
 git checkout bin/omarchy-autostart-config
 
 # Probe B -- ohne chmod 600 muss der Modus-Test rot werden
-sed -i 's/^    chmod 600 "$tmp"/    chmod 644 "$tmp"/' bin/omarchy-autostart-config
+sed -i 's/^    chmod 600 "$STAGEFILE"/    chmod 644 "$STAGEFILE"/' bin/omarchy-autostart-config
 ./test/run-tests.sh; echo "B status=$?"
 git checkout bin/omarchy-autostart-config
 ```
@@ -1352,6 +1377,14 @@ Expected: alle Zusicherungen `ok`.
 
 - [ ] **Step 5: Zwei Mutationsproben fahren**
 
+**Vor diesen Proben committen.** Sie stellen die Datei am Ende mit
+`git checkout` wieder her, und das setzt voraus, dass die Umsetzung **schon
+committet** ist. Auf einem ersten Durchlauf ist sie das nicht: `git checkout`
+holt dann den Stand von `HEAD` und **vernichtet die gerade geschriebene
+Umsetzung**. Also erst den Commit-Schritt dieser Aufgabe ausführen, dann
+hierher zurückkommen und die Proben gegen den committeten Stand fahren.
+Genau dieser Fehler ist am 02.09.2026 in Task 5 eingetreten.
+
 ```bash
 # Probe A -- ohne Dateizahl-Kappung muss der 2000er-Test rot werden
 sed -i 's/^            (( count >= MAX_FILES )) && break 2/            :/' bin/omarchy-autostart-apps
@@ -1517,6 +1550,14 @@ Run: `chmod +x bin/omarchy-autostart-windows && ./test/run-tests.sh`
 Expected: alle Zusicherungen `ok`.
 
 - [ ] **Step 5: Eine Mutationsprobe fahren**
+
+**Vor diesen Proben committen.** Sie stellen die Datei am Ende mit
+`git checkout` wieder her, und das setzt voraus, dass die Umsetzung **schon
+committet** ist. Auf einem ersten Durchlauf ist sie das nicht: `git checkout`
+holt dann den Stand von `HEAD` und **vernichtet die gerade geschriebene
+Umsetzung**. Also erst den Commit-Schritt dieser Aufgabe ausführen, dann
+hierher zurückkommen und die Proben gegen den committeten Stand fahren.
+Genau dieser Fehler ist am 02.09.2026 in Task 5 eingetreten.
 
 ```bash
 sed -i 's/    | \.\[0:\$max\]/    | .[0:99999]/' bin/omarchy-autostart-windows
@@ -1810,6 +1851,14 @@ Run: `./test/run-qml-tests.sh`
 Expected: alle `ok`, `failed=0`.
 
 - [ ] **Step 5: Drei Mutationsproben fahren**
+
+**Vor diesen Proben committen.** Sie stellen die Datei am Ende mit
+`git checkout` wieder her, und das setzt voraus, dass die Umsetzung **schon
+committet** ist. Auf einem ersten Durchlauf ist sie das nicht: `git checkout`
+holt dann den Stand von `HEAD` und **vernichtet die gerade geschriebene
+Umsetzung**. Also erst den Commit-Schritt dieser Aufgabe ausführen, dann
+hierher zurückkommen und die Proben gegen den committeten Stand fahren.
+Genau dieser Fehler ist am 02.09.2026 in Task 5 eingetreten.
 
 ```bash
 # Probe A -- Erlaubnisliste um das Anfuehrungszeichen erweitern
@@ -2204,6 +2253,14 @@ Expected: beide grün. Die Lua-Prüfung nennt mindestens vier kompilierte Blöck
 
 - [ ] **Step 5: Drei Mutationsproben fahren**
 
+**Vor diesen Proben committen.** Sie stellen die Datei am Ende mit
+`git checkout` wieder her, und das setzt voraus, dass die Umsetzung **schon
+committet** ist. Auf einem ersten Durchlauf ist sie das nicht: `git checkout`
+holt dann den Stand von `HEAD` und **vernichtet die gerade geschriebene
+Umsetzung**. Also erst den Commit-Schritt dieser Aufgabe ausführen, dann
+hierher zurückkommen und die Proben gegen den committeten Stand fahren.
+Genau dieser Fehler ist am 02.09.2026 in Task 5 eingetreten.
+
 ```bash
 # Probe A -- Kodierung aufgeben: der Anfuehrungszeichen-Test und die
 # Lua-Kompilierung muessen beide rot werden
@@ -2419,6 +2476,14 @@ Run: `./test/run-qml-tests.sh`
 Expected: alle `ok`, `failed=0`.
 
 - [ ] **Step 5: Drei Mutationsproben fahren**
+
+**Vor diesen Proben committen.** Sie stellen die Datei am Ende mit
+`git checkout` wieder her, und das setzt voraus, dass die Umsetzung **schon
+committet** ist. Auf einem ersten Durchlauf ist sie das nicht: `git checkout`
+holt dann den Stand von `HEAD` und **vernichtet die gerade geschriebene
+Umsetzung**. Also erst den Commit-Schritt dieser Aufgabe ausführen, dann
+hierher zurückkommen und die Proben gegen den committeten Stand fahren.
+Genau dieser Fehler ist am 02.09.2026 in Task 5 eingetreten.
 
 ```bash
 # Probe A -- Abkopplung der Streams weglassen
@@ -2828,6 +2893,14 @@ Expected: beide grün.
 
 - [ ] **Step 6: Drei Mutationsproben fahren**
 
+**Vor diesen Proben committen.** Sie stellen die Datei am Ende mit
+`git checkout` wieder her, und das setzt voraus, dass die Umsetzung **schon
+committet** ist. Auf einem ersten Durchlauf ist sie das nicht: `git checkout`
+holt dann den Stand von `HEAD` und **vernichtet die gerade geschriebene
+Umsetzung**. Also erst den Commit-Schritt dieser Aufgabe ausführen, dann
+hierher zurückkommen und die Proben gegen den committeten Stand fahren.
+Genau dieser Fehler ist am 02.09.2026 in Task 5 eingetreten.
+
 ```bash
 # Probe A -- Adressform nicht mehr pruefen
 sed -i 's|^        if (!ADDRESS_RE.test(hits\[i\].address)) {|        if (false) {|' Model.js
@@ -3103,6 +3176,14 @@ Run: `./test/run-qml-tests.sh && ./test/run-tests.sh`
 Expected: beide grün; der Strukturprüfer nennt mindestens neun Prüfungen.
 
 - [ ] **Step 6: Drei Mutationsproben fahren**
+
+**Vor diesen Proben committen.** Sie stellen die Datei am Ende mit
+`git checkout` wieder her, und das setzt voraus, dass die Umsetzung **schon
+committet** ist. Auf einem ersten Durchlauf ist sie das nicht: `git checkout`
+holt dann den Stand von `HEAD` und **vernichtet die gerade geschriebene
+Umsetzung**. Also erst den Commit-Schritt dieser Aufgabe ausführen, dann
+hierher zurückkommen und die Proben gegen den committeten Stand fahren.
+Genau dieser Fehler ist am 02.09.2026 in Task 5 eingetreten.
 
 ```bash
 # Probe A -- PATH-aufgeloester Interpreter
@@ -3437,6 +3518,14 @@ Expected: grün, inklusive `Service.qml: teardown stops readProc` und der drei w
 
 - [ ] **Step 7: Eine Mutationsprobe fahren**
 
+**Vor diesen Proben committen.** Sie stellen die Datei am Ende mit
+`git checkout` wieder her, und das setzt voraus, dass die Umsetzung **schon
+committet** ist. Auf einem ersten Durchlauf ist sie das nicht: `git checkout`
+holt dann den Stand von `HEAD` und **vernichtet die gerade geschriebene
+Umsetzung**. Also erst den Commit-Schritt dieser Aufgabe ausführen, dann
+hierher zurückkommen und die Proben gegen den committeten Stand fahren.
+Genau dieser Fehler ist am 02.09.2026 in Task 5 eingetreten.
+
 ```bash
 python3 - <<'MUT'
 import io
@@ -3606,6 +3695,14 @@ grep -n "barGlyph:" BarWidget.qml | od -c | head -3
 Expected: die Ausgabe zeigt `\ u f 1 3 5` als **sechs einzelne Zeichen**. Steht dort ein Mehrbyte-UTF-8-Zeichen oder gar nichts zwischen den Anführungszeichen, ist der Escape beim Schreiben verloren gegangen.
 
 - [ ] **Step 6: Zwei Mutationsproben fahren**
+
+**Vor diesen Proben committen.** Sie stellen die Datei am Ende mit
+`git checkout` wieder her, und das setzt voraus, dass die Umsetzung **schon
+committet** ist. Auf einem ersten Durchlauf ist sie das nicht: `git checkout`
+holt dann den Stand von `HEAD` und **vernichtet die gerade geschriebene
+Umsetzung**. Also erst den Commit-Schritt dieser Aufgabe ausführen, dann
+hierher zurückkommen und die Proben gegen den committeten Stand fahren.
+Genau dieser Fehler ist am 02.09.2026 in Task 5 eingetreten.
 
 ```bash
 # Probe A -- Glyph leeren
@@ -4025,6 +4122,14 @@ Expected: beide grün, inklusive der acht Teardown-Prüfungen für `Panel.qml`.
 
 - [ ] **Step 6: Zwei Mutationsproben fahren**
 
+**Vor diesen Proben committen.** Sie stellen die Datei am Ende mit
+`git checkout` wieder her, und das setzt voraus, dass die Umsetzung **schon
+committet** ist. Auf einem ersten Durchlauf ist sie das nicht: `git checkout`
+holt dann den Stand von `HEAD` und **vernichtet die gerade geschriebene
+Umsetzung**. Also erst den Commit-Schritt dieser Aufgabe ausführen, dann
+hierher zurückkommen und die Proben gegen den committeten Stand fahren.
+Genau dieser Fehler ist am 02.09.2026 in Task 5 eingetreten.
+
 ```bash
 # Probe A -- JS-RegExp auf die Klasse ansetzen
 python3 - <<'MUT'
@@ -4332,6 +4437,14 @@ Run: `./test/run-qml-tests.sh && ./test/run-tests.sh`
 Expected: beide grün.
 
 - [ ] **Step 6: Drei Mutationsproben fahren**
+
+**Vor diesen Proben committen.** Sie stellen die Datei am Ende mit
+`git checkout` wieder her, und das setzt voraus, dass die Umsetzung **schon
+committet** ist. Auf einem ersten Durchlauf ist sie das nicht: `git checkout`
+holt dann den Stand von `HEAD` und **vernichtet die gerade geschriebene
+Umsetzung**. Also erst den Commit-Schritt dieser Aufgabe ausführen, dann
+hierher zurückkommen und die Proben gegen den committeten Stand fahren.
+Genau dieser Fehler ist am 02.09.2026 in Task 5 eingetreten.
 
 ```bash
 # Probe A -- Import legt Eintraege eingeschaltet an
