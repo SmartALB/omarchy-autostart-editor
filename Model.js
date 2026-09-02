@@ -175,3 +175,111 @@ function validate(config) {
 
     return out;
 }
+
+// --- Lua payload ----------------------------------------------------------
+//
+// Rules are set at runtime through `hyprctl eval`, because under the Lua
+// configuration `hyprctl keyword` is switched off ("keyword can't work with
+// non-legacy parsers. Use eval.") and because writing a require line into the
+// user's hyprland.lua would not survive the next Omarchy upgrade.
+//
+// Every value crossing into Lua goes through luaBytes(). The payload is
+// therefore digits and commas: an escape is not defended against, it cannot
+// be written down.
+var RULE_PREFIX = "smartalb.autostart";
+
+var MAX_RULES_PER_CHUNK = 20;
+var MAX_CHUNK_BYTES     = 65536;   // 64 KiB
+var MAX_EVAL_CALLS      = 20;
+
+// Rules the plugin has already set are remembered in the compositor's own Lua
+// state and switched off before new ones go in, so re-applying does not pile
+// them up. `if old and old.set_enabled` keeps this working even where a rule
+// object has no such method.
+var CHUNK_PRELUDE = [
+    "do",
+    "local S = _G.__smartalb_autostart",
+    "if not S then S = { rules = {} } _G.__smartalb_autostart = S end",
+    "local function put(key, rule)",
+    "local old = S.rules[key]",
+    "if old and old.set_enabled then old:set_enabled(false) end",
+    "S.rules[key] = rule",
+    "end"
+].join("\n");
+
+function resetChunk() {
+    return [
+        CHUNK_PRELUDE,
+        "for key, rule in pairs(S.rules) do",
+        "if rule and rule.set_enabled then rule:set_enabled(false) end",
+        "S.rules[key] = nil",
+        "end",
+        "end"
+    ].join("\n");
+}
+
+function windowRuleStatement(program) {
+    var placement = program.placement;
+    if (!placement || placement.kind === "none") return null;
+    var key   = RULE_PREFIX + ":p:" + program.id;
+    var field = (placement.kind === "workspace") ? "workspace" : "monitor";
+    return "put(" + luaBytes(key) + ", hl.window_rule({ name = " + luaBytes(key)
+         + ", match = { class = " + luaBytes(program["class"]) + " }, "
+         + field + " = " + luaBytes(placement.value) + " }))";
+}
+
+function workspaceRuleStatement(row) {
+    var key = RULE_PREFIX + ":w:" + row.workspace;
+    return "put(" + luaBytes(key) + ", hl.workspace_rule({ workspace = "
+         + luaBytes(row.workspace) + ", monitor = " + luaBytes(row.monitor) + " }))";
+}
+
+function buildRuleChunks(model) {
+    var statements = [], i, statement;
+    var workspaces = (model && model.workspaces) || [];
+    var programs   = (model && model.programs)   || [];
+
+    for (i = 0; i < workspaces.length; i++) {
+        statements.push(workspaceRuleStatement(workspaces[i]));
+    }
+    for (i = 0; i < programs.length; i++) {
+        statement = windowRuleStatement(programs[i]);
+        if (statement) statements.push(statement);
+    }
+
+    var chunks = [resetChunk()];
+    var current = [], bytes = CHUNK_PRELUDE.length + 4;
+
+    function flush() {
+        if (current.length === 0) return;
+        chunks.push(CHUNK_PRELUDE + "\n" + current.join("\n") + "\nend");
+        current = [];
+        bytes = CHUNK_PRELUDE.length + 4;
+    }
+
+    for (i = 0; i < statements.length; i++) {
+        statement = statements[i];
+        if (current.length >= MAX_RULES_PER_CHUNK
+            || bytes + statement.length + 1 > MAX_CHUNK_BYTES) {
+            flush();
+        }
+        current.push(statement);
+        bytes += statement.length + 1;
+    }
+    flush();
+
+    // With the caps from validate() -- 200 programs, 99 workspaces -- this
+    // cannot trigger. It exists so that raising a cap without raising this one
+    // stops here instead of spawning an unbounded number of processes.
+    if (chunks.length > MAX_EVAL_CALLS) {
+        throw new Error("buildRuleChunks: " + chunks.length
+                        + " eval calls exceed the limit of " + MAX_EVAL_CALLS);
+    }
+    for (i = 0; i < chunks.length; i++) {
+        if (chunks[i].length > MAX_CHUNK_BYTES) {
+            throw new Error("buildRuleChunks: chunk " + i + " exceeds "
+                            + MAX_CHUNK_BYTES + " bytes");
+        }
+    }
+    return chunks;
+}

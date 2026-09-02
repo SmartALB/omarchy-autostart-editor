@@ -211,6 +211,98 @@ QtObject {
                       return r.rejected.length;
                   })(), 0);
 
+            // --- buildRuleChunks ----------------------------------------------
+            function chunksFor(programs, workspaces) {
+                return Model.buildRuleChunks(Model.validate(cfg(programs, workspaces)));
+            }
+
+            check("chunks: the first one resets",
+                  chunksFor([], []).length >= 1
+                  && chunksFor([], [])[0].indexOf("set_enabled(false)") !== -1, true);
+
+            check("chunks: a workspace row becomes a workspace_rule",
+                  chunksFor([], [{ workspace: "6", monitor: "HDMI-A-1" }])[1]
+                      .indexOf("hl.workspace_rule") !== -1, true);
+
+            check("chunks: a workspace placement uses the workspace field",
+                  /workspace = string\.char/.test(
+                      chunksFor([prog({ placement: { kind: "workspace", value: "6" } })], [])[1]), true);
+
+            check("chunks: a monitor placement uses the monitor field",
+                  /monitor = string\.char/.test(
+                      chunksFor([prog({ placement: { kind: "monitor", value: "DP-4" } })], [])[1]), true);
+
+            check("chunks: placement none produces no rule at all",
+                  chunksFor([prog({ placement: { kind: "none" } })], []).length, 1);
+
+            check("chunks: no chunk contains a quote character",
+                  (function() {
+                      var c = chunksFor([prog({}), prog({ id: "p2", "class": "LM[- ]?Studio" })],
+                                        [{ workspace: "1", monitor: "DP-4" }]);
+                      for (var i = 0; i < c.length; i++) {
+                          if (c[i].indexOf('"') !== -1 || c[i].indexOf("'") !== -1) return "found in chunk " + i;
+                      }
+                      return "clean";
+                  })(), "clean");
+
+            check("chunks: every value arrives as string.char",
+                  (function() {
+                      var c = chunksFor([prog({})], [])[1];
+                      // class, name, key and value -- four encoded strings per window rule
+                      return (c.match(/string\.char\(/g) || []).length >= 4;
+                  })(), true);
+
+            check("chunks: no chunk carries more than 20 rules",
+                  (function() {
+                      var many = [], i;
+                      for (i = 0; i < 200; i++) many.push(prog({ id: "p" + i }));
+                      var c = Model.buildRuleChunks(Model.validate(cfg(many, [])));
+                      for (i = 1; i < c.length; i++) {
+                          // Every chunk's prelude also defines
+                          // "local function put(key, rule)" -- a bare
+                          // /\bput\(/ matches that definition too and
+                          // overcounts by one per chunk. Match only actual
+                          // calls, which always take the shape put(string.char(...
+                          var n = (c[i].match(/\bput\(string\.char\(/g) || []).length;
+                          if (n > 20) return "chunk " + i + " has " + n;
+                      }
+                      return "within";
+                  })(), "within");
+
+            check("chunks: no chunk exceeds 64 KiB",
+                  (function() {
+                      var many = [], i;
+                      for (i = 0; i < 200; i++) many.push(prog({ id: "p" + i, "class": new Array(200).join("a") }));
+                      var c = Model.buildRuleChunks(Model.validate(cfg(many, [])));
+                      for (i = 0; i < c.length; i++) if (c[i].length > 65536) return "chunk " + i;
+                      return "within";
+                  })(), "within");
+
+            check("chunks: 200 programs and 99 workspaces stay within 20 eval calls",
+                  (function() {
+                      var many = [], rows = [], i;
+                      for (i = 0; i < 200; i++) many.push(prog({ id: "p" + i }));
+                      for (i = 1; i <= 99; i++) rows.push({ workspace: "" + i, monitor: "DP-4" });
+                      return Model.buildRuleChunks(Model.validate(cfg(many, rows))).length <= 20;
+                  })(), true);
+
+            checkThrows("chunks: a non-ascii class cannot be encoded",
+                        function() {
+                            Model.buildRuleChunks({ programs: [prog({ "class": "café" })], workspaces: [] });
+                        }, /byte out of range/);
+
+            // Panel.qml picks the hyprctl verb by looking at the payload's first
+            // characters: a rule block goes to eval, a dispatcher expression to
+            // dispatch. Nothing asserted that property, so it is pinned here.
+            check("chunks: every rule block starts with do -- the panel sends these to eval",
+                  (function() {
+                      var c = chunksFor([prog({})], [{ workspace: "1", monitor: "DP-4" }]);
+                      for (var i = 0; i < c.length; i++) {
+                          if (c[i].indexOf("do") !== 0) return "chunk " + i + " starts with " + c[i].substring(0, 8);
+                      }
+                      return "all";
+                  })(), "all");
+
             console.warn("total=" + total + " failed=" + failed);
             Qt.exit(failed === 0 ? 0 : 1);
         } catch (e) {

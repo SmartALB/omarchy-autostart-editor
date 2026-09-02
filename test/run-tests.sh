@@ -640,4 +640,13 @@ test_windows_filters_before_capping
 test_windows_survives_a_failing_hyprctl
 test_windows_survives_valid_json_that_is_not_an_array
 
+test_generated_lua_compiles() {
+    local out status
+    out="$(./lua-syntax.sh 2>&1)"; status=$?
+    assert_eq "lua: every generated chunk compiles" "$status" "0"
+    assert_contains "lua: at least three chunks were checked" "$out" "lua chunks: total="
+}
+
+test_generated_lua_compiles
+
 summary
