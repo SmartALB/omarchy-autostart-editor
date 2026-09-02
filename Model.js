@@ -57,9 +57,6 @@ function placementProblem(placement) {
     if (placement.kind === "none") {
         return placement.value === undefined ? null : "placement-invalid";
     }
-    if (placement.monitor !== undefined && placement.workspace !== undefined) {
-        return "placement-invalid";
-    }
     if (placement.kind === "workspace") {
         if (placement.monitor !== undefined) return "placement-invalid";
         return WORKSPACE_RE.test(placement.value) ? null : "placement-invalid";
