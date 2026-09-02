@@ -99,6 +99,31 @@ Item {
                             + root.watchdogSeconds + "s -- a Process may be stuck"
             // Release both queues. See the block comment above for why the
             // watchdog has to be a release path and what that costs.
+            //
+            // The two discards are NOT the same act. pendingChunkRun holds
+            // work belonging to the run being killed, so discarding it is
+            // simply part of killing that run. pendingLoad is a RELOAD
+            // REQUEST THAT HAD NOT STARTED YET -- nobody asked for it to be
+            // abandoned, and dropping it means the config save that produced
+            // it (or Omarchy's own `hyprctl reload`) is silently never
+            // applied. That is deliberate, and it is not retried:
+            //   - the Process that made this watchdog fire is, by the
+            //     watchdog's own premise, one that may never answer at all,
+            //     so a retry would re-dispatch straight back into it and
+            //     fire this same handler 30 s later, for the rest of the
+            //     session -- a loop, reported once per cycle, that no user
+            //     action can interrupt;
+            //   - retrying from HERE is also the shape round 2's N1 defect
+            //     had: the watchdog resuming the very sequence it exists to
+            //     end. The queue is released so a LATER load() works; it is
+            //     not re-entered from inside the kill.
+            // What the user gets instead: lastError says the sequence did
+            // not finish, and saving the configuration again (or any
+            // `configreloaded`) starts a fresh, fully-armed run -- because
+            // the flags above are now clear, which is the whole point of
+            // these four lines. A stall the user can clear that way is the
+            // cheaper failure; the alternatives are a 30 s error loop or the
+            // permanent latch this replaced.
             root.readBusy = false
             root.pendingLoad = null
             root.evalBusy = false

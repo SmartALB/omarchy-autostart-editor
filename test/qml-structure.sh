@@ -61,10 +61,49 @@ grep_stripped_all() {
 
 # 1 -- no PATH-resolved interpreter anywhere, in either quote style QML
 #      accepts (single or double).
+#
+#      MODEL.JS IS COVERED TOO, and was not before: qml_files() lists only
+#      ./*.qml, so the one file in this project that builds shell command
+#      TEXT was the one file never checked for a PATH-resolved tool name.
+#      That needs a different pattern, not just a wider file list. In a qml
+#      file a tool name is an argv element, so it is quote-delimited
+#      ("bash"); in Model.js it is a bare word inside a larger command
+#      string ("{ uwsm-app -- "), which the quote-delimited pattern cannot
+#      see at all. Word-boundary match there instead. The leading character
+#      class excludes "/" so an absolute /usr/bin/bash is not a hit, and
+#      excludes "-" so a hyphenated name is matched whole rather than by its
+#      tail.
+#
+#      Both halves share one verdict: this is one check about one property,
+#      not two checks that each cover half a project.
+interp_names="bash sh timeout hyprctl head jq setsid uwsm-app"
+
+# THE ONE EXEMPTION, named here so it is argued rather than invisible.
+# `uwsm-app` stays PATH-resolved on purpose, ruled in round 5:
+#   - the command field it wraps is PATH-resolved BY DESIGN -- users write
+#     `nimbus`, not `/usr/bin/nimbus` -- so an absolute path on the wrapper
+#     buys nothing the wrapped command does not already give away;
+#   - Omarchy's own helpers.lua emits `uwsm-app -- ` bare for that same
+#     reason, and matching the platform is worth more here than matching a
+#     rule written for interpreters we choose ourselves;
+#   - this is a marketplace plugin, and a system installing uwsm under a
+#     different prefix would break on a hard-coded path.
+# It is exempt BY NAME, not by line: a line carrying both `uwsm-app` and a
+# genuine offender still fails, because each name is scanned on its own.
+interp_exempt="uwsm-app"
+
 interp_pat="[\"'](bash|sh|timeout|hyprctl|head|jq|setsid)[\"']"
 hits="$(grep_stripped_all "$interp_pat" || true)"
-[[ -z "$hits" ]] && ok "no PATH-resolved interpreter in any qml file" \
-                 || bad "no PATH-resolved interpreter in any qml file" "$hits"
+model_clean="$(strip_comments Model.js)"
+for name in $interp_names; do
+  case " $interp_exempt " in *" $name "*) continue ;; esac
+  name_hits="$(grep -nE "(^|[^A-Za-z0-9_/-])${name}([^A-Za-z0-9_-]|$)" <<<"$model_clean" || true)"
+  [[ -n "$name_hits" ]] && hits="$hits
+$(sed "s#^#Model.js:#" <<<"$name_hits")"
+done
+hits="$(sed '/^$/d' <<<"$hits")"
+[[ -z "$hits" ]] && ok "no PATH-resolved interpreter in any qml file or Model.js" \
+                 || bad "no PATH-resolved interpreter in any qml file or Model.js" "$hits"
 
 # 2 -- the three absolute binaries are the only ones named, in either quote
 #      style.
@@ -510,25 +549,70 @@ hits="$(grep_stripped_all 'Process\.[A-Z][A-Za-z0-9_]*' || true)"
 [[ -z "$hits" ]] && ok "no bare Process.<CapitalisedName> enum reference in any qml file" \
                  || bad "no bare Process.<CapitalisedName> enum reference in any qml file" "$hits"
 
-# 9b -- and the constant that REPLACED that enum reference must still hold
-#       the right value. Check 9 above only forbids the old spelling: it
-#       stayed green when `normalExit: 0` was changed to `1`, which
-#       recreates round 3's defect exactly -- `exitStatus !== root.normalExit`
-#       then rejects every NORMAL exit, sessionStartOwed never comes down,
-#       launchAll() is never called, and the autostart silently never runs in
-#       any session, with every shell/QML/structural assertion green.
-#       QProcess::ExitStatus::NormalExit is fixed at 0 by Qt, so 0 is the only
-#       admissible binding, and every declaration of the property is checked
-#       -- not merely the first, and not merely that one exists.
-norm_decl_pat='property[[:space:]]+int[[:space:]]+normalExit[[:space:]]*:'
-norm_hits="$(grep_stripped_all "$norm_decl_pat" || true)"
-if [[ -z "$norm_hits" ]]; then
-  bad "normalExit is declared as 0 (QProcess::ExitStatus::NormalExit)" \
-      "no 'property int normalExit:' declaration found in any qml file -- the exitStatus comparison in markerProc has nothing vetted to read"
+# 9b -- the value the exitStatus comparison ACTUALLY READS must be 0 --
+#       followed through the reference, not asserted about a declaration in
+#       isolation. Check 9 above only forbids the old `Process.NormalExit`
+#       spelling. The first version of this check then asserted that a
+#       property NAMED normalExit was declared 0, which is half the
+#       property: it stayed green for a comparison reading a DIFFERENT
+#       property while a still-correct `normalExit: 0` sat declared
+#       elsewhere in the file. That recreates round 3's defect exactly --
+#       `exitStatus !== <something that is not 0>` rejects every NORMAL
+#       exit, sessionStartOwed never comes down, launchAll() is never
+#       reached, and the autostart silently never runs in any session, with
+#       every shell/QML/structural assertion green. It also needs no
+#       contrived decoy: an ordinary rename produces it.
+#
+#       So: find every explicit comparison against `exitStatus`, take the
+#       operand it reads, and require THAT identifier's own declaration to
+#       be 0. QProcess::ExitStatus::NormalExit is fixed at 0 by Qt, so 0 is
+#       the only admissible binding; a numeric literal operand is accepted
+#       only if it IS 0. Every declaration of the identifier is checked, not
+#       merely the first, and an identifier with no declaration anywhere is
+#       a FAIL -- `Process.NormalExit` lands there too, which is check 9's
+#       finding reached a second way.
+#
+#       A comparison shape this script cannot read is a FAIL, not a pass:
+#       same rule as check 8's onTriggered. Only an explicit
+#       `exitStatus <op> <operand>` is recognised -- a truthiness test
+#       (`if (exitStatus)`) is equivalent in behaviour but not readable
+#       here, and would have to be spelled out to pass. What this still
+#       cannot do, like check 5b, is verify that the operand's QUALIFIER
+#       resolves to the object holding that declaration; the identifier
+#       after the last dot is what is followed.
+exit_cmp_pat='exitStatus[[:space:]]*(!==|===|!=|==)[[:space:]]*[A-Za-z0-9_.]+'
+cmp_hits="$(grep_stripped_all "$exit_cmp_pat" || true)"
+if [[ -z "$cmp_hits" ]]; then
+  bad "the exitStatus comparison reads a constant declared 0" \
+      "no explicit 'exitStatus <op> <operand>' comparison found in any qml file -- markerProc's guard against trusting exitCode after a signal-kill either lost its comparison or wears a shape this script cannot read; either way it cannot be verified"
 else
-  norm_bad="$(grep -vE "${norm_decl_pat}[[:space:]]*0[[:space:]]*$" <<<"$norm_hits" || true)"
-  [[ -z "$norm_bad" ]] && ok "normalExit is declared as 0 (QProcess::ExitStatus::NormalExit)" \
-                       || bad "normalExit is declared as 0 (QProcess::ExitStatus::NormalExit)" "$norm_bad"
+  norm_bad=""
+  while IFS= read -r hit; do
+    [[ -z "$hit" ]] && continue
+    while IFS= read -r operand; do
+      [[ -z "$operand" ]] && continue
+      if [[ "$operand" =~ ^[0-9]+$ ]]; then
+        [[ "$operand" == "0" ]] || norm_bad="$norm_bad
+$hit -- compares against the literal $operand, and NormalExit is 0"
+        continue
+      fi
+      ident="${operand##*.}"
+      decl_pat="property[[:space:]]+int[[:space:]]+${ident}[[:space:]]*:"
+      decl="$(grep_stripped_all "$decl_pat" || true)"
+      if [[ -z "$decl" ]]; then
+        norm_bad="$norm_bad
+$hit -- reads '$operand', but no 'property int $ident:' is declared in any qml file"
+      else
+        wrong="$(grep -vE "${decl_pat}[[:space:]]*0[[:space:]]*$" <<<"$decl" || true)"
+        [[ -n "$wrong" ]] && norm_bad="$norm_bad
+$hit -- reads '$operand', declared as: $(tr '\n' ';' <<<"$wrong")"
+      fi
+    done < <(grep -oE "$exit_cmp_pat" <<<"$hit" \
+             | sed -E 's/^.*(!==|===|!=|==)[[:space:]]*([A-Za-z0-9_.]+)$/\2/')
+  done <<<"$cmp_hits"
+  norm_bad="$(sed '/^$/d' <<<"$norm_bad")"
+  [[ -z "$norm_bad" ]] && ok "the exitStatus comparison reads a constant declared 0" \
+                       || bad "the exitStatus comparison reads a constant declared 0" "$norm_bad"
 fi
 
 printf '\nqml structure: total=%d failed=%d\n' "$run" "$failed"
