@@ -12,68 +12,93 @@ import "Model.js" as Model
 // modules the LAST import read wins, so `Button` and `TextField` here are
 // qs.Ui's, not QtQuick.Controls'. QtQuick.Controls is still imported because
 // ScrollView / ScrollBar have no qs.Ui equivalent. Reordering these two lines
-// silently changes every button and every field in this file.
+// silently changes every control in this file.
 //
-// WHAT THIS ITEM IS NOT: it carries CONTENT, not a window. It declares no
-// KeyboardPanel and no FloatingWindow, so on its own it paints wherever its
-// host puts it. Whoever gives it a surface has to supply one, and the two
-// candidate routes need different things -- see the task report; this is an
-// open question the brief did not settle, not a decision taken here.
+// THE ROOT TYPE IS THE PLATFORM'S OWN `Panel` (qs.Ui), which is what eight of
+// the nine shipped panels use -- only disk-speedtest is a bare Item. It brings
+// the popup lifecycle with it: `bar`, `settings`, `moduleName`, `ipcTarget`,
+// `manageIpc`, `controller`, `popoutSwitching`, `popoutSwitchClosing` and a
+// readonly `opened: panelController.open`. NONE of those may be redeclared
+// here -- redeclaring a property the base type already has is a component
+// creation error, and nothing in this project can execute a file that imports
+// Quickshell to discover it. What IS overridden is open/close/toggle, which is
+// the shipped idiom (clock/Panel.qml:87-101 does exactly this).
+//
+// The visible surface is the KeyboardPanel at the bottom of this file. It is a
+// layer-shell popup anchored to the bar button, and the button lives in
+// BarWidget.qml -- which is why `anchorItem` and `hostWidget` are declared
+// here as plain properties and handed over by that widget's injectPanel().
+// Until they arrive the KeyboardPanel is simply not open, so an un-injected
+// panel is inert rather than a stray full-screen overlay.
 //
 // NO DECISION LIVES HERE. Everything this plugin decides -- what is valid,
 // what is rejected, what blocks a save, which hyprctl verb a payload needs,
-// which monitor a placement really lands on, which programs never appeared --
-// is in Model.js, where 100 assertions can reach it. This file holds state,
-// widgets, and the plumbing between them.
-Item {
+// which monitor a placement really lands on, which programs never appeared,
+// the wording of a rejection, the next free workspace number -- is in
+// Model.js, where the QML suite can reach it. This file holds state, widgets,
+// and the plumbing between them.
+Panel {
     id: root
+    moduleName: "smartalb.autostart"
+    ipcTarget: "smartalb.autostart"
+    // The bar owns the summon route: shell.summon reaches a bar-widget plugin
+    // through Bar.findPanelWidget, which needs open/close/opened on the WIDGET
+    // and never touches this object's IPC. Registering a target here as well
+    // would claim it once per monitor the bar is mounted on. clock/Panel.qml
+    // declares ipcTarget and switches management off for the same reason.
+    manageIpc: false
+
+    // Handed over by BarWidget.qml's injectPanel(). `anchorItem` is the bar
+    // button the popup positions itself against; `hostWidget` is what the bar
+    // identifies this panel BY -- the bar tracks the widget mounted in its
+    // slot, not this nested object, so the popout coordinator and
+    // switchPanelFrom both have to be given the widget.
+    property var anchorItem: null
+    property var hostWidget: null
+    readonly property var barIdentity: root.hostWidget || root
 
     Runners { id: run }
 
     signal counted(int programs, int placements)
 
     // --- lifecycle contract ----------------------------------------------
-    // BarWidget.qml calls open/close/toggle/closeForPopoutSwitch on the item
-    // its Loader produces and reads these two booleans back off it, so the
-    // names below are an interface, not an internal choice.
+    // `opened` and `popoutSwitchClosing` come from the base type and are NOT
+    // redeclared. open/close/toggle are overridden, the way the shipped panels
+    // override them, so opening can read the configuration first.
     //
-    // `opened` is backed by an explicit flag rather than by `visible`
-    // directly (which is what the task brief's sample did). QQuickItem's
-    // `visible` getter reports EFFECTIVE visibility: an ancestor that is
-    // itself invisible makes it read false however this item was set, and
-    // Omarchy's own weather widget hosts its panel in a `Loader { visible:
-    // false }` -- under that perfectly ordinary host shape `opened` would be
-    // permanently false, the bar's toggle would never see the panel as open,
-    // and close() would never be reached. The flag drives `visible`, so the
-    // two cannot disagree in the direction that matters.
-    property bool openState: false
-    readonly property bool opened: root.openState
-    visible: root.openState
-
-    // Likewise split in two: the contract name has to be readonly (the bar
-    // only ever reads it) and QML forbids assigning to a readonly property,
-    // so the writable half carries the state. The task brief asked for both
-    // `readonly property bool popoutSwitchClosing` and an assignment to it,
-    // which cannot both hold on one property.
-    property bool popoutSwitchClosingState: false
-    readonly property bool popoutSwitchClosing: root.popoutSwitchClosingState
-
-    function open()  { root.openState = true; root.reload() }
-    function close() { root.openState = false }
-    function toggle() { root.opened ? root.close() : root.open() }
-
-    // The reset is not decoration. The bar reads popoutSwitchClosing to tell
-    // "closing because another popout is taking over" from an ordinary close;
-    // left latched at true, every later close would keep claiming to be a
-    // handover. Omarchy's own qs.Ui Panel clears it through Qt.callLater for
-    // exactly this reason, and this follows it.
-    function closeForPopoutSwitch() {
-        root.popoutSwitchClosingState = true
-        root.close()
-        Qt.callLater(function() { root.popoutSwitchClosingState = false })
+    // The configuration is read on OPEN and not at creation: BarWidget.qml
+    // loads this object eagerly (that is how the anchor gets injected before
+    // the first open), and a panel that read the file at shell start would run
+    // four processes on every single QML reload for numbers nobody asked for.
+    function open() {
+        root.reload()
+        root.controller.show()
     }
 
-    Keys.onEscapePressed: root.close()
+    function close() {
+        // Collapsing on close is not tidiness. An expanded row left behind a
+        // closed popup keeps its text fields alive with focus, and nothing
+        // then reports the focus loss -- editorsFocused would stay above zero
+        // and the key catcher would be blocked for the rest of the session, so
+        // Escape would stop closing the panel. Nothing inside a closed popup
+        // can hold focus, so zero is a fact here, not a guess.
+        root.expandedRow = -1
+        root.editorsFocused = 0
+        root.controller.hide()
+    }
+
+    function toggle() {
+        if (root.opened) root.close()
+        else root.open()
+    }
+
+    // The bar identifies this panel by the widget, not by this object -- see
+    // barIdentity.
+    function switchPanel(direction) {
+        if (root.bar && typeof root.bar.switchPanelFrom === "function")
+            return root.bar.switchPanelFrom(root.barIdentity, direction)
+        return false
+    }
 
     Component.onDestruction: {
         readProc.running = false
@@ -85,14 +110,6 @@ Item {
         launchProc.running = false
         appsProc.running = false
     }
-
-    // Absolute paths, for the same reason Runners.qml gives: a PATH-resolved
-    // tool is a different program on a different machine. They live here
-    // rather than in Runners.qml because the temporary hand-over file belongs
-    // to the one call site below that needs it (refreshMatches) and to no
-    // other command shape in this plugin.
-    readonly property string binMktemp: "/usr/bin/mktemp"
-    readonly property string binRm: "/usr/bin/rm"
 
     // --- state ------------------------------------------------------------
     // `saved` is what is on disk, `draft` is what the panel shows. Apply moves
@@ -214,28 +231,9 @@ Item {
         for (var i = 0; i < names.length; i++) {
             if (names[i].present) { monitor = names[i].name; break }
         }
-        rows.push({ workspace: root.firstFreeWorkspace(rows), monitor: monitor })
+        rows.push({ workspace: Model.firstFreeWorkspace(rows), monitor: monitor })
         next.workspaces = rows
         root.commitDraft(next)
-    }
-
-    // The lowest workspace number 1-99 the table does not use yet, as the
-    // string the schema stores. "99" when all of them are taken -- the row is
-    // then a duplicate, validate() names it in the omissions list and the user
-    // changes it; that is a visible dead end rather than a silent refusal to
-    // add anything.
-    //
-    // This would rather live in Model.js with the rest of the derivations, and
-    // the task brief names no function there for it. Kept local and small
-    // instead of widening the tested module with something the QML suite does
-    // not cover.
-    function firstFreeWorkspace(rows) {
-        var used = Object.create(null), i
-        for (i = 0; i < rows.length; i++) used[String(rows[i].workspace)] = true
-        for (i = 1; i <= 99; i++) {
-            if (used[String(i)] === undefined) return String(i)
-        }
-        return "99"
     }
 
     // --- load -------------------------------------------------------------
@@ -276,24 +274,6 @@ Item {
         if (code === "bad-schema")    return "Unknown configuration version. " + detail
         if (code === "stale")         return "The file changed on disk since it was read. " + detail
         return String(code) + ": " + String(detail || "")
-    }
-
-    // Plain wording for the reason codes validate() reports, so the omissions
-    // list is readable by the person who has to fix the entry. An unknown code
-    // is passed through rather than guessed at.
-    function reasonText(code) {
-        if (code === "not-a-list")          return "this is not a list"
-        if (code === "id-invalid")          return "the internal id is malformed"
-        if (code === "id-duplicate")        return "two entries share one id"
-        if (code === "name-invalid")        return "the name is empty or too long"
-        if (code === "command-invalid")     return "the command is empty or too long"
-        if (code === "class-invalid")       return "the window class pattern is not allowed"
-        if (code === "enabled-invalid")     return "the on/off value is not a boolean"
-        if (code === "placement-invalid")   return "the placement is not allowed"
-        if (code === "workspace-invalid")   return "the workspace or monitor is not allowed"
-        if (code === "workspace-duplicate") return "this workspace is listed twice"
-        if (code === "too-many")            return "there are too many entries"
-        return String(code)
     }
 
     // --- live state -------------------------------------------------------
@@ -355,11 +335,11 @@ Item {
         // instead of being permanently masked by head's own success -- the
         // same defect that made the marker's claim gate inert in task 13.
         matchProc.command = run.runnerOut(
-            "f=$(" + root.binMktemp + ") || exit 1\n"
+            "f=$(" + run.binMktemp + ") || exit 1\n"
             + "printf '%s' " + Model.shellQuote(lines.join("\n") + "\n") + " > \"$f\"\n"
             + Model.shellQuote(run.binDir + "omarchy-autostart-windows") + " --match-file \"$f\"\n"
             + "s=$?\n"
-            + root.binRm + " -f -- \"$f\"\n"
+            + run.binRm + " -f -- \"$f\"\n"
             + "exit $s")
         matchProc.running = true
     }
@@ -647,559 +627,614 @@ Item {
     readonly property color warn: Color.urgent
     readonly property string fontFam: Style.font.family
 
-    implicitWidth: Style.space(460)
-    implicitHeight: body.implicitHeight
-    width: implicitWidth
-    height: implicitHeight
+    // How many text fields currently hold focus. PanelKeyCatcher below runs
+    // with Keys.priority: Keys.BeforeItem, so it takes keys even when a
+    // descendant has focus -- typing "x" in the Command field would otherwise
+    // fire deleteRequested and "j" would never reach the field at all. The
+    // platform's own instruction for this is `blocked: editor.activeFocus`,
+    // which assumes ONE editor; this panel has two per expanded row, created
+    // and destroyed by a Repeater, so a count is used instead of a reference.
+    //
+    // A count and not a boolean because focus moves by gaining first and
+    // losing second: with a boolean, tabbing from Command to Class would set
+    // true then false and unblock the catcher while the Class field was
+    // focused.
+    property int editorsFocused: 0
 
-    Column {
-        id: body
-        width: root.width
-        spacing: Style.spacing.md
+    function noteEditorFocus(gained) {
+        // Clamped rather than trusted. A delegate destroyed while its field
+        // still holds focus never reports the loss, and an unclamped counter
+        // would then sit above zero for the rest of the session with the key
+        // catcher permanently blocked -- Escape would stop closing the panel.
+        root.editorsFocused = Math.max(0, root.editorsFocused + (gained ? 1 : -1))
+    }
 
-        Text {
-            textFormat: Text.PlainText
-            text: "Autostart Layout"
-            color: root.fg
-            font.family: root.fontFam
-            font.pixelSize: Style.font.title
-            font.bold: true
-        }
+    // The visible surface. A layer-shell popup card anchored to the bar
+    // button, the same construction every shipped panel uses.
+    KeyboardPanel {
+        id: panel
+        anchorItem: root.anchorItem
+        owner: root.barIdentity
+        bar: root.bar
+        open: root.opened
+        focusTarget: keyCatcher
+        contentWidth: panel.fittedContentWidth(Style.space(520))
+        // No fixed upper bound: the content grows with the program list and
+        // with an expanded row. fittedContentHeight stays bounded by the
+        // screen, so "unbounded" still means "as tall as sensibly fits".
+        contentHeight: panel.fittedContentHeight(body.implicitHeight)
 
-        // --- programs -----------------------------------------------------
-        Row {
-            width: body.width
-            spacing: Style.spacing.controlGap
+        PanelKeyCatcher {
+            id: keyCatcher
+            anchors.fill: parent
+            blocked: root.editorsFocused > 0
+            onCloseRequested: root.close()
+            onTabRequested: function(direction) { root.switchPanel(direction) }
 
-            PanelSectionHeader {
-                text: "PROGRAMS"
-                foreground: root.fg
-                fontFamily: root.fontFam
-                elide: Text.ElideRight
-                width: Math.max(Style.space(40),
-                                body.width - addProgramButton.implicitWidth - parent.spacing)
-                anchors.verticalCenter: parent.verticalCenter
-            }
+            // A ScrollView so a growing list scrolls instead of being cut
+            // off, and because KeyboardPanel brings no availableWidth of its
+            // own while ScrollView does.
+            ScrollView {
+                id: scrollArea
+                anchors.fill: parent
+                clip: true
+                ScrollBar.horizontal.policy: ScrollBar.AlwaysOff
+                ScrollBar.vertical.policy: body.implicitHeight > height
+                                           ? ScrollBar.AsNeeded : ScrollBar.AlwaysOff
 
-            Button {
-                id: addProgramButton
-                text: "+ Add"
-                foreground: root.fg
-                fontFamily: root.fontFam
-                bordered: true
-                anchors.verticalCenter: parent.verticalCenter
-                onClicked: root.openAdd()
-            }
-        }
-
-        Text {
-            textFormat: Text.PlainText
-            width: body.width
-            visible: root.programRowCount === 0
-            text: "No programs configured yet."
-            color: root.fg
-            opacity: 0.7
-            font.family: root.fontFam
-            font.pixelSize: Style.font.caption
-            wrapMode: Text.WordWrap
-        }
-
-        Repeater {
-            // OVER THE DRAFT, not over validate(...).programs, and the task
-            // brief's table said the latter. Bound to the validated list, the
-            // row being edited DISAPPEARS the instant its intermediate text is
-            // invalid: clearing the Command field to retype it makes the whole
-            // entry fail validation, the row unmounts under the cursor, and
-            // what the user typed is gone. The validated list still drives
-            // everything it should -- the counts, the missing list, the
-            // omissions in the footer -- and a row that is currently left out
-            // says so on the row itself, which the brief's arrangement could
-            // only say in the footer about a row no longer on screen.
-            //
-            // An int model, see programRowCount.
-            model: root.programRowCount
-
-            delegate: Column {
-                id: programRow
-                width: body.width
-                spacing: Style.spacing.xs
-
-                readonly property var program: (root.draft.programs || [])[index]
-                                               || root.blankProgram()
-                readonly property bool isExpanded: root.expandedRow === index
-                readonly property bool isRunning:
-                    root.missing.indexOf(programRow.program.id) === -1
-
-                // Identity, not a comparison: validate() pushes the SAME
-                // objects it was given, so an entry that survived is present
-                // in checked.programs by reference. If that ever stopped
-                // holding, every row would carry the marker at once -- visible
-                // on first sight, rather than silently wrong.
-                readonly property bool isAccepted:
-                    root.checked.programs.indexOf(programRow.program) !== -1
-
-                Row {
-                    width: programRow.width
-                    spacing: Style.spacing.controlGap
-
-                    ToggleSwitch {
-                        checked: programRow.program.enabled === true
-                        anchors.verticalCenter: parent.verticalCenter
-                        onToggled: root.setProgramField(index, "enabled",
-                                                        !(programRow.program.enabled === true))
-                    }
+                Column {
+                    id: body
+                    width: scrollArea.availableWidth
+                    spacing: Style.spacing.md
 
                     Text {
                         textFormat: Text.PlainText
-                        text: programRow.isRunning ? root.glyphRunning : root.glyphNotRunning
-                        color: programRow.isRunning ? root.fg : root.warn
-                        opacity: programRow.program.enabled === true ? 1.0 : 0.4
+                        text: "Autostart Layout"
+                        color: root.fg
                         font.family: root.fontFam
-                        font.pixelSize: Style.font.iconSmall
-                        anchors.verticalCenter: parent.verticalCenter
+                        font.pixelSize: Style.font.title
+                        font.bold: true
                     }
 
-                    Button {
-                        text: String(programRow.program.name || "(no name)")
-                        foreground: root.fg
-                        fontFamily: root.fontFam
-                        leftAlign: true
-                        width: Math.max(Style.space(80), programRow.width - Style.space(250))
-                        anchors.verticalCenter: parent.verticalCenter
-                        onClicked: root.expandedRow = programRow.isExpanded ? -1 : index
+                    // --- programs -----------------------------------------------------
+                    Row {
+                        width: body.width
+                        spacing: Style.spacing.controlGap
+
+                        PanelSectionHeader {
+                            text: "PROGRAMS"
+                            foreground: root.fg
+                            fontFamily: root.fontFam
+                            elide: Text.ElideRight
+                            width: Math.max(Style.space(40),
+                                            body.width - addProgramButton.implicitWidth - parent.spacing)
+                            anchors.verticalCenter: parent.verticalCenter
+                        }
+
+                        Button {
+                            id: addProgramButton
+                            text: "+ Add"
+                            foreground: root.fg
+                            fontFamily: root.fontFam
+                            bordered: true
+                            anchors.verticalCenter: parent.verticalCenter
+                            onClicked: root.openAdd()
+                        }
                     }
 
                     Text {
                         textFormat: Text.PlainText
-                        text: root.placementText(programRow.program)
+                        width: body.width
+                        visible: root.programRowCount === 0
+                        text: "No programs configured yet."
                         color: root.fg
                         opacity: 0.7
                         font.family: root.fontFam
                         font.pixelSize: Style.font.caption
-                        anchors.verticalCenter: parent.verticalCenter
+                        wrapMode: Text.WordWrap
                     }
 
-                    PanelActionButton {
-                        iconText: programRow.isExpanded ? root.glyphExpanded : root.glyphCollapsed
-                        tooltipText: programRow.isExpanded ? "Collapse" : "Edit"
-                        foreground: root.fg
-                        fontFamily: root.fontFam
-                        anchors.verticalCenter: parent.verticalCenter
-                        onClicked: root.expandedRow = programRow.isExpanded ? -1 : index
+                    Repeater {
+                        // OVER THE DRAFT, not over validate(...).programs, and the task
+                        // brief's table said the latter. Bound to the validated list, the
+                        // row being edited DISAPPEARS the instant its intermediate text is
+                        // invalid: clearing the Command field to retype it makes the whole
+                        // entry fail validation, the row unmounts under the cursor, and
+                        // what the user typed is gone. The validated list still drives
+                        // everything it should -- the counts, the missing list, the
+                        // omissions in the footer -- and a row that is currently left out
+                        // says so on the row itself, which the brief's arrangement could
+                        // only say in the footer about a row no longer on screen.
+                        //
+                        // An int model, see programRowCount.
+                        model: root.programRowCount
+
+                        delegate: Column {
+                            id: programRow
+                            width: body.width
+                            spacing: Style.spacing.xs
+
+                            readonly property var program: (root.draft.programs || [])[index]
+                                                           || root.blankProgram()
+                            readonly property bool isExpanded: root.expandedRow === index
+                            readonly property bool isRunning:
+                                root.missing.indexOf(programRow.program.id) === -1
+
+                            // Identity, not a comparison: validate() pushes the SAME
+                            // objects it was given, so an entry that survived is present
+                            // in checked.programs by reference. If that ever stopped
+                            // holding, every row would carry the marker at once -- visible
+                            // on first sight, rather than silently wrong.
+                            readonly property bool isAccepted:
+                                root.checked.programs.indexOf(programRow.program) !== -1
+
+                            Row {
+                                width: programRow.width
+                                spacing: Style.spacing.controlGap
+
+                                ToggleSwitch {
+                                    checked: programRow.program.enabled === true
+                                    anchors.verticalCenter: parent.verticalCenter
+                                    onToggled: root.setProgramField(index, "enabled",
+                                                                    !(programRow.program.enabled === true))
+                                }
+
+                                Text {
+                                    textFormat: Text.PlainText
+                                    text: programRow.isRunning ? root.glyphRunning : root.glyphNotRunning
+                                    color: programRow.isRunning ? root.fg : root.warn
+                                    opacity: programRow.program.enabled === true ? 1.0 : 0.4
+                                    font.family: root.fontFam
+                                    font.pixelSize: Style.font.iconSmall
+                                    anchors.verticalCenter: parent.verticalCenter
+                                }
+
+                                Button {
+                                    text: String(programRow.program.name || "(no name)")
+                                    foreground: root.fg
+                                    fontFamily: root.fontFam
+                                    leftAlign: true
+                                    width: Math.max(Style.space(80), programRow.width - Style.space(250))
+                                    anchors.verticalCenter: parent.verticalCenter
+                                    onClicked: root.expandedRow = programRow.isExpanded ? -1 : index
+                                }
+
+                                Text {
+                                    textFormat: Text.PlainText
+                                    text: root.placementText(programRow.program)
+                                    color: root.fg
+                                    opacity: 0.7
+                                    font.family: root.fontFam
+                                    font.pixelSize: Style.font.caption
+                                    anchors.verticalCenter: parent.verticalCenter
+                                }
+
+                                PanelActionButton {
+                                    iconText: programRow.isExpanded ? root.glyphExpanded : root.glyphCollapsed
+                                    tooltipText: programRow.isExpanded ? "Collapse" : "Edit"
+                                    foreground: root.fg
+                                    fontFamily: root.fontFam
+                                    anchors.verticalCenter: parent.verticalCenter
+                                    onClicked: root.expandedRow = programRow.isExpanded ? -1 : index
+                                }
+                            }
+
+                            Text {
+                                textFormat: Text.PlainText
+                                width: programRow.width
+                                visible: !programRow.isAccepted
+                                text: "This entry is left out until it is fixed; see the bottom of the panel."
+                                color: root.warn
+                                font.family: root.fontFam
+                                font.pixelSize: Style.font.caption
+                                wrapMode: Text.WordWrap
+                            }
+
+                            // --- the expanded detail editor, at the row ---------------
+                            Column {
+                                width: programRow.width
+                                visible: programRow.isExpanded
+                                spacing: Style.spacing.sm
+
+                                TextField {
+                                    width: programRow.width
+                                    placeholderText: "Command"
+                                    text: String(programRow.program.command || "")
+                                    foreground: root.fg
+                                    // Nothing is written to disk here. The field edits the
+                                    // draft and nothing else; Apply is the only route to
+                                    // the file and to hyprctl, because moving real windows
+                                    // across real screens must not be a side effect of a
+                                    // keystroke.
+                                    onTextChanged: root.setProgramField(index, "command", text)
+                                    onActiveFocusChanged: root.noteEditorFocus(activeFocus)
+                                }
+
+                                Row {
+                                    width: programRow.width
+                                    spacing: Style.spacing.controlGap
+
+                                    TextField {
+                                        width: Math.max(Style.space(80),
+                                                        programRow.width - fromWindowButton.implicitWidth
+                                                        - parent.spacing)
+                                        placeholderText: "Class"
+                                        text: String(programRow.program["class"] || "")
+                                        foreground: root.fg
+                                        onTextChanged: root.setProgramField(index, "class", text)
+                                        onActiveFocusChanged: root.noteEditorFocus(activeFocus)
+                                    }
+
+                                    Button {
+                                        id: fromWindowButton
+                                        text: "From window"
+                                        foreground: root.fg
+                                        fontFamily: root.fontFam
+                                        bordered: true
+                                        anchors.verticalCenter: parent.verticalCenter
+                                        onClicked: root.pickForId = programRow.program.id
+                                    }
+                                }
+
+                                Row {
+                                    spacing: Style.spacing.controlGap
+
+                                    Button {
+                                        text: "No placement"
+                                        foreground: root.fg
+                                        fontFamily: root.fontFam
+                                        bordered: true
+                                        selected: root.placementKind(programRow.program) === "none"
+                                        onClicked: root.setProgramField(index, "placement", { kind: "none" })
+                                    }
+                                    Button {
+                                        text: "Workspace"
+                                        foreground: root.fg
+                                        fontFamily: root.fontFam
+                                        bordered: true
+                                        selected: root.placementKind(programRow.program) === "workspace"
+                                        onClicked: root.setProgramField(index, "placement",
+                                                                        { kind: "workspace", value: "1" })
+                                    }
+                                    Button {
+                                        text: "Monitor"
+                                        foreground: root.fg
+                                        fontFamily: root.fontFam
+                                        bordered: true
+                                        selected: root.placementKind(programRow.program) === "monitor"
+                                        onClicked: {
+                                            var names = root.monitorNames()
+                                            var first = names.length > 0 ? names[0].name : ""
+                                            root.setProgramField(index, "placement",
+                                                                 { kind: "monitor", value: first })
+                                        }
+                                    }
+                                }
+
+                                Row {
+                                    spacing: Style.spacing.controlGap
+                                    visible: root.placementKind(programRow.program) === "workspace"
+
+                                    Dropdown {
+                                        label: "Workspace"
+                                        options: root.workspaceOptions()
+                                        value: root.placementValue(programRow.program)
+                                        foreground: root.fg
+                                        fontFamily: root.fontFam
+                                        onChanged: function(v) {
+                                            root.setProgramField(index, "placement",
+                                                                 { kind: "workspace", value: v })
+                                        }
+                                    }
+
+                                    Text {
+                                        textFormat: Text.PlainText
+                                        // Derived, never edited: with a workspace placement
+                                        // the monitor IS whatever that workspace is pinned
+                                        // to in the table below. Two editable fields would
+                                        // be two answers to one question.
+                                        text: {
+                                            if (root.placementKind(programRow.program) !== "workspace") return ""
+                                            var m = Model.effectiveMonitor(programRow.program,
+                                                                           root.draft.workspaces)
+                                            return m === "" ? "workspace is not pinned to a monitor" : m
+                                        }
+                                        color: root.fg
+                                        opacity: 0.5
+                                        font.family: root.fontFam
+                                        font.pixelSize: Style.font.caption
+                                        anchors.verticalCenter: parent.verticalCenter
+                                    }
+                                }
+
+                                Dropdown {
+                                    label: "Monitor"
+                                    visible: root.placementKind(programRow.program) === "monitor"
+                                    options: root.monitorOptions()
+                                    value: root.placementValue(programRow.program)
+                                    foreground: root.fg
+                                    fontFamily: root.fontFam
+                                    onChanged: function(v) {
+                                        root.setProgramField(index, "placement",
+                                                             { kind: "monitor", value: v })
+                                    }
+                                }
+
+                                Button {
+                                    text: "Remove"
+                                    foreground: root.warn
+                                    fontFamily: root.fontFam
+                                    bordered: true
+                                    onClicked: root.removeProgram(index)
+                                }
+                            }
+
+                            PanelSeparator {
+                                width: programRow.width
+                                foreground: root.fg
+                            }
+                        }
                     }
-                }
 
-                Text {
-                    textFormat: Text.PlainText
-                    width: programRow.width
-                    visible: !programRow.isAccepted
-                    text: "This entry is left out until it is fixed; see the bottom of the panel."
-                    color: root.warn
-                    font.family: root.fontFam
-                    font.pixelSize: Style.font.caption
-                    wrapMode: Text.WordWrap
-                }
-
-                // --- the expanded detail editor, at the row ---------------
-                Column {
-                    width: programRow.width
-                    visible: programRow.isExpanded
-                    spacing: Style.spacing.sm
-
-                    TextField {
-                        width: programRow.width
-                        placeholderText: "Command"
-                        text: String(programRow.program.command || "")
-                        foreground: root.fg
-                        // Nothing is written to disk here. The field edits the
-                        // draft and nothing else; Apply is the only route to
-                        // the file and to hyprctl, because moving real windows
-                        // across real screens must not be a side effect of a
-                        // keystroke.
-                        onTextChanged: root.setProgramField(index, "command", text)
-                    }
-
+                    // --- workspace to monitor -----------------------------------------
                     Row {
-                        width: programRow.width
+                        width: body.width
                         spacing: Style.spacing.controlGap
 
-                        TextField {
-                            width: Math.max(Style.space(80),
-                                            programRow.width - fromWindowButton.implicitWidth
-                                            - parent.spacing)
-                            placeholderText: "Class"
-                            text: String(programRow.program["class"] || "")
+                        PanelSectionHeader {
+                            text: "WORKSPACE → MONITOR"
                             foreground: root.fg
-                            onTextChanged: root.setProgramField(index, "class", text)
+                            fontFamily: root.fontFam
+                            elide: Text.ElideRight
+                            width: Math.max(Style.space(40),
+                                            body.width - addWorkspaceButton.implicitWidth - parent.spacing)
+                            anchors.verticalCenter: parent.verticalCenter
                         }
 
                         Button {
-                            id: fromWindowButton
-                            text: "From window"
+                            id: addWorkspaceButton
+                            text: "+ Add"
                             foreground: root.fg
                             fontFamily: root.fontFam
                             bordered: true
                             anchors.verticalCenter: parent.verticalCenter
-                            onClicked: root.pickForId = programRow.program.id
+                            onClicked: root.addWorkspaceRow()
                         }
                     }
 
-                    Row {
-                        spacing: Style.spacing.controlGap
+                    Repeater {
+                        // The DRAFT rows, not the validated ones: a row the allowlist
+                        // refuses has to stay on screen to be corrected.
+                        model: root.workspaceRowCount
 
-                        Button {
-                            text: "No placement"
-                            foreground: root.fg
-                            fontFamily: root.fontFam
-                            bordered: true
-                            selected: root.placementKind(programRow.program) === "none"
-                            onClicked: root.setProgramField(index, "placement", { kind: "none" })
-                        }
-                        Button {
-                            text: "Workspace"
-                            foreground: root.fg
-                            fontFamily: root.fontFam
-                            bordered: true
-                            selected: root.placementKind(programRow.program) === "workspace"
-                            onClicked: root.setProgramField(index, "placement",
-                                                            { kind: "workspace", value: "1" })
-                        }
-                        Button {
-                            text: "Monitor"
-                            foreground: root.fg
-                            fontFamily: root.fontFam
-                            bordered: true
-                            selected: root.placementKind(programRow.program) === "monitor"
-                            onClicked: {
-                                var names = root.monitorNames()
-                                var first = names.length > 0 ? names[0].name : ""
-                                root.setProgramField(index, "placement",
-                                                     { kind: "monitor", value: first })
+                        delegate: Row {
+                            id: workspaceRow
+                            width: body.width
+                            spacing: Style.spacing.controlGap
+
+                            readonly property var wsRow: (root.draft.workspaces || [])[index]
+                                                         || ({ workspace: "", monitor: "" })
+
+                            Text {
+                                textFormat: Text.PlainText
+                                text: "Workspace " + String(workspaceRow.wsRow.workspace || "?")
+                                color: root.fg
+                                font.family: root.fontFam
+                                font.pixelSize: Style.font.body
+                                width: Style.space(120)
+                                elide: Text.ElideRight
+                                anchors.verticalCenter: parent.verticalCenter
+                            }
+
+                            Dropdown {
+                                showLabel: false
+                                options: root.monitorOptions()
+                                value: String(workspaceRow.wsRow.monitor || "")
+                                foreground: root.fg
+                                fontFamily: root.fontFam
+                                anchors.verticalCenter: parent.verticalCenter
+                                onChanged: function(v) { root.setWorkspaceMonitor(index, v) }
+                            }
+
+                            PanelActionButton {
+                                iconText: root.glyphRemove
+                                tooltipText: "Remove this row"
+                                foreground: root.warn
+                                fontFamily: root.fontFam
+                                anchors.verticalCenter: parent.verticalCenter
+                                onClicked: root.removeWorkspaceRow(index)
                             }
                         }
                     }
 
-                    Row {
-                        spacing: Style.spacing.controlGap
-                        visible: root.placementKind(programRow.program) === "workspace"
+                    PanelSeparator {
+                        width: body.width
+                        foreground: root.fg
+                    }
 
-                        Dropdown {
-                            label: "Workspace"
-                            options: root.workspaceOptions()
-                            value: root.placementValue(programRow.program)
-                            foreground: root.fg
-                            fontFamily: root.fontFam
-                            onChanged: function(v) {
-                                root.setProgramField(index, "placement",
-                                                     { kind: "workspace", value: v })
-                            }
-                        }
+                    // --- not running --------------------------------------------------
+                    // THIS IS THE ONLY REPORT OF A LAUNCH FAILURE THAT EVER REACHES THE
+                    // USER, and it is measured, not assumed: through the wrapper an
+                    // entry's own stdio is closed, so a program that does not exist, one
+                    // that exits 127, one that exits non-zero and one that writes its own
+                    // error are ALL silent -- empty stderr, wrapper exit 0. Re-opening
+                    // that stream is what made the session watchdog report a false error
+                    // at every single login. So "configured, but no window ever matched"
+                    // is not decoration here; it is the entire error report for a
+                    // misspelled program name, and it is shown plainly rather than tucked
+                    // away.
+                    Row {
+                        width: body.width
+                        spacing: Style.spacing.controlGap
 
                         Text {
                             textFormat: Text.PlainText
-                            // Derived, never edited: with a workspace placement
-                            // the monitor IS whatever that workspace is pinned
-                            // to in the table below. Two editable fields would
-                            // be two answers to one question.
-                            text: {
-                                if (root.placementKind(programRow.program) !== "workspace") return ""
-                                var m = Model.effectiveMonitor(programRow.program,
-                                                               root.draft.workspaces)
-                                return m === "" ? "workspace is not pinned to a monitor" : m
-                            }
-                            color: root.fg
-                            opacity: 0.5
+                            text: root.missing.length === 0
+                                  ? "Every enabled program has a window."
+                                  : root.missing.length + (root.missing.length === 1
+                                        ? " enabled program is configured but no window ever matched it"
+                                        : " enabled programs are configured but no window ever matched them")
+                            color: root.missing.length === 0 ? root.fg : root.warn
                             font.family: root.fontFam
                             font.pixelSize: Style.font.caption
+                            wrapMode: Text.WordWrap
+                            width: Math.max(Style.space(80), body.width - Style.space(150))
                             anchors.verticalCenter: parent.verticalCenter
+                        }
+
+                        Button {
+                            text: "Launch missing"
+                            visible: root.missing.length > 0
+                            foreground: root.fg
+                            fontFamily: root.fontFam
+                            bordered: true
+                            anchors.verticalCenter: parent.verticalCenter
+                            onClicked: root.launchMissing()
                         }
                     }
 
-                    Dropdown {
-                        label: "Monitor"
-                        visible: root.placementKind(programRow.program) === "monitor"
-                        options: root.monitorOptions()
-                        value: root.placementValue(programRow.program)
-                        foreground: root.fg
-                        fontFamily: root.fontFam
-                        onChanged: function(v) {
-                            root.setProgramField(index, "placement",
-                                                 { kind: "monitor", value: v })
-                        }
+                    Text {
+                        textFormat: Text.PlainText
+                        width: body.width
+                        visible: root.missing.length > 0
+                        text: "A program that never appears is usually a misspelled command "
+                            + "or a class pattern that matches nothing. Open the row and check both."
+                        color: root.fg
+                        opacity: 0.7
+                        font.family: root.fontFam
+                        font.pixelSize: Style.font.caption
+                        wrapMode: Text.WordWrap
                     }
 
                     Button {
-                        text: "Remove"
-                        foreground: root.warn
+                        text: "Import current session"
+                        visible: (root.draft.programs || []).length === 0
+                        foreground: root.fg
                         fontFamily: root.fontFam
                         bordered: true
-                        onClicked: root.removeProgram(index)
+                        onClicked: root.importSession()
+                    }
+
+                    PanelSeparator {
+                        width: body.width
+                        foreground: root.fg
+                    }
+
+                    // --- footer -------------------------------------------------------
+                    Text {
+                        textFormat: Text.PlainText
+                        width: body.width
+                        visible: root.errorText !== ""
+                        text: root.errorText
+                        color: root.warn
+                        font.family: root.fontFam
+                        font.pixelSize: Style.font.caption
+                        wrapMode: Text.WordWrap
+                    }
+
+                    // Omissions: everything else was applied. Not the same thing as a
+                    // contradiction below, which stops the apply entirely.
+                    Column {
+                        width: body.width
+                        spacing: Style.spacing.xxs
+                        visible: root.rejected.length > 0
+
+                        Text {
+                            textFormat: Text.PlainText
+                            text: "Left out:"
+                            color: root.fg
+                            font.family: root.fontFam
+                            font.pixelSize: Style.font.caption
+                        }
+                        Repeater {
+                            model: root.rejected
+                            delegate: Text {
+                                required property var modelData
+                                textFormat: Text.PlainText
+                                width: body.width
+                                text: String(modelData.label) + ": " + Model.reasonText(modelData.reason)
+                                color: root.fg
+                                opacity: 0.8
+                                font.family: root.fontFam
+                                font.pixelSize: Style.font.caption
+                                wrapMode: Text.WordWrap
+                            }
+                        }
+                    }
+
+                    // Contradictions: these STOP the apply. Two programs matching the same
+                    // window class but wanting different places cannot both be honoured,
+                    // and letting one silently win inside the compositor is what this
+                    // refuses to do.
+                    Column {
+                        width: body.width
+                        spacing: Style.spacing.xxs
+                        visible: root.blocked.length > 0
+
+                        Text {
+                            textFormat: Text.PlainText
+                            text: "Cannot be applied:"
+                            color: root.warn
+                            font.family: root.fontFam
+                            font.pixelSize: Style.font.caption
+                        }
+                        Repeater {
+                            model: root.blocked
+                            delegate: Text {
+                                required property var modelData
+                                textFormat: Text.PlainText
+                                width: body.width
+                                text: modelData.labels.join(", ")
+                                    + " match the same window class but want different places"
+                                color: root.warn
+                                font.family: root.fontFam
+                                font.pixelSize: Style.font.caption
+                                wrapMode: Text.WordWrap
+                            }
+                        }
+                    }
+
+                    Row {
+                        width: body.width
+                        spacing: Style.spacing.controlGap
+
+                        Text {
+                            textFormat: Text.PlainText
+                            // dirtyCount is a FLAG, not a tally: markDirty compares the
+                            // whole draft against the whole saved document, so it is 0 or
+                            // 1, and the wording says so instead of pretending to count.
+                            text: root.dirtyCount > 0 ? "unsaved changes" : "no changes pending"
+                            color: root.fg
+                            opacity: root.dirtyCount > 0 ? 1.0 : 0.6
+                            font.family: root.fontFam
+                            font.pixelSize: Style.font.caption
+                            width: Math.max(Style.space(60), body.width - Style.space(220))
+                            anchors.verticalCenter: parent.verticalCenter
+                        }
+
+                        Button {
+                            text: "Revert"
+                            enabled: root.dirtyCount > 0
+                            opacity: enabled ? 1.0 : 0.4
+                            foreground: root.fg
+                            fontFamily: root.fontFam
+                            bordered: true
+                            anchors.verticalCenter: parent.verticalCenter
+                            onClicked: root.revert()
+                        }
+
+                        Button {
+                            text: "Apply"
+                            enabled: root.dirtyCount > 0 && root.blocked.length === 0
+                            opacity: enabled ? 1.0 : 0.4
+                            foreground: root.fg
+                            fontFamily: root.fontFam
+                            bordered: true
+                            anchors.verticalCenter: parent.verticalCenter
+                            onClicked: root.apply()
+                        }
                     }
                 }
-
-                PanelSeparator {
-                    width: programRow.width
-                    foreground: root.fg
-                }
-            }
-        }
-
-        // --- workspace to monitor -----------------------------------------
-        Row {
-            width: body.width
-            spacing: Style.spacing.controlGap
-
-            PanelSectionHeader {
-                text: "WORKSPACE → MONITOR"
-                foreground: root.fg
-                fontFamily: root.fontFam
-                elide: Text.ElideRight
-                width: Math.max(Style.space(40),
-                                body.width - addWorkspaceButton.implicitWidth - parent.spacing)
-                anchors.verticalCenter: parent.verticalCenter
-            }
-
-            Button {
-                id: addWorkspaceButton
-                text: "+ Add"
-                foreground: root.fg
-                fontFamily: root.fontFam
-                bordered: true
-                anchors.verticalCenter: parent.verticalCenter
-                onClicked: root.addWorkspaceRow()
-            }
-        }
-
-        Repeater {
-            // The DRAFT rows, not the validated ones: a row the allowlist
-            // refuses has to stay on screen to be corrected.
-            model: root.workspaceRowCount
-
-            delegate: Row {
-                id: workspaceRow
-                width: body.width
-                spacing: Style.spacing.controlGap
-
-                readonly property var wsRow: (root.draft.workspaces || [])[index]
-                                             || ({ workspace: "", monitor: "" })
-
-                Text {
-                    textFormat: Text.PlainText
-                    text: "Workspace " + String(workspaceRow.wsRow.workspace || "?")
-                    color: root.fg
-                    font.family: root.fontFam
-                    font.pixelSize: Style.font.body
-                    width: Style.space(120)
-                    elide: Text.ElideRight
-                    anchors.verticalCenter: parent.verticalCenter
-                }
-
-                Dropdown {
-                    showLabel: false
-                    options: root.monitorOptions()
-                    value: String(workspaceRow.wsRow.monitor || "")
-                    foreground: root.fg
-                    fontFamily: root.fontFam
-                    anchors.verticalCenter: parent.verticalCenter
-                    onChanged: function(v) { root.setWorkspaceMonitor(index, v) }
-                }
-
-                PanelActionButton {
-                    iconText: root.glyphRemove
-                    tooltipText: "Remove this row"
-                    foreground: root.warn
-                    fontFamily: root.fontFam
-                    anchors.verticalCenter: parent.verticalCenter
-                    onClicked: root.removeWorkspaceRow(index)
-                }
-            }
-        }
-
-        PanelSeparator {
-            width: body.width
-            foreground: root.fg
-        }
-
-        // --- not running --------------------------------------------------
-        // THIS IS THE ONLY REPORT OF A LAUNCH FAILURE THAT EVER REACHES THE
-        // USER, and it is measured, not assumed: through the wrapper an
-        // entry's own stdio is closed, so a program that does not exist, one
-        // that exits 127, one that exits non-zero and one that writes its own
-        // error are ALL silent -- empty stderr, wrapper exit 0. Re-opening
-        // that stream is what made the session watchdog report a false error
-        // at every single login. So "configured, but no window ever matched"
-        // is not decoration here; it is the entire error report for a
-        // misspelled program name, and it is shown plainly rather than tucked
-        // away.
-        Row {
-            width: body.width
-            spacing: Style.spacing.controlGap
-
-            Text {
-                textFormat: Text.PlainText
-                text: root.missing.length === 0
-                      ? "Every enabled program has a window."
-                      : root.missing.length + (root.missing.length === 1
-                            ? " enabled program is configured but no window ever matched it"
-                            : " enabled programs are configured but no window ever matched them")
-                color: root.missing.length === 0 ? root.fg : root.warn
-                font.family: root.fontFam
-                font.pixelSize: Style.font.caption
-                wrapMode: Text.WordWrap
-                width: Math.max(Style.space(80), body.width - Style.space(150))
-                anchors.verticalCenter: parent.verticalCenter
-            }
-
-            Button {
-                text: "Launch missing"
-                visible: root.missing.length > 0
-                foreground: root.fg
-                fontFamily: root.fontFam
-                bordered: true
-                anchors.verticalCenter: parent.verticalCenter
-                onClicked: root.launchMissing()
-            }
-        }
-
-        Text {
-            textFormat: Text.PlainText
-            width: body.width
-            visible: root.missing.length > 0
-            text: "A program that never appears is usually a misspelled command "
-                + "or a class pattern that matches nothing. Open the row and check both."
-            color: root.fg
-            opacity: 0.7
-            font.family: root.fontFam
-            font.pixelSize: Style.font.caption
-            wrapMode: Text.WordWrap
-        }
-
-        Button {
-            text: "Import current session"
-            visible: (root.draft.programs || []).length === 0
-            foreground: root.fg
-            fontFamily: root.fontFam
-            bordered: true
-            onClicked: root.importSession()
-        }
-
-        PanelSeparator {
-            width: body.width
-            foreground: root.fg
-        }
-
-        // --- footer -------------------------------------------------------
-        Text {
-            textFormat: Text.PlainText
-            width: body.width
-            visible: root.errorText !== ""
-            text: root.errorText
-            color: root.warn
-            font.family: root.fontFam
-            font.pixelSize: Style.font.caption
-            wrapMode: Text.WordWrap
-        }
-
-        // Omissions: everything else was applied. Not the same thing as a
-        // contradiction below, which stops the apply entirely.
-        Column {
-            width: body.width
-            spacing: Style.spacing.xxs
-            visible: root.rejected.length > 0
-
-            Text {
-                textFormat: Text.PlainText
-                text: "Left out:"
-                color: root.fg
-                font.family: root.fontFam
-                font.pixelSize: Style.font.caption
-            }
-            Repeater {
-                model: root.rejected
-                delegate: Text {
-                    required property var modelData
-                    textFormat: Text.PlainText
-                    width: body.width
-                    text: String(modelData.label) + ": " + root.reasonText(modelData.reason)
-                    color: root.fg
-                    opacity: 0.8
-                    font.family: root.fontFam
-                    font.pixelSize: Style.font.caption
-                    wrapMode: Text.WordWrap
-                }
-            }
-        }
-
-        // Contradictions: these STOP the apply. Two programs matching the same
-        // window class but wanting different places cannot both be honoured,
-        // and letting one silently win inside the compositor is what this
-        // refuses to do.
-        Column {
-            width: body.width
-            spacing: Style.spacing.xxs
-            visible: root.blocked.length > 0
-
-            Text {
-                textFormat: Text.PlainText
-                text: "Cannot be applied:"
-                color: root.warn
-                font.family: root.fontFam
-                font.pixelSize: Style.font.caption
-            }
-            Repeater {
-                model: root.blocked
-                delegate: Text {
-                    required property var modelData
-                    textFormat: Text.PlainText
-                    width: body.width
-                    text: modelData.labels.join(", ")
-                        + " match the same window class but want different places"
-                    color: root.warn
-                    font.family: root.fontFam
-                    font.pixelSize: Style.font.caption
-                    wrapMode: Text.WordWrap
-                }
-            }
-        }
-
-        Row {
-            width: body.width
-            spacing: Style.spacing.controlGap
-
-            Text {
-                textFormat: Text.PlainText
-                // dirtyCount is a FLAG, not a tally: markDirty compares the
-                // whole draft against the whole saved document, so it is 0 or
-                // 1, and the wording says so instead of pretending to count.
-                text: root.dirtyCount > 0 ? "unsaved changes" : "no changes pending"
-                color: root.fg
-                opacity: root.dirtyCount > 0 ? 1.0 : 0.6
-                font.family: root.fontFam
-                font.pixelSize: Style.font.caption
-                width: Math.max(Style.space(60), body.width - Style.space(220))
-                anchors.verticalCenter: parent.verticalCenter
-            }
-
-            Button {
-                text: "Revert"
-                enabled: root.dirtyCount > 0
-                opacity: enabled ? 1.0 : 0.4
-                foreground: root.fg
-                fontFamily: root.fontFam
-                bordered: true
-                anchors.verticalCenter: parent.verticalCenter
-                onClicked: root.revert()
-            }
-
-            Button {
-                text: "Apply"
-                enabled: root.dirtyCount > 0 && root.blocked.length === 0
-                opacity: enabled ? 1.0 : 0.4
-                foreground: root.fg
-                fontFamily: root.fontFam
-                bordered: true
-                anchors.verticalCenter: parent.verticalCenter
-                onClicked: root.apply()
             }
         }
     }

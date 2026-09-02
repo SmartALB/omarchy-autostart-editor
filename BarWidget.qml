@@ -64,12 +64,37 @@ BarWidget {
     readonly property bool popoutSwitchClosing:
         panelLoader.item ? panelLoader.item.popoutSwitchClosing : false
 
-    function open()  { panelLoader.active = true; if (panelLoader.item) panelLoader.item.open() }
+    function open()  { if (panelLoader.item) panelLoader.item.open() }
     function close() { if (panelLoader.item) panelLoader.item.close() }
     function toggle() { root.opened ? root.close() : root.open() }
     function closeForPopoutSwitch() {
         if (panelLoader.item) panelLoader.item.closeForPopoutSwitch()
     }
+
+    // THE PANEL CANNOT POSITION ITSELF WITHOUT THIS. Its popup is anchored to
+    // a bar button, and the button is here, not there -- so the anchor has to
+    // be handed over. `hostWidget` matters just as much: the bar tracks the
+    // widget mounted in its slot, so the popout coordinator (and with it the
+    // open-panel mark under the pill) and switchPanelFrom both compare against
+    // THIS object, never the nested panel.
+    //
+    // Membership-tested with `in` rather than assigned blind, exactly as
+    // clock/BarWidget.qml:97 does it: assigning a property a type does not
+    // have is a component error, and this widget must keep working if the
+    // panel it loads is ever replaced by one that wants fewer of them.
+    function injectPanel() {
+        var target = panelLoader.item
+        if (!target) return
+        if ("bar" in target) target.bar = root.bar
+        if ("settings" in target) target.settings = root.settings
+        if ("anchorItem" in target) target.anchorItem = button
+        if ("hostWidget" in target) target.hostWidget = root
+    }
+
+    // `bar` and `settings` arrive after construction, so an injection done
+    // only at load time would hand over stale values or none at all.
+    onBarChanged: root.injectPanel()
+    onSettingsChanged: root.injectPanel()
 
     implicitWidth: button.implicitWidth
     implicitHeight: button.implicitHeight
@@ -84,11 +109,32 @@ BarWidget {
         onPressed: function(b) { root.toggle() }
     }
 
+    // EAGER, and visible: false. This revises the earlier lazy ruling: the
+    // platform hands a panel its anchor from the Loader's own onLoaded, so a
+    // lazy Loader means the anchor arrives only AFTER the first open -- the
+    // first click would open a popup with nothing to position against. Every
+    // shipped panel host does it this way (clock/BarWidget.qml:118).
+    // `visible: false` because this Loader's item is content, not a bar
+    // control: the popup it owns is a layer-shell window of its own and does
+    // not paint through this slot.
+    //
+    // Creating the panel object eagerly is cheap; READING THE CONFIGURATION is
+    // not, and the panel deliberately does that in open() rather than at
+    // creation, so this costs no processes at shell start. That is also why
+    // countsKnown below stays false until the first open: the counts are
+    // unknown, not zero, and saying "0 programs" before the file has been read
+    // would be a false statement about the user's configuration.
     Loader {
         id: panelLoader
-        active: false
-        source: "Panel.qml"
+        active: true
+        visible: false
+        source: Qt.resolvedUrl("Panel.qml")
         onLoaded: {
+            root.injectPanel()
+            // Twice, the second time deferred, as the platform does it: `bar`
+            // may still be null at this instant, and onBarChanged does not
+            // fire for a value that was already set before this Loader ran.
+            Qt.callLater(root.injectPanel)
             item.counted.connect(function(programs, placements) {
                 root.programCount = programs
                 root.placementCount = placements

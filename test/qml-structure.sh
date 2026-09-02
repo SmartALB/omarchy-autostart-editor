@@ -851,91 +851,242 @@ for fn in $lifecycle_fns; do
 done
 
 # ---------------------------------------------------------------------------
-# Panel.qml (task 15).
+# Panel.qml and the platform contract it stands on (task 15, fix round 1).
 #
-# All three checks below read through strip_comments, like every other check
-# in this file. The task brief spelled them against the RAW file; that is
+# All checks below read through strip_comments, like every other check in this
+# file. The task brief spelled the first three against the RAW file; that is
 # exactly the evasion round 1 already found and closed for the BarWidget
 # checks (finding F2), where replacing closeForPopoutSwitch()'s body with a
-# comment carrying the same literal text left them green. The positive check
-# gains the guarantee the rest of this file has, and the two negative checks
-# lose nothing: stripping removes comments, never code.
+# comment carrying the same literal text left them green. The positive checks
+# gain the guarantee the rest of this file has, and the negative ones lose
+# nothing: stripping removes comments, never code.
 stripped_panel="$(strip_comments Panel.qml)"
 
-# 13 -- the panel declares the same lifecycle contract as the bar widget.
-#       DECLARED only, like check 8 does for BarWidget -- what the bodies do
-#       is not asserted here. BarWidget.qml calls all four functions and
-#       reads both properties off the loaded panel, so a rename on this side
-#       breaks the handoff silently: the Loader's item simply has no such
-#       member and the call is a runtime TypeError nothing in this project
-#       can execute to discover.
+# The text of the first `<TypeName> { ... }` block in a file, brace-depth
+# extracted -- the same technique check 6 uses for a teardown block and check
+# 10 for the bar button. Shared by the checks below rather than inlined three
+# times.
+block_of() {
+  # $1 = comment-stripped content, $2 = type name
+  awk -v type="$2" '
+      BEGIN { capturing = 0; depth = 0 }
+      {
+          line = $0
+          if (!capturing) {
+              if (line !~ "(^|[^A-Za-z0-9_])" type "[[:space:]]*\\{") next
+              capturing = 1
+              depth = 0
+          }
+          print line
+          n = length(line)
+          for (i = 1; i <= n; i++) {
+              c = substr(line, i, 1)
+              if (c == "{") depth++
+              else if (c == "}") {
+                  depth--
+                  if (depth <= 0) { capturing = 0; i = n + 1 }
+              }
+          }
+      }
+  ' <<<"$1"
+}
+
+# 13 -- the root type is the platform's own `Panel` (qs.Ui).
+#
+#       This is the answer to the surface problem, and it is load-bearing in a
+#       way no other line in the file is: `Ui/Panel.qml` is what supplies
+#       `controller`, `opened`, `bar` and the whole popup lifecycle. Demote the
+#       root to a bare `Item` and every one of those references becomes
+#       undefined at runtime -- the panel would load, pass qmllint, and never
+#       open. Eight of the nine shipped panels use this type; only
+#       disk-speedtest does not.
+#
+#       The root type is the first thing after the imports that opens a block.
+#       Anything else appearing there is a FAIL, not a pass: a shape this
+#       script cannot read is one it cannot verify, the same rule as check 8's
+#       onTriggered.
+root_type_of() {
+  awk '
+      { line = $0
+        gsub(/^[[:space:]]+/, "", line); gsub(/[[:space:]]+$/, "", line)
+        if (line == "") next
+        if (line ~ /^import[[:space:]]/) next
+        if (match(line, /^[A-Za-z_][A-Za-z0-9_.]*[[:space:]]*\{/)) {
+            t = substr(line, RSTART, RLENGTH)
+            sub(/[[:space:]]*\{$/, "", t)
+            print t; exit
+        }
+        print "<unreadable: " line ">"; exit
+      }
+  ' <<<"$1"
+}
+panel_root="$(root_type_of "$stripped_panel")"
+if [[ "$panel_root" == "Panel" ]]; then
+  ok "Panel.qml's root type is the platform Panel"
+else
+  bad "Panel.qml's root type is the platform Panel" \
+      "first type after the imports is '${panel_root:-<none found>}' -- a bare Item has no controller, no opened and no popup lifecycle, so the panel would load and never open"
+fi
+
+# 14 -- what Panel.qml itself declares. The four lifecycle functions are NOT
+#       all here any more: `closeForPopoutSwitch` comes from the base type
+#       (which also clears the flag through Qt.callLater, better than the
+#       override this file used to carry), while open/close/toggle are
+#       overridden so opening can read the configuration first -- the shipped
+#       idiom, clock/Panel.qml does exactly this. `counted` is this plugin's
+#       own signal and BarWidget.qml connects to it.
 for needed in "function open()" "function close()" "function toggle()" \
-              "function closeForPopoutSwitch()" \
-              "readonly property bool opened" \
-              "readonly property bool popoutSwitchClosing" \
               "signal counted("; do
   grep -qF "$needed" <<<"$stripped_panel" \
     && ok "Panel declares $needed" \
-    || bad "Panel declares $needed" "not found"
+    || bad "Panel declares $needed" "not found (comment-stripped)"
 done
 
-# 14 -- applying is explicit. Moving real windows across real screens must not
+# 15 -- and what it must NOT declare. Redeclaring a property the base type
+#       already has is a COMPONENT CREATION ERROR: the panel fails to
+#       instantiate, the bar widget's Loader reports an error, and the plugin
+#       is simply absent. Nothing in this project can execute a file that
+#       imports Quickshell, so this is precisely the class of defect only a
+#       structural check can reach -- the same argument as check 9's.
+#
+#       This is also the trap the previous round walked into honestly: those
+#       two booleans were declared by hand here, because the brief asked for
+#       them, before the base type was known to provide them.
+inherited="opened popoutSwitchClosing popoutSwitching bar settings moduleName ipcTarget manageIpc controller"
+redeclared=""
+for member in $inherited; do
+  hit="$(grep -nE "(^|[^A-Za-z0-9_])property[[:space:]]+[A-Za-z_][A-Za-z0-9_<>]*[[:space:]]+${member}[[:space:]]*:" \
+         <<<"$stripped_panel" || true)"
+  [[ -n "$hit" ]] && redeclared="$redeclared
+$member: $hit"
+done
+redeclared="$(sed '/^$/d' <<<"$redeclared")"
+[[ -z "$redeclared" ]] && ok "Panel redeclares none of the base type's members" \
+                       || bad "Panel redeclares none of the base type's members" "$redeclared"
+
+# 16 -- the popup surface exists and is wired to the injected anchor.
+#
+#       A KeyboardPanel is the visible window; without it the root Item paints
+#       wherever its host puts it, which for a bar widget's Loader means
+#       nowhere useful. And an anchorItem that is not the INJECTED one cannot
+#       position the card: KeyboardPanel reads its screen and its origin off
+#       that item, so a hardcoded or missing anchor puts the popup at the
+#       screen corner with no screen resolved. Scoped to the KeyboardPanel's
+#       own block so a decoy binding elsewhere in the file cannot satisfy it.
+keyboard_block="$(block_of "$stripped_panel" KeyboardPanel)"
+if [[ -z "$keyboard_block" ]]; then
+  bad "Panel: the KeyboardPanel surface is anchored to the injected anchorItem" \
+      "no 'KeyboardPanel { ... }' block in Panel.qml -- the panel then has no window at all"
+else
+  surface_missing=""
+  grep -qE '(^|[^A-Za-z0-9_.])anchorItem:[[:space:]]*root\.anchorItem([^A-Za-z0-9_]|$)' <<<"$keyboard_block" \
+    || surface_missing="$surface_missing anchorItem:root.anchorItem"
+  grep -qE '(^|[^A-Za-z0-9_.])open:[[:space:]]*root\.opened([^A-Za-z0-9_]|$)' <<<"$keyboard_block" \
+    || surface_missing="$surface_missing open:root.opened"
+  if [[ -z "$surface_missing" ]]; then
+    ok "Panel: the KeyboardPanel surface is anchored to the injected anchorItem"
+  else
+    bad "Panel: the KeyboardPanel surface is anchored to the injected anchorItem" \
+        "not bound inside the KeyboardPanel block:$surface_missing"
+  fi
+fi
+
+# 17 -- applying is explicit. Moving real windows across real screens must not
 #       be a side effect of a keystroke, so no field may write straight
 #       through to disk.
 hits="$(grep -nE 'onTextChanged:.*(writeProc|applyRules|config-write)' <<<"$stripped_panel" || true)"
 [[ -z "$hits" ]] && ok "Panel: no field writes through on change" \
                  || bad "Panel: no field writes through on change" "$hits"
 
-# 15 -- the class field is never handed to a JavaScript RegExp. The allowlist
+# 18 -- the class field is never handed to a JavaScript RegExp. The allowlist
 #       permits nested quantifiers and QML gives JavaScript no timeout.
 hits="$(grep -nE 'new RegExp|\.match\(|\.test\(' <<<"$stripped_panel" \
         | grep -vE 'WORKSPACE_RE|MONITOR_RE|ADDRESS_RE|ID_RE' || true)"
 [[ -z "$hits" ]] && ok "Panel: no JavaScript RegExp over user patterns" \
                  || bad "Panel: no JavaScript RegExp over user patterns" "$hits"
 
-# 16 -- the two lifecycle booleans hold real state, not a literal. Check 13
-#       above only proves the declaration's TEXT exists, and a mutation probe
-#       run against this file confirmed the gap is reachable: replacing the
-#       binding with `readonly property bool opened: true` -- which breaks the
-#       handoff outright, since the bar would then never see the panel as
-#       closed and open() would never be called again -- left every check
-#       green. That is round-1 finding F3 on BarWidget, reached a second time
-#       on the other side of the same contract, and check 11 is the shape of
-#       the answer: declared and bound are two separate claims, checked
-#       separately.
+# 19 -- the bar widget hands the panel its anchor.
 #
-#       Origin-qualified the way check 11 is, but without hardcoding one
-#       backing name: the expression has to mention some identifier this file
-#       declares as a WRITABLE `property bool` (the `readonly` declarations are
-#       excluded, or the property would satisfy the check by naming itself).
-#       That is what distinguishes a value something can actually change from a
-#       constant wearing a property's name. Like check 8's onTriggered lookup,
-#       a property this script cannot locate at all is a FAIL, not a pass.
-for prop in opened popoutSwitchClosing; do
-  rhs="$(property_binding "$stripped_panel" "$prop")"
-  if [[ -z "$rhs" ]]; then
-    bad "Panel: '$prop' is bound to writable state, not a literal" \
-        "no expression found on the declaration's line or the next"
-    continue
-  fi
-  if [[ "$rhs" =~ ^(true|false)\;?$ ]]; then
-    bad "Panel: '$prop' is bound to writable state, not a literal" \
-        "bound to the hardcoded literal '$rhs'"
-    continue
-  fi
-  backed=0
-  for ident in $(grep -oE '[A-Za-z_][A-Za-z0-9_]*' <<<"$rhs"); do
-    decl="$(grep -E "(^|[^A-Za-z0-9_])property[[:space:]]+bool[[:space:]]+${ident}([^A-Za-z0-9_]|$)" \
-            <<<"$stripped_panel" | grep -v 'readonly' || true)"
-    if [[ -n "$decl" ]]; then backed=1; break; fi
-  done
-  if (( backed )); then
-    ok "Panel: '$prop' is bound to writable state, not a literal"
+#       THE PANEL CANNOT POSITION ITSELF WITHOUT THIS, and the failure is
+#       silent: `anchorItem` stays null, KeyboardPanel resolves no screen, and
+#       the popup either does not map or lands in a corner. The panel side is
+#       already checked (16); this is the other half of the same handover, and
+#       the two are separate claims for the same reason declared and forwarding
+#       are separate for the lifecycle functions.
+injectp_body="$(function_body "$stripped_barwidget" injectPanel)"
+if [[ -z "$injectp_body" ]]; then
+  bad "BarWidget: injectPanel() hands the panel its anchorItem" \
+      "no 'function injectPanel(...) { ... }' block found -- the panel's popup has nothing to anchor to"
+elif grep -qE '(^|[^A-Za-z0-9_])anchorItem[[:space:]]*=' <<<"$injectp_body"; then
+  ok "BarWidget: injectPanel() hands the panel its anchorItem"
+else
+  bad "BarWidget: injectPanel() hands the panel its anchorItem" \
+      "the body never assigns anchorItem: $injectp_body"
+fi
+
+# 20 -- and it is called from all four sites the platform needs.
+#
+#       Each one covers a different moment and none of them is redundant:
+#       onLoaded is the only one that fires for a panel created before `bar`
+#       is set; the deferred second call is what catches a `bar` that was
+#       already set before this Loader ran (onBarChanged does not fire for a
+#       value assigned earlier); and onBarChanged / onSettingsChanged catch
+#       every later change. clock/BarWidget.qml wires exactly these four.
+loader_block="$(block_of "$stripped_barwidget" Loader)"
+onloaded_body="$(handler_body "$loader_block" onLoaded)"
+if [[ -z "$onloaded_body" ]]; then
+  bad "BarWidget: injectPanel() runs from the Loader's onLoaded, directly and deferred" \
+      "no onLoaded handler found inside the Loader block"
+else
+  loaded_missing=""
+  grep -qE '(^|[^A-Za-z0-9_])injectPanel[[:space:]]*\(' <<<"$onloaded_body" \
+    || loaded_missing="$loaded_missing direct-call"
+  grep -qE 'Qt\.callLater\([^)]*injectPanel' <<<"$onloaded_body" \
+    || loaded_missing="$loaded_missing Qt.callLater"
+  if [[ -z "$loaded_missing" ]]; then
+    ok "BarWidget: injectPanel() runs from the Loader's onLoaded, directly and deferred"
   else
-    bad "Panel: '$prop' is bound to writable state, not a literal" \
-        "expression '$rhs' names no writable 'property bool' declared in this file"
+    bad "BarWidget: injectPanel() runs from the Loader's onLoaded, directly and deferred" \
+        "missing in the onLoaded body:$loaded_missing"
+  fi
+fi
+for handler in onBarChanged onSettingsChanged; do
+  hbody="$(handler_body "$stripped_barwidget" "$handler")"
+  if [[ -z "$hbody" ]]; then
+    bad "BarWidget: injectPanel() runs from $handler" \
+        "no $handler handler found -- a value arriving after construction would never reach the panel"
+  elif grep -qE '(^|[^A-Za-z0-9_])injectPanel[[:space:]]*\(' <<<"$hbody"; then
+    ok "BarWidget: injectPanel() runs from $handler"
+  else
+    bad "BarWidget: injectPanel() runs from $handler" "the handler never calls injectPanel: $hbody"
   fi
 done
+
+# 21 -- the Loader is eager, and not painted through the bar slot.
+#
+#       Lazy was the earlier ruling and it is wrong for this construction: the
+#       anchor is injected from onLoaded, so with `active: false` the anchor
+#       arrives only AFTER the first open -- the first click opens a popup with
+#       nothing to position against. Eagerness costs nothing here because the
+#       panel reads the configuration in open(), not at creation.
+#       `visible: false` because the Loader's item is content, not a bar
+#       control; the popup is a layer-shell window of its own.
+if [[ -z "$loader_block" ]]; then
+  bad "BarWidget: the panel Loader is eager and not painted in the bar slot" \
+      "no 'Loader { ... }' block found in BarWidget.qml"
+else
+  loader_missing=""
+  grep -qE '(^|[^A-Za-z0-9_.])active:[[:space:]]*true([^A-Za-z0-9_]|$)' <<<"$loader_block" \
+    || loader_missing="$loader_missing active:true"
+  grep -qE '(^|[^A-Za-z0-9_.])visible:[[:space:]]*false([^A-Za-z0-9_]|$)' <<<"$loader_block" \
+    || loader_missing="$loader_missing visible:false"
+  if [[ -z "$loader_missing" ]]; then
+    ok "BarWidget: the panel Loader is eager and not painted in the bar slot"
+  else
+    bad "BarWidget: the panel Loader is eager and not painted in the bar slot" \
+        "not set inside the Loader block:$loader_missing"
+  fi
+fi
 
 printf '\nqml structure: total=%d failed=%d\n' "$run" "$failed"
 (( failed == 0 ))
