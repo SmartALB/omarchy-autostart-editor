@@ -832,15 +832,52 @@ test_qml_structure() {
 
 test_qml_structure
 
+test_runners_shape() {
+    local out status
+    out="$(./runners-shape.sh 2>&1)"; status=$?
+    assert_eq "runners shape: F1 status-passthrough checks pass" "$status" "0"
+    assert_contains "runners shape: the checks actually ran" "$out" "runners shape: total="
+}
+
+test_runners_shape
+
 MARKER_BIN="$PWD/../bin/omarchy-autostart-marker"
 
-test_marker_claims_once_per_hyprland_instance() {
+# The marker script has six branches: no signature, an implausible (but
+# non-empty) signature, mkdir failing, a claim winning the noclobber race, a
+# claim losing it, and release. A mutation probe found the original four
+# tests here bound only mutual exclusion: dropping the empty-signature
+# check, the signature regex, or the mkdir guard left all four green,
+# because each of those three guards' removal still falls through to
+# ANOTHER guard that also exits 1 -- same status, different (or no) reason.
+# Every test below checks the REASON, not just the exit status: the exact
+# stderr text for the three guards that print one, and marker-file
+# existence for the two branches (claim-wins, release) that print nothing at
+# all. That is what makes "turn off exactly this guard" turn exactly one
+# test red -- see the per-guard mutation table in task-13-report.md.
+marker_dir() { printf '%s/smartalb.autostart' "$XDG_RUNTIME_DIR"; }
+marker_path() { printf '%s/%s' "$(marker_dir)" "$1"; }
+marker_stderr() { "$MARKER_BIN" "$@" 2>&1 1>/dev/null; }
+
+test_marker_refuses_without_a_signature() {
     setup_sandbox
-    export HYPRLAND_INSTANCE_SIGNATURE="sig-a"
-    assert_status "marker: the first claim succeeds"   0 "$MARKER_BIN" claim
-    assert_status "marker: the second claim is refused" 1 "$MARKER_BIN" claim
-    export HYPRLAND_INSTANCE_SIGNATURE="sig-b"
-    assert_status "marker: a new instance claims again" 0 "$MARKER_BIN" claim
+    unset HYPRLAND_INSTANCE_SIGNATURE
+    assert_status "marker: no instance signature, no claim" 1 "$MARKER_BIN" claim
+    assert_eq     "marker: no-signature reason is exact, not incidental" \
+                  "$(marker_stderr claim)" "no HYPRLAND_INSTANCE_SIGNATURE"
+    teardown_sandbox
+}
+
+test_marker_refuses_an_implausible_signature() {
+    setup_sandbox
+    # Non-empty, so this exercises the REGEX guard specifically -- the
+    # empty-signature guard above it would not fire for this input, and if
+    # the regex guard itself were removed this would fall through to
+    # mkdir/noclobber and very likely succeed instead of refusing.
+    export HYPRLAND_INSTANCE_SIGNATURE="bad sig/with space"
+    assert_status "marker: an implausible signature refuses the claim" 1 "$MARKER_BIN" claim
+    assert_eq     "marker: implausible-signature reason is exact, not incidental" \
+                  "$(marker_stderr claim)" "implausible signature"
     teardown_sandbox
 }
 
@@ -848,33 +885,60 @@ test_marker_refuses_when_it_cannot_write() {
     setup_sandbox
     export HYPRLAND_INSTANCE_SIGNATURE="sig-a"
     chmod 500 "$XDG_RUNTIME_DIR"
+    local expected_dir; expected_dir="$(marker_dir)"
     # Refusing means the autostart is SKIPPED. A doubled session is worse than
     # one that did not start: without a marker a shell restart launches
     # everything a second time.
     assert_status "marker: an unwritable runtime dir refuses the claim" 1 "$MARKER_BIN" claim
+    assert_eq     "marker: cannot-write reason is exact, not incidental" \
+                  "$(marker_stderr claim)" "cannot create $expected_dir"
     chmod 700 "$XDG_RUNTIME_DIR"
     teardown_sandbox
 }
 
-test_marker_refuses_without_a_signature() {
+test_marker_claim_creates_the_marker_file() {
     setup_sandbox
-    unset HYPRLAND_INSTANCE_SIGNATURE
-    assert_status "marker: no instance signature, no claim" 1 "$MARKER_BIN" claim
+    export HYPRLAND_INSTANCE_SIGNATURE="sig-a"
+    assert_status "marker: the first claim succeeds" 0 "$MARKER_BIN" claim
+    assert_eq     "marker: a successful claim leaves the marker file behind" \
+                  "$([[ -e "$(marker_path sig-a)" ]] && echo present || echo missing)" "present"
     teardown_sandbox
 }
 
-test_marker_release_allows_a_new_claim() {
+test_marker_claims_once_per_hyprland_instance() {
+    setup_sandbox
+    export HYPRLAND_INSTANCE_SIGNATURE="sig-a"
+    "$MARKER_BIN" claim >/dev/null
+    assert_status "marker: the second claim is refused" 1 "$MARKER_BIN" claim
+    # Branch 5 (noclobber lost the race) prints NOTHING to stderr, unlike
+    # every other refusal above -- that silence is what tells it apart from
+    # falling through into one of the earlier, message-printing guards. A
+    # mutation that turns `claim` into a bare `exit 0` (skip the noclobber
+    # check entirely) is caught by the status assertion above; a mutation
+    # that instead made a LOST race print a message would be caught here.
+    assert_eq     "marker: a lost claim race is silent, not a reused message" \
+                  "$(marker_stderr claim)" ""
+    export HYPRLAND_INSTANCE_SIGNATURE="sig-b"
+    assert_status "marker: a new instance claims again" 0 "$MARKER_BIN" claim
+    teardown_sandbox
+}
+
+test_marker_release_removes_the_marker_file() {
     setup_sandbox
     export HYPRLAND_INSTANCE_SIGNATURE="sig-a"
     "$MARKER_BIN" claim >/dev/null
     assert_status "marker: release succeeds" 0 "$MARKER_BIN" release
+    assert_eq     "marker: release actually removes the marker file" \
+                  "$([[ -e "$(marker_path sig-a)" ]] && echo present || echo missing)" "missing"
     assert_status "marker: after release a claim works again" 0 "$MARKER_BIN" claim
     teardown_sandbox
 }
 
-test_marker_claims_once_per_hyprland_instance
-test_marker_refuses_when_it_cannot_write
 test_marker_refuses_without_a_signature
-test_marker_release_allows_a_new_claim
+test_marker_refuses_an_implausible_signature
+test_marker_refuses_when_it_cannot_write
+test_marker_claim_creates_the_marker_file
+test_marker_claims_once_per_hyprland_instance
+test_marker_release_removes_the_marker_file
 
 summary

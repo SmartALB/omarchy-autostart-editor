@@ -231,7 +231,7 @@ $f:$((i + 1)): ${line}"
         hits_5b="$hits_5b
 $f:$((i + 1)): ${line} (no Runners { id: ... } declaration found in this file)"
       else
-        helper_anchor_pat="^${runners_id}[[:space:]]*\.[[:space:]]*(runner|runnerOut|runnerErr|hypr|tool)\("
+        helper_anchor_pat="^${runners_id}[[:space:]]*\.[[:space:]]*(runner|runnerOut|runnerErr|hypr|tool|launcher)\("
         if [[ ! "$candidate" =~ $helper_anchor_pat ]]; then
           hits_5b="$hits_5b
 $f:$((i + 1)): ${line}"
