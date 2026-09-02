@@ -10,7 +10,7 @@ cd "$(dirname "$0")"
 # directories. On 2026-09-02 a test run overwrote real state that way.
 test_sandbox_contains_every_path() {
     setup_sandbox
-    for var in HOME XDG_CONFIG_HOME XDG_STATE_HOME XDG_DATA_HOME XDG_RUNTIME_DIR; do
+    for var in HOME XDG_CONFIG_HOME XDG_STATE_HOME XDG_DATA_HOME XDG_RUNTIME_DIR TMPDIR; do
         local value="${!var-}"
         assert_eq "sandbox: \$$var lies under the sandbox" \
                   "$(case "$value" in "$SANDBOX"/*) echo inside ;; *) echo "OUTSIDE: $value" ;; esac)" \
@@ -141,6 +141,28 @@ test_read_refuses_a_world_writable_directory() {
     teardown_sandbox
 }
 
+test_read_is_silent_on_success() {
+    setup_sandbox
+    valid_config > "$XDG_CONFIG_HOME/omarchy/autostart-layout.json"
+    chmod 600 "$XDG_CONFIG_HOME/omarchy/autostart-layout.json"
+    local err; err="$("$CONFIG_BIN" read 2>&1 >/dev/null)"
+    assert_eq "read: a successful read writes nothing to stderr" "$err" ""
+    teardown_sandbox
+}
+
+test_read_leaves_no_temp_file() {
+    setup_sandbox
+    valid_config > "$XDG_CONFIG_HOME/omarchy/autostart-layout.json"
+    chmod 600 "$XDG_CONFIG_HOME/omarchy/autostart-layout.json"
+    local before after
+    before="$(find "$TMPDIR" -maxdepth 1 -type f | wc -l)"
+    "$CONFIG_BIN" read >/dev/null 2>&1
+    "$CONFIG_BIN" read >/dev/null 2>&1
+    after="$(find "$TMPDIR" -maxdepth 1 -type f | wc -l)"
+    assert_eq "read: two reads leave no temp file behind" "$after" "$before"
+    teardown_sandbox
+}
+
 test_read_missing_file_yields_empty_model
 test_read_round_trips_a_valid_file
 test_read_refuses_an_oversized_file
@@ -149,5 +171,7 @@ test_read_refuses_broken_json
 test_read_refuses_a_foreign_schema
 test_read_refuses_a_group_writable_file
 test_read_refuses_a_world_writable_directory
+test_read_is_silent_on_success
+test_read_leaves_no_temp_file
 
 summary

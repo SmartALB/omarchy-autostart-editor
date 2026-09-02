@@ -4,15 +4,20 @@ TESTS_FAILED=0
 SANDBOX=""
 
 setup_sandbox() {
-    SANDBOX="$(mktemp -d)" || { echo "setup_sandbox: mktemp -d failed" >&2; return 1; }
+    # A prior test's setup_sandbox call may have exported TMPDIR pointing
+    # inside a sandbox that teardown_sandbox has since removed; mktemp -d
+    # here must build the new sandbox itself in the real /tmp, never inside
+    # a sandbox that no longer exists.
+    SANDBOX="$(TMPDIR=/tmp mktemp -d)" || { echo "setup_sandbox: mktemp -d failed" >&2; return 1; }
     [[ -n "$SANDBOX" && "$SANDBOX" == /tmp/?* ]] || { echo "setup_sandbox: implausible sandbox path ${SANDBOX@Q}" >&2; SANDBOX=""; return 1; }
     export HOME="$SANDBOX/home"
     export XDG_CONFIG_HOME="$SANDBOX/config"
     export XDG_STATE_HOME="$SANDBOX/state"
     export XDG_DATA_HOME="$SANDBOX/data"
     export XDG_RUNTIME_DIR="$SANDBOX/run"
+    export TMPDIR="$SANDBOX/tmp"
     mkdir -p "$HOME" "$XDG_CONFIG_HOME/omarchy" "$XDG_STATE_HOME" \
-             "$XDG_DATA_HOME/applications" "$XDG_RUNTIME_DIR"
+             "$XDG_DATA_HOME/applications" "$XDG_RUNTIME_DIR" "$TMPDIR"
     export FAKE_LOG="$SANDBOX/fake.log"
     : > "$FAKE_LOG"
 }

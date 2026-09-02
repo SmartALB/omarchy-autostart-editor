@@ -14,6 +14,17 @@ CONFIG="$CONFIG_DIR/autostart-layout.json"
 MAX_BYTES=262144          # 256 KiB
 SCHEMA_VERSION=1
 
+# One cleanup for the whole script. The trap body must never name a
+# function-local variable: the trap runs at exit, when that local is out of
+# scope, and under `set -u` the expansion is fatal -- so the trap removes
+# nothing and a temporary file leaks on every single run.
+TMPFILE=""
+cleanup() {
+    [[ -n "${TMPFILE:-}" ]] && rm -f -- "$TMPFILE"
+    return 0
+}
+trap cleanup EXIT
+
 # Every outcome leaves through one of these two, so a caller parses one shape.
 ok()  { jq -nc "$@"; exit 0; }
 err() { jq -nc --arg e "$1" --arg d "${2:-}" '{ok:false,error:$e,detail:$d}'; exit 0; }
@@ -61,10 +72,10 @@ cmd_read() {
     [[ -f "$CONFIG" ]] || err "not-a-file" "$CONFIG is not a plain file"
     check_permissions "$CONFIG" "file"
 
-    local tmp; tmp="$(mktemp)"; trap 'rm -f "$tmp"' EXIT
-    read_bounded "$CONFIG" "$tmp"
-    check_shape "$tmp"
-    jq -c --argjson m "$(stat -c %Y "$CONFIG")" '{ok:true,mtime:$m,config:.}' "$tmp"
+    TMPFILE="$(mktemp)"
+    read_bounded "$CONFIG" "$TMPFILE"
+    check_shape "$TMPFILE"
+    jq -c --argjson m "$(stat -c %Y "$CONFIG")" '{ok:true,mtime:$m,config:.}' "$TMPFILE"
 }
 
 case "${1:-}" in
