@@ -42,12 +42,23 @@ BarWidget {
 
     readonly property string barGlyph: "\uf135"   // nf-fa-rocket
 
+    // countsKnown stays false until the lazily-loaded panel reports in
+    // (see the Loader below). The Loader is lazy on purpose -- this
+    // component is created and destroyed on every QML change, and building
+    // the whole panel just to read two numbers on every restart is a worse
+    // trade than an honest tooltip. Showing "0 programs, 0 placements"
+    // before that report would be a false statement about the user's
+    // configuration, not merely an unknown one, so the plain name is shown
+    // instead until the real counts are in.
+    property bool countsKnown: false
     property int programCount: 0
     property int placementCount: 0
 
     readonly property string tooltip:
-        "Autostart Layout \u2014 " + root.programCount + " programs, "
-        + root.placementCount + " placements"
+        root.countsKnown
+            ? "Autostart Layout \u2014 " + root.programCount + " programs, "
+              + root.placementCount + " placements"
+            : "Autostart Layout"
 
     readonly property bool opened: panelLoader.item ? panelLoader.item.opened : false
     readonly property bool popoutSwitchClosing:
@@ -81,6 +92,7 @@ BarWidget {
             item.counted.connect(function(programs, placements) {
                 root.programCount = programs
                 root.placementCount = placements
+                root.countsKnown = true
             })
         }
     }

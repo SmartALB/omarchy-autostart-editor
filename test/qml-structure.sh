@@ -615,29 +615,44 @@ $hit -- reads '$operand', declared as: $(tr '\n' ';' <<<"$wrong")"
                        || bad "the exitStatus comparison reads a constant declared 0" "$norm_bad"
 fi
 
+# BarWidget.qml checks below all read through strip_comments, like every
+# other check in this file -- a comment repeating the right words must never
+# satisfy a check meant to verify real code. (Round-1 finding F2: checks 8
+# and 9 below used to grep BarWidget.qml directly; replacing
+# closeForPopoutSwitch()'s body with a comment carrying the same literal
+# text left them green. This is the same evasion check 3's own comment
+# already warns future checks about, reintroduced here and now closed the
+# same way as everywhere else in this file.)
+stripped_barwidget="$(strip_comments BarWidget.qml)"
+
 # 8 -- the plugin lifecycle contract from the develop guide.
 for needed in "function open()" "function close()" "function toggle()" \
               "function closeForPopoutSwitch()" \
               "readonly property bool opened" \
               "readonly property bool popoutSwitchClosing"; do
-  grep -qF "$needed" BarWidget.qml \
+  grep -qF "$needed" <<<"$stripped_barwidget" \
     && ok "BarWidget declares $needed" \
-    || bad "BarWidget declares $needed" "not found"
+    || bad "BarWidget declares $needed" "not found (comment-stripped)"
 done
 
 # 9 -- the bar glyph is present as an escape and not as a literal PUA
-#      character. Checked on the FILE, because a literal glyph does not
-#      survive the trip through documents and tools, and an empty text is not
-#      a button without an icon -- it is no button at all.
-if grep -qE 'barGlyph:[[:space:]]*"\\u[0-9a-fA-F]{4}"' BarWidget.qml; then
+#      character, both checked on the comment-stripped view for the same
+#      reason as check 8: a comment naming the right escape, or hiding a
+#      raw glyph, must not stand in for the real property.
+#      python3 rather than grep -P: with LC_ALL=C, PCRE rejects \x{} values
+#      above 0xFF outright, so the check would end in an error instead of a
+#      result. The stripped text is written to a temp file so the script
+#      can still open it by path, exactly like the original file-argument
+#      form -- only the input feeding it changed.
+if grep -qE 'barGlyph:[[:space:]]*"\\u[0-9a-fA-F]{4}"' <<<"$stripped_barwidget"; then
   ok "BarWidget: bar glyph is written as a \\u escape"
 else
   bad "BarWidget: bar glyph is written as a \\u escape" \
       "$(grep -n 'barGlyph' BarWidget.qml || echo 'no barGlyph at all')"
 fi
-# python3 rather than grep -P: with LC_ALL=C, PCRE rejects \x{} values above
-# 0xFF outright, so the check would end in an error instead of a result.
-if python3 - BarWidget.qml <<'PUA'
+pua_tmp="$(mktemp)"
+printf '%s\n' "$stripped_barwidget" > "$pua_tmp"
+if python3 - "$pua_tmp" <<'PUA'
 import io, sys
 text = io.open(sys.argv[1], encoding="utf-8", errors="replace").read()
 sys.exit(1 if any(0xE000 <= ord(c) <= 0xF8FF for c in text) else 0)
@@ -648,6 +663,102 @@ else
   bad "BarWidget: no literal private-use character in the file" \
       "found a raw PUA codepoint -- write it as \\uXXXX"
 fi
+rm -f "$pua_tmp"
+
+# 10 -- the glyph found by check 9 is not merely present somewhere in the
+#       file, it is actually the text the bar button shows. Round-1 finding
+#       F1: deleting `text: root.barGlyph` from the button left checks 8/9
+#       green -- exactly the invisible-button failure this task's own
+#       preamble warns about, undetected because nothing coupled the glyph
+#       to the button. Scoped to this file's own `BarIconButton { ... }`
+#       block (brace-depth extraction, the same technique check 6 uses for
+#       a teardown block) so a decoy `text: root.barGlyph` sitting anywhere
+#       else in the file could not satisfy this either.
+icon_block="$(awk '
+    BEGIN { capturing = 0; depth = 0 }
+    {
+        line = $0
+        if (!capturing) {
+            if (line !~ /(^|[^A-Za-z0-9_])BarIconButton[[:space:]]*\{/) next
+            capturing = 1
+            depth = 0
+        }
+        print line
+        n = length(line)
+        for (i = 1; i <= n; i++) {
+            c = substr(line, i, 1)
+            if (c == "{") depth++
+            else if (c == "}") {
+                depth--
+                if (depth <= 0) { capturing = 0; i = n + 1 }
+            }
+        }
+    }
+' <<<"$stripped_barwidget")"
+if [[ -z "$icon_block" ]]; then
+  bad "BarWidget: the bar button's text is bound to barGlyph" \
+      "no 'BarIconButton { ... }' block found in BarWidget.qml"
+elif grep -qE '(^|[^A-Za-z0-9_.])text:[[:space:]]*(root\.)?barGlyph([^A-Za-z0-9_]|$)' <<<"$icon_block"; then
+  ok "BarWidget: the bar button's text is bound to barGlyph"
+else
+  bad "BarWidget: the bar button's text is bound to barGlyph" \
+      "no 'text: (root.)barGlyph' inside the BarIconButton block: $icon_block"
+fi
+
+# The right-hand side of a `readonly property bool <name>:` declaration --
+# same line after the colon, or (if nothing follows there) the next line.
+# Same same-line-or-next-line handling check 6 already uses for
+# onDestruction ids, and check 9b for exitStatus operands.
+property_binding() {
+  # $1 = comment-stripped content, $2 = property name
+  awk -v name="$2" '
+    { lines[NR] = $0 }
+    END {
+      pat = "(^|[^A-Za-z0-9_])readonly[[:space:]]+property[[:space:]]+bool[[:space:]]+" name "[[:space:]]*:"
+      for (i = 1; i <= NR; i++) {
+        if (match(lines[i], pat)) {
+          rhs = substr(lines[i], RSTART + RLENGTH)
+          gsub(/^[[:space:]]+/, "", rhs); gsub(/[[:space:]]+$/, "", rhs)
+          if (rhs == "" && i < NR) {
+            rhs = lines[i + 1]
+            gsub(/^[[:space:]]+/, "", rhs); gsub(/[[:space:]]+$/, "", rhs)
+          }
+          print rhs
+          exit
+        }
+      }
+    }
+  ' <<<"$1"
+}
+
+# 11 -- `opened` and `popoutSwitchClosing` are bound to the loaded panel's
+#       real state, not merely declared under the right name. Round-1
+#       finding F3: hardcoding `readonly property bool opened: true` --
+#       which breaks the panel handoff outright -- left check 8 above
+#       green, because check 8 only verifies the declaration's TEXT, never
+#       the expression it holds. Applied to both lifecycle booleans, not
+#       only the one the finding named, since the same defect shape is
+#       equally possible on either. A literal true/false, or an expression
+#       that never mentions the Loader, is rejected; only an expression
+#       that reads panelLoader is accepted -- panelLoader is this file's
+#       own Loader id, so this is origin-qualified the same way check 5b is
+#       for Runners calls. Like check 8's onTriggered lookup, a property
+#       this script cannot locate at all is a FAIL, not a pass.
+for prop in opened popoutSwitchClosing; do
+  rhs="$(property_binding "$stripped_barwidget" "$prop")"
+  if [[ -z "$rhs" ]]; then
+    bad "BarWidget: '$prop' is bound to panelLoader, not a literal" \
+        "no expression found on the declaration's line or the next"
+  elif [[ "$rhs" =~ ^(true|false)\;?$ ]]; then
+    bad "BarWidget: '$prop' is bound to panelLoader, not a literal" \
+        "bound to the hardcoded literal '$rhs'"
+  elif [[ "$rhs" != *panelLoader* ]]; then
+    bad "BarWidget: '$prop' is bound to panelLoader, not a literal" \
+        "expression '$rhs' never mentions panelLoader"
+  else
+    ok "BarWidget: '$prop' is bound to panelLoader, not a literal"
+  fi
+done
 
 printf '\nqml structure: total=%d failed=%d\n' "$run" "$failed"
 (( failed == 0 ))
