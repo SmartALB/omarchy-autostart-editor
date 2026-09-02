@@ -1,11 +1,18 @@
 # Hyprland Lua API probe -- results
 
 Run with `test/probe-hyprland-api.sh` on Hyprland 0.56.2 (Omarchy Quattro),
-three monitors (`HDMI-A-1`, `DP-3`, `DP-4`). This is the verbatim output of
-the final, hardened version of the script (the one with the collateral-move
-safety net described below -- it is chosen as the record run because it is
-also the run where that safety net actually caught and fixed a real
-collateral event, which is itself part of what this probe found):
+three monitors (`HDMI-A-1`, `DP-3`, `DP-4`). The script tries each form of
+each dispatcher call `PROBE_TRIALS` times (default 7, override via env var)
+and tallies worked / no-op / collateral per form -- these are the
+instrument's own counts, produced by the loop below, not a hand tally from
+re-running the script. If any call moves a window or workspace other than
+the one under test, the script restores it, **verifies the restore by
+reading it back**, reports the event, and stops the whole run immediately --
+no further trials, no further forms, on the theory that a loop which keeps
+going after the guard fired is a loop that can damage the desktop
+repeatedly. This is the verbatim output of the default-settings run kept as
+the record (the first of three default-settings runs performed today, all
+three of which show the identical pattern -- see the safety section below):
 
 ```
 === Q1: does Lua state survive across separate eval calls? ===
@@ -15,30 +22,27 @@ PASS  Q1: state persists -- rule handles can live in _G
 === Q2 + Q3: need a real window ===
   ..  focused monitor (where an unmatched window lands by default): HDMI-A-1
   ..  Q2 target monitor (unfocused, so it differs from the focused monitor HDMI-A-1 and any effect can only come from the rule): DP-3
-  ..  probe window address = 0x55a061c7cc10
+  ..  probe window address = 0x55a061af9040
   ..  window opened on monitor DP-3 (rule asked for DP-3; focused/default monitor was HDMI-A-1)
 PASS  Q2: window_rule honours a monitor field
 
   ..  using workspace 51 as the disposable alternate target (verified not currently in use)
-  !!  SAFETY: this call moved an unrelated window (0x55a0618b74a0) from workspace 10 to 51 -- restoring it now
-Q3 -- form-by-form results (target alternates 50/51 so a hit can't be a leftover):
-      did not work  hyprctl eval -- hl.dispatch(hl.dsp.window.move({ workspace = '50', window = '0x55a061c7cc10', follow = false }))
-      worked        hyprctl eval -- hl.dispatch(hl.dsp.window.move({ workspace = '50', window = hl.get_window('0x55a061c7cc10'), follow = false }))
-      did not work  hyprctl dispatch -- hl.dsp.window.move({ workspace = '51', window = '0x55a061c7cc10', follow = false })
-      UNSAFE (moved a different window instead, restored)  hyprctl dispatch -- hl.dsp.window.move({ workspace = '51', window = hl.get_window('0x55a061c7cc10'), follow = false })
+Q3 -- per-form tallies, up to 7 trials each (target alternates 50/51 so a hit can't be a leftover):
+      eval + plain address string                                0/7 worked, 7 no-op, 0 collateral
+  !!  SAFETY: this call moved an unrelated window (0x55a061872770) from workspace 9 to 51 -- restored and VERIFIED back on workspace 9
+      eval + hl.get_window() object                              1/2 worked, 0 no-op, 1 collateral
+FAIL  Q3: ABORTED after a collateral-movement event -- Q3 form 'eval + hl.get_window() object', trial 2: window 0x55a061872770 moved 9->51, restored and verified back on 9.
+  ..  no further trials or forms will run this session
 
-Q3b -- form-by-form results (target monitor alternates so a hit can't be a leftover):
-      worked        hyprctl dispatch -- hl.dsp.workspace.move({ workspace = '50', monitor = 'HDMI-A-1' })
-      worked        hyprctl eval -- hl.dispatch(hl.dsp.workspace.move({ workspace = '50', monitor = 'DP-3' }))
-PASS  Q3b: at least one form moves an existing workspace to another monitor (see table above)
-PASS  Q3: at least one form moves a specific window (see table above)
+INCONCLUSIVE  Q3b: skipped -- the run already aborted after a collateral-movement event
 
-  ..  probe window closed (pid 3561327 terminated, verified gone from hyprctl -j clients)
+  ..  probe window closed (pid 3642535 terminated, verified gone from hyprctl -j clients)
 ```
 
-Every run described below was verified clean afterwards: no leftover
-`omarchy-autostart-probe` window, no leftover workspace >= 50, and (after
-the safety net below existed) no other window left on the wrong workspace.
+Every run was verified clean afterwards: no leftover `omarchy-autostart-probe`
+window, no leftover workspace >= 50, and the collaterally-moved window back
+on its original workspace, confirmed against `hyprctl -j clients` after the
+script exited, not just from the script's own claim.
 
 ## Q1 -- Lua state across separate `eval` calls
 
@@ -60,10 +64,11 @@ Fixed: the probe now reads each monitor's `focused` flag and targets the
 rule at a monitor that is explicitly **not** focused, so the rule is the
 only thing that can explain the window landing there. Re-measured this way,
 `hl.window_rule({ ..., monitor = 'DP-3' })` set before the window opened
-(while `HDMI-A-1` was focused) still made the window land on `DP-3`, PASS.
-Task 9 can rely on `window_rule`'s `monitor` field directly for monitor
-placement, the same way it already relies on `workspace`. (`HL.WindowRuleSpec`
-in `/usr/share/hypr/stubs/hl.meta.lua` declares only `enabled?`, `match?` and
+(while `HDMI-A-1` was focused) still made the window land on `DP-3`, PASS,
+reproduced identically across all three runs performed today. Task 9 can
+rely on `window_rule`'s `monitor` field directly for monitor placement, the
+same way it already relies on `workspace`. (`HL.WindowRuleSpec` in
+`/usr/share/hypr/stubs/hl.meta.lua` declares only `enabled?`, `match?` and
 `name?` -- no `monitor`, and not even `workspace` -- so this remains
 undocumented behaviour, confirmed only by measurement, not by the stub.)
 
@@ -74,104 +79,158 @@ must then treat `monitor` as unproven rather than working.
 
 ## Q3 -- moving a specific, already-open window
 
-The `break`-on-first-success from the first version of this probe was
-removed. All four forms are now tried on every run, each one required to
-cause an actual state transition (the target alternates between workspace
-50 and a second, dynamically-verified-unused workspace, so a form that does
-nothing can never be scored as a pass by finding the window already where
-it asked). Results, tallied across seven runs (the run shown above, plus six
-earlier ones during this fix):
+**Revised conclusion.** The previous version of these notes recommended one
+specific form (`eval` + `hl.get_window(addr)`) as "the reliable form" based
+on 7/7 across several separate single-trial runs. Running the *same* form
+repeatedly, back to back, inside one script run (as `PROBE_TRIALS` now
+does) surfaced something that separate single-trial runs never could: **that
+form is not safe either.** In all three default-settings runs performed
+today, it worked cleanly on its first trial and then, on its *second* trial
+in the same run, silently moved a different real window (Chatterbox, then two
+different Termpane windows across the three runs) instead of the probe
+window. Every one of these was caught, restored, and the restore verified
+by reading the window back off `hyprctl -j clients`; the run then stopped
+itself per the abort rule below.
 
-| form | verb | `window` value | outcome across 7 runs |
-| --- | --- | --- | --- |
-| `hl.dsp.window.move({ ..., window = ADDR })` | `eval` (wrapped in `hl.dispatch(...)`) | plain address string | did not work, 7/7 -- consistent, safe no-op |
-| `hl.dsp.window.move({ ..., window = hl.get_window(ADDR) })` | `eval` (wrapped in `hl.dispatch(...)`) | `hl.get_window()` object | **worked, 7/7** -- the reliable form |
-| `hl.dsp.window.move({ ..., window = ADDR })` | `dispatch` (bare) | plain address string | did not work, 7/7 -- consistent, safe no-op |
-| `hl.dsp.window.move({ ..., window = hl.get_window(ADDR) })` | `dispatch` (bare) | `hl.get_window()` object | **flaky and unsafe**: worked 2/7, silent no-op the rest, and on one run (shown above) it moved a *different, real window* (the user's Modelbox window) to the target workspace instead of the probe window |
+Because the abort rule (see the safety section) stops the whole run on the
+first collateral event, no default-settings run has yet completed all four
+forms' full `PROBE_TRIALS`. The tallies actually gathered, from the run
+shown above (identical in shape across all three runs -- only the specific
+collaterally-moved window differs):
 
-**Task 11 should copy exactly this form, verbatim:**
+| form | this run's tally |
+| --- | --- |
+| `eval` + plain address string | 0/7 worked, 7/7 no-op, 0 collateral -- consistently a safe no-op |
+| `eval` + `hl.get_window(addr)` object | 1/2 worked, 0/2 no-op, 1/2 collateral -- **worked once, then moved a different real window; run aborted here** |
+| `dispatch` (bare) + plain address string | not reached (run aborted first) |
+| `dispatch` (bare) + `hl.get_window(addr)` object | not reached by default (also gated off, see below) |
 
-```
-hyprctl eval -- hl.dispatch(hl.dsp.window.move({ workspace = '<ws>', window = hl.get_window('<addr>'), follow = false }))
-```
+**There is now no form of `window.move` this probe can call "safe".** The
+plain-address-string forms are reliable no-ops (never move anything, in 21
+total trials across the three runs' `eval`+string tests: 7+7+7 = 21, all
+no-op, 0 collateral) but are therefore useless. The object form is the only
+one that ever moves the window, and it has now caused collateral movement
+on **three separate occasions**, on **both** verbs across this
+investigation's full history (`dispatch` in the previous round, `eval` in
+this one) -- always by the second call to `hl.get_window()` with the same
+address in short succession. That timing detail matters: Task 11's
+reconcile step calls this once per window per reconcile pass, not in a
+tight repeated loop, so this may be less likely to bite there than it is in
+this probe's own trial loop -- but "less likely" is not "safe", and nothing
+measured here proves the single-call case is clean.
 
-and must **not** use the bare `hyprctl dispatch -- hl.dsp.window.move({ ...,
-window = hl.get_window(...) })` form even though it sometimes appears to
-work -- it has been directly observed moving the wrong window. The two
-plain-address-string forms are safe (they reliably do nothing) but useless.
-
-This is a correction from the first version of these notes, which said "PASS
-via `eval`, not `dispatch`" -- at that point `dispatch` had never actually
-been tried, only assumed to have failed because `eval` won the race first.
-It has now been tried, repeatedly, and the honest result is worse than
-"does not work": it sometimes works and sometimes silently acts on the
-wrong window.
+**Consequence for Task 9 and Task 11: never call a `window`-selecting
+dispatcher (`hl.dsp.window.move`, and by the same logic anything else in
+`hl.dsp.window.*` or `hl.dsp.group.*` that takes a `window` field) without
+wrapping it in exactly the guard this probe now uses** -- snapshot before,
+snapshot after, verify by reading the actual state back, restore-and-verify
+anything unexpected. Do not trust a single `hyprctl eval`/`dispatch` call's
+`ok` response, and do not trust that a form which worked in isolated,
+single-trial testing stays safe under repetition. This replaces the earlier
+"copy this one form verbatim" recommendation, which the trial data no
+longer supports.
 
 ## Q3b -- moving an already-existing workspace to another monitor
 
-Same fix as Q3: both verbs are now tried every run (target monitor
-alternates so neither can pass by finding the workspace already there).
-Across all seven runs, both forms worked every time, with no flakiness and
-no collateral movement of any other workspace:
+Not reached in any of today's three default-settings runs: the abort rule
+stops the whole run (including Q3b) on the first collateral event, and all
+three runs hit one during Q3. `test/probe-hyprland-api.sh`'s own Q3b tallies
+for today are therefore all `INCONCLUSIVE: skipped -- the run already
+aborted after a collateral-movement event` -- not a measurement of Q3b
+itself.
 
-| form | outcome across 7 runs |
-| --- | --- |
-| `hyprctl dispatch -- hl.dsp.workspace.move({ workspace = '<ws>', monitor = '<mon>' })` | worked, 7/7 |
-| `hyprctl eval -- hl.dispatch(hl.dsp.workspace.move({ workspace = '<ws>', monitor = '<mon>' }))` | worked, 7/7 |
+The last actual measurement of Q3b is from the previous round of this fix
+(2026-09-02, before the trial-loop/abort redesign, still the same day): both
+`dispatch` (bare) and `eval` + `hl.dispatch(...)` moved workspace 50 to the
+requested monitor, 7 times out of 7 each, across seven single-trial runs,
+with no flakiness and no collateral movement of any other workspace
+observed at the time. That evidence stands, but it predates both the
+tighter trial-in-one-run methodology and the discovery (above) that the
+*window*-move object form is not reliably safe under repetition -- Q3b's own
+forms take no `window` selector at all (only workspace id and monitor name,
+both plain strings), so the mechanism that caused Q3's collateral events
+does not obviously apply, but this has not been re-confirmed under the
+current, more rigorous protocol. Task 11 should treat Q3b's "both verbs
+work" as carried-forward, dated evidence, not as re-verified today, and
+should still wrap any `workspace.move` call in the same before/after guard
+as a matter of course.
 
-Task 11 can use either verb for relocating a workspace that already exists
-to a different monitor; `dispatch` (bare, no `hl.dispatch(...)` wrapper) is
-the shorter of the two and is the one worth copying by default, but `eval`
-is an equally proven fallback if a caller is already inside an `eval` block
-for other reasons. The first version of these notes said "via `dispatch`,
-not `eval`" -- that "not" was also unsupported at the time (`eval` had never
-been tried, `dispatch` had just won first); now both are supported by
-seven-for-seven evidence.
-
-## Safety finding: an unresolved `window` selector does not reliably no-op
+## Safety finding: an unresolved `window` selector does not reliably no-op, and this is worse than first documented
 
 This is the most important thing this probe found beyond the four graded
-questions, because it changed the probe script itself, not just the notes.
+questions, because it changed the probe script itself, not just the notes,
+twice.
 
-While re-testing Q3 without the early `break`, a background watch of every
-window's workspace (polled every 0.1-0.15 s throughout a run) caught the
-user's real Modelbox window silently moving from workspace 10 to the
-probe's scratch workspace during a `dispatch`-verb, object-selector
-`window.move` call whose *own* target (the probe window) did not move. In a
-separate, uninstrumented run before this was caught, the same thing
-happened to the user's own `org.omarchy.claude.alb-2de7` terminal window
-(moved to a scratch workspace and, once noticed, restored by hand to
-workspace 4 based on the exact icon-prefix pattern shared with its two
-sibling windows already there). Both were restored; the desktop was
-confirmed clean afterwards.
+**Round 1** (previous version of these notes): a background watch of every
+window's workspace, polled every 0.1-0.15 s throughout a run, caught the
+user's real Modelbox window silently moving to a scratch workspace during
+a `dispatch`-verb, object-selector `window.move` call whose own target (the
+probe window) did not move. A second real window, found displaced from an
+earlier, uninstrumented run, was restored by hand.
 
-Separately, `hl.get_window(addr)` -- the very selector that makes the
-reliable Q3 form work -- was also observed returning `nil` for an address
-that `hl.get_windows()` (the bulk listing) listed correctly moments later,
-for two different real windows in two different moments. `get_window` is
-not fully reliable either; a restore that depends on it should look the
-window up via `hl.get_windows()` and filter by address instead.
+**Round 2** (today): running the *same* form repeatedly inside one script
+run -- which trial-based measurement requires -- showed the collateral
+hazard is not specific to the `dispatch` verb or to a "wrong" form choice.
+The `eval` + `hl.get_window(addr)` object form, previously documented as
+"the reliable one", produced the identical failure mode on its second
+successive call in three separate runs. Both restores in round 1 were done
+by hand, unverified beyond a subsequent manual check; every restore in round
+2 is done by the script itself and is read back from `hyprctl` before being
+reported, closing that gap.
 
-Because of this, `test/probe-hyprland-api.sh` now wraps **every** dispatcher
+Separately, `hl.get_window(addr)` was also directly observed returning
+`nil` for an address that `hl.get_windows()` (the bulk listing) resolved
+correctly moments later, for two different real windows in two different
+moments. `get_window` is not fully reliable in either direction: it can
+resolve to nothing when the window exists, and (per the collateral events)
+it can seemingly resolve to the *wrong* window rather than the one asked
+for. A restore that depends on finding the right window looks it up via
+`hl.get_windows()` and filters by address, never via `get_window()`.
+
+Because of this, `test/probe-hyprland-api.sh` wraps **every** dispatcher
 call that could move a window or a workspace in a before/after snapshot of
 every client's workspace (or every workspace's monitor, for the Q3b calls).
-If anything other than the probe window/workspace changed, the guard
-restores it immediately (via the `get_windows()`-filter lookup, not
-`get_window()`) and reports it as `SAFETY: ... -- restoring it now` plus an
-`UNSAFE (moved a different window instead, restored)` line in the outcome
-table, instead of silently mislabelling that attempt "did not work". This
-guard is a permanent part of the committed script, not a one-off manual
-fix, because the script may be run again later by whoever implements
+If anything other than the thing under test changed, the guard:
+
+1. restores it via the `get_windows()`-filter lookup (never `get_window()`),
+2. **reads the result back** and only reports "restored" if the readback
+   confirms it -- if the readback disagrees, it prints an unmissable
+   `MANUAL FIX NEEDED` line (via both `warn` and the normal `fail` output
+   channel) naming the window/workspace, where it belongs, and where it
+   was last seen, so a human can finish the job,
+3. and then **stops the whole run** -- no further trials of the current
+   form, no further forms, no Q3b if the event happened during Q3. Seven
+   trials across up to four forms is a lot of chances to touch the user's
+   desktop; a loop that keeps going after the guard fired is a loop that
+   can do this repeatedly instead of once.
+
+This guard is a permanent part of the committed script, not a one-off
+manual fix, because the script may be run again later by whoever implements
 Task 11, on their own desktop, without anyone watching for collateral
 damage the way this investigation did.
 
-**Consequence for Task 9 and Task 11**: neither task should ever call
-`hl.dsp.window.move` (or, by the same logic, any other `hl.dsp.*` dispatcher
-that takes a `window` selector) with a plain address string, and Task 11
-specifically must use the `eval` + `hl.get_window(addr)` form for
-`window.move`, never the bare `dispatch` + `hl.get_window(addr)` form --
-not because the latter is merely unproven, but because it has been caught
-moving the wrong window on real hardware.
+**The bare-`dispatch` + `hl.get_window(addr)` object form for `window.move`
+is no longer run by default.** Its danger was established and documented in
+round 1 (2026-09-02); re-confirming it on every future run is a hazard for
+no new information, so it is now gated behind `PROBE_INCLUDE_DANGEROUS_FORM=1`.
+The one-off measurement that established this stands as recorded above: 2026-09-02,
+observed unsafe on at least one of several single-trial runs that day. Set
+`PROBE_INCLUDE_DANGEROUS_FORM=1` when running the script to include it
+again deliberately (for example, if Hyprland is upgraded and someone wants
+to check whether the behaviour changed).
+
+**Known limitation of the guard**: a before/after snapshot diff cannot tell
+"this hyprctl call moved the window" apart from "the user moved it by hand,
+or some other process moved it, in the same ~0.4-0.8 s window between the
+two snapshots". On this machine, which is the user's live, actively-used
+desktop, that possibility is real, not theoretical. This is an accepted
+trade-off for this probe, not a bug to fix: the alternative (a much longer
+observation window, or pausing all other activity) is not available to a
+script that has to share the machine with its user. Nobody should read a
+future `SAFETY: ...` line from this script as unconditional proof that the
+dispatcher call -- rather than something else running on the desktop at the
+same moment -- caused the move; it is the best attribution a snapshot diff
+can offer, and it restores either way.
 
 ## Cleanup finding: `window.close` and the plain-string `window` selector
 
