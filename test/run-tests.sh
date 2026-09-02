@@ -301,8 +301,16 @@ test_write_paths_each_yield_one_envelope() {
             create)   out="$(valid_config | "$CONFIG_BIN" write --expect-mtime 0)" ;;
             stale)    valid_config > "$f"; chmod 600 "$f"
                       out="$(valid_config | "$CONFIG_BIN" write --expect-mtime 1)" ;;
-            toolarge) out="$(jq -nc --argjson n 300000 '{schemaVersion:1,programs:[],workspaces:[]}' \
-                              | "$CONFIG_BIN" write --expect-mtime 0)" ;;
+            # Streamed through redirection, never jq --arg: same MAX_ARG_STRLEN
+            # reason as test_write_refuses_oversized_input above. This must
+            # actually build an oversized payload -- the previous version
+            # bound $n and never used it, so it silently drove the create
+            # path a second time instead of earning the "toolarge" name.
+            toolarge) out="$({
+                          printf '{"schemaVersion":1,"programs":[{"id":"p1","name":"'
+                          head -c 307200 /dev/zero | tr '\0' 'x'
+                          printf '"}],"workspaces":[]}'
+                      } | "$CONFIG_BIN" write --expect-mtime 0)" ;;
             broken)   out="$(printf '{"schemaVersion":1,' | "$CONFIG_BIN" write --expect-mtime 0)" ;;
         esac
         assert_eq "write envelope: $label exits 0" "$?" "0"
@@ -310,7 +318,69 @@ test_write_paths_each_yield_one_envelope() {
         assert_eq "write envelope: $label yields exactly one JSON object" "$count" "1"
         assert_eq "write envelope: $label carries an ok field" \
                   "$(jq -r 'has("ok")' <<<"$out" 2>/dev/null)" "true"
+        if [[ "$label" == "toolarge" ]]; then
+            assert_eq "write envelope: toolarge actually reports too-large" \
+                      "$(jq -r .error <<<"$out" 2>/dev/null)" "too-large"
+        fi
     done
+    teardown_sandbox
+}
+
+# The reviewer reproduced this as a real hang: with exactly one positional
+# parameter left, `shift 2` is a no-op per the bash manual, so a bare
+# trailing --expect-mtime left $1 unchanged and the while loop never
+# terminated -- 100% CPU, nothing ever emitted. `timeout 5` on every call
+# below is deliberate: a regression of this bug must fail the suite, not
+# hang it.
+test_write_usage_errors_terminate() {
+    setup_sandbox
+    local st
+    timeout 5 bash -c "printf '{}' | '$CONFIG_BIN' write --expect-mtime" >/dev/null 2>&1
+    st=$?
+    assert_eq "write: a bare --expect-mtime exits 2 and does not hang" "$st" "2"
+
+    timeout 5 bash -c "printf '{}' | '$CONFIG_BIN' write --nonsense 5" >/dev/null 2>&1
+    assert_eq "write: an unknown flag exits 2" "$?" "2"
+
+    timeout 5 bash -c "printf '{}' | '$CONFIG_BIN' write" >/dev/null 2>&1
+    assert_eq "write: a missing --expect-mtime exits 2" "$?" "2"
+
+    timeout 5 bash -c "printf '{}' | '$CONFIG_BIN' write --expect-mtime ''" >/dev/null 2>&1
+    assert_eq "write: an empty --expect-mtime exits 2" "$?" "2"
+
+    timeout 5 bash -c "printf '{}' | '$CONFIG_BIN' write --expect-mtime -1" >/dev/null 2>&1
+    assert_eq "write: a negative --expect-mtime exits 2" "$?" "2"
+    teardown_sandbox
+}
+
+# read treats a missing config directory as the first-class empty-model case
+# (test_missing_config_directory_still_answers above); write has to be able
+# to create that directory back, or a new user can look at an empty panel
+# and then be unable to save it.
+test_write_creates_a_missing_config_directory() {
+    setup_sandbox
+    rm -rf "$XDG_CONFIG_HOME/omarchy"
+    local out; out="$(valid_config | "$CONFIG_BIN" write --expect-mtime 0)"
+    assert_eq "write: a missing config directory is created" "$(jq -r .ok <<<"$out")" "true"
+    assert_eq "write: and the file lands with mode 0600" \
+              "$(stat -c %a "$XDG_CONFIG_HOME/omarchy/autostart-layout.json")" "600"
+    teardown_sandbox
+}
+
+# check_permissions deliberately omits -L: without it, `stat -c %a` on a
+# symlink reports the link's own mode (always 777), so a symlinked config is
+# refused by decision, not by accident of a mode that happens to look
+# writable. This pins that behaviour so it cannot silently change if -L is
+# ever added.
+test_write_refuses_a_symlinked_config_file() {
+    setup_sandbox
+    local f="$XDG_CONFIG_HOME/omarchy/autostart-layout.json"
+    local real="$SANDBOX/elsewhere.json"
+    valid_config > "$real"; chmod 600 "$real"
+    ln -s "$real" "$f"
+    local out; out="$(valid_config | "$CONFIG_BIN" write --expect-mtime 0)"
+    assert_eq "write: a symlinked config file is refused" \
+              "$(jq -r .error <<<"$out")" "insecure-permissions"
     teardown_sandbox
 }
 
@@ -322,5 +392,8 @@ test_write_refuses_broken_input_and_leaves_the_old_file
 test_write_leaves_no_temp_file_behind
 test_write_is_silent_on_success
 test_write_paths_each_yield_one_envelope
+test_write_usage_errors_terminate
+test_write_creates_a_missing_config_directory
+test_write_refuses_a_symlinked_config_file
 
 summary

@@ -44,6 +44,13 @@ err() {
 # command field is a shell command line executed at login, so a foreign writer
 # here is a foreign writer in the user's session. A writable directory is
 # enough -- the file can simply be replaced.
+#
+# Deliberately not -L: if $path is a symlink, GNU `stat -c %a` without -L
+# reports the *link's own* mode, which is always 777, so a symlinked config
+# is refused here. That's on purpose, not an accident of missing -L -- a
+# symlink could point into a directory somebody else controls, and this way
+# it is always refused rather than only sometimes, depending on what it
+# resolves to. Do not add -L.
 check_permissions() {
     local path="$1" kind="$2" mode
     # Absence is not a permission problem: on a fresh install neither the
@@ -111,12 +118,29 @@ cmd_write() {
     local expect_mtime=""
     while (( $# )); do
         case "$1" in
-            --expect-mtime) expect_mtime="${2:-}"; shift 2 ;;
+            --expect-mtime)
+                # $# -ge 2, not just "$2 is set": with exactly one positional
+                # parameter left, `shift 2` is a no-op per the bash manual
+                # (shift does nothing if n > $#), so a bare trailing
+                # --expect-mtime would leave $1 unchanged and spin the while
+                # loop forever instead of terminating.
+                [[ $# -ge 2 ]] \
+                    || { echo "usage: ${0##*/} write --expect-mtime <int> < config.json" >&2; exit 2; }
+                expect_mtime="$2"
+                shift 2
+                ;;
             *) echo "usage: ${0##*/} write --expect-mtime <int> < config.json" >&2; exit 2 ;;
         esac
     done
     [[ "$expect_mtime" =~ ^[0-9]+$ ]] \
         || { echo "usage: ${0##*/} write --expect-mtime <int> < config.json" >&2; exit 2; }
+
+    # read treats a missing directory as the empty model, so write has to be
+    # able to create the first-ever configuration -- otherwise a new user can
+    # look at an empty panel and then not be able to save it. Leave the mode
+    # to the user's umask, matching the rest of ~/.config; check_permissions
+    # below still refuses a pre-existing group/other-writable directory.
+    mkdir -p "$CONFIG_DIR" || err "write-failed" "could not create $CONFIG_DIR"
 
     check_permissions "$CONFIG_DIR" "directory"
 
@@ -124,7 +148,8 @@ cmd_write() {
     if [[ -e "$CONFIG" ]]; then
         [[ -f "$CONFIG" ]] || err "not-a-file" "$CONFIG is not a plain file"
         check_permissions "$CONFIG" "file"
-        current="$(stat -c %Y "$CONFIG")"
+        current="$(stat -c %Y "$CONFIG" 2>/dev/null)" \
+            || err "not-a-file" "$CONFIG disappeared before it could be checked"
     fi
     [[ "$current" == "$expect_mtime" ]] \
         || err "stale" "the file changed on disk (mtime $current, caller expected $expect_mtime)"
