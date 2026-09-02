@@ -145,7 +145,10 @@ info "window opened on monitor $landed_name (rule asked for $MON2)"
 echo
 # Q3: move this specific window, not the active one. Try the plausible forms
 # in order and stop at the first that actually changes the workspace.
-target_ws=4
+# Workspace 50, not 4: the probe moves this workspace to another monitor, and
+# workspace 4 may hold the user's own windows. 50 comes into existence holding
+# nothing but the probe window and disappears with it.
+target_ws=50
 moved=""
 # Both verbs, because they are not interchangeable: eval runs a Lua chunk,
 # dispatch takes a dispatcher expression. Notes from 2026-08-28 record
@@ -167,7 +170,8 @@ do
 done
 
 # The workspace move has its own answer, and the same window is a fine probe
-# for it: move workspace 4 to the second monitor and see whether it lands.
+# for it: workspace 50 now exists and holds only the probe window, so moving it
+# disturbs nothing of the user's.
 ws_moved="no"
 for verb in dispatch eval; do
   expr="hl.dsp.workspace.move({ workspace = '$target_ws', monitor = '$MON1' })"
