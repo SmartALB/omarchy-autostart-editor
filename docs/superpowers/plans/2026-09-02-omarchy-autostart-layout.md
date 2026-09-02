@@ -1579,7 +1579,14 @@ fi
 jq -e 'type == "array"' <<<"$monitors" >/dev/null 2>&1 || monitors="[]"
 
 jq -c --argjson mon "$monitors" --argjson max "$MAX_WINDOWS" '
-    ( $mon | map({ key: (.id | tostring), value: .name }) | from_entries ) as $names
+    # monitors travels through --argjson (argv) while clients is streamed
+    # through stdin to respect the MAX_ARG_STRLEN limit. A monitor list is
+    # bounded by physical hardware and will never approach that limit;
+    # streaming a second input here would need a temporary file with its own
+    # cleanup -- more machinery than the inconsistency costs. Kept on purpose.
+    ( $mon | map(select(type == "object"))
+           | map({ key: (.id | tostring), value: .name }) | from_entries ) as $names
+    | map(select(type == "object"))
     | map(select((.workspace.id // 0) > 0))
     | .[0:$max]
     | map({
@@ -1598,6 +1605,22 @@ Zur Auswahl `(.workspace.id // 0) > 0`: Hyprlands Spezial-Workspaces (Scratchpad
 
 Run: `chmod +x bin/omarchy-autostart-windows && ./test/run-tests.sh`
 Expected: alle Zusicherungen `ok`.
+
+**Vier Tests sind gegenüber diesem Entwurf hinzugekommen** (Commit `2b91cad`),
+alle aus dem Review, und jeder deckt eine Lücke, die die vier ursprünglichen
+nicht sahen:
+
+1. Ein wohlgeformtes Array aus **Nicht-Objekten** (`[1,2,3]`) kam durch die
+   Wächter, weil die nur den äußeren Typ prüfen — danach scheiterte `jq` an
+   `.class`, der Fehler war unumgeleitet, und das Skript endete nicht-null mit
+   **leerem** stdout statt mit `[]`. Behoben durch
+   `map(select(type == "object"))` auf **beiden** Eingaben.
+2. Kein Test hätte gemerkt, wenn Filter und Grenze die Plätze tauschen. Der
+   neue Test unterscheidet die Reihenfolgen an der Anzahl: 100 Scratchpad- plus
+   420 normale Fenster ergeben 420 bei Filter-zuerst und 400 bei
+   Grenze-zuerst.
+3. Ein `hyprctl`, das mit Status 1 endet (nicht bloß fehlt).
+4. Gültiges JSON, das kein Array ist.
 
 - [ ] **Step 5: Eine Mutationsprobe fahren**
 
