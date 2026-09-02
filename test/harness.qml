@@ -594,10 +594,18 @@ QtObject {
             // Provoked from real configurations rather than from a hand-copied
             // list of codes: a new reason added to validate() with no wording
             // turns the first of these red, which a list mirroring the
-            // validator could never do. The second binds the first -- without
-            // it, provoking nothing at all would pass vacuously, which was
-            // confirmed by blanking the list and watching only the second go
-            // red.
+            // validator could never do.
+            //
+            // BOTH CHANNELS, and that is the whole point of the shape. The
+            // first version of this walked `rejected` only, and `class-conflict`
+            // -- the sole `blocked` reason -- went unnoticed without wording
+            // for a whole round. The two channels are not interchangeable:
+            // `rejected` is a named visible omission with everything else
+            // applied, `blocked` stops the save outright. A completeness claim
+            // that covers one of them is not a completeness claim, so the
+            // channel is carried alongside the code and asserted per channel
+            // below -- otherwise a future channel that nothing provokes would
+            // let its reasons through exactly the same way.
             function provokedReasons() {
                 var many = [], i;
                 for (i = 0; i < 205; i++) many.push(prog({ id: "p" + i }));
@@ -621,29 +629,60 @@ QtObject {
                     cfg([], [{ workspace: "0", monitor: "DP-4" }]),
                     cfg([], [{ workspace: "1", monitor: "DP-4" },
                              { workspace: "1", monitor: "DP-3" }]),
-                    cfg([], manyWs)
+                    cfg([], manyWs),
+                    // The blocked channel: one window class, two placements.
+                    // The natural mistake the either-or placement rule invites,
+                    // and the reason this list has to cover both channels.
+                    cfg([prog({ id: "a", name: "Nimbus A", placement: { kind: "workspace", value: "6" } }),
+                         prog({ id: "b", name: "Nimbus B", placement: { kind: "workspace", value: "7" } })])
                 ];
                 var seen = Object.create(null), out = [];
-                for (i = 0; i < configs.length; i++) {
-                    var rejected = Model.validate(configs[i]).rejected;
-                    for (var j = 0; j < rejected.length; j++) {
-                        var code = String(rejected[j].reason);
-                        if (seen[code] === undefined) { seen[code] = true; out.push(code); }
+                function collect(entries, channel) {
+                    for (var k = 0; k < entries.length; k++) {
+                        var key = channel + ":" + String(entries[k].reason);
+                        if (seen[key] === undefined) {
+                            seen[key] = true;
+                            out.push({ channel: channel, code: String(entries[k].reason) });
+                        }
                     }
+                }
+                for (i = 0; i < configs.length; i++) {
+                    var verdict = Model.validate(configs[i]);
+                    collect(verdict.rejected, "rejected");
+                    collect(verdict.blocked, "blocked");
                 }
                 return out;
             }
 
-            check("reasonText: every reason validate produces has plain wording",
+            function reasonsInChannel(channel) {
+                var all = provokedReasons(), n = 0;
+                for (var i = 0; i < all.length; i++) if (all[i].channel === channel) n++;
+                return n;
+            }
+
+            // "Has wording" means BOTH: not the bare code back, and long
+            // enough to be a sentence rather than a decorated identifier.
+            // The floor is 12 characters -- far below any real sentence here,
+            // far above "class-conflict!" -- so a one-character escape from
+            // the equality test does not count as wording.
+            check("reasonText: every reason validate emits through EITHER channel has plain wording",
                   (function() {
-                      var codes = provokedReasons(), without = [];
-                      for (var i = 0; i < codes.length; i++) {
-                          if (Model.reasonText(codes[i]) === codes[i]) without.push(codes[i]);
+                      var all = provokedReasons(), without = [];
+                      for (var i = 0; i < all.length; i++) {
+                          var worded = Model.reasonText(all[i].code);
+                          if (worded === all[i].code || String(worded).length < 12)
+                              without.push(all[i].channel + ":" + all[i].code);
                       }
                       return without.join(",");
                   })(), "");
-            check("reasonText: the configurations above really do provoke 13 distinct reasons",
-                  provokedReasons().length, 13);
+            // These two bind the one above: without them, a channel nothing
+            // provokes would pass it vacuously -- which is exactly how the
+            // blocked channel slipped through. Confirmed by blanking the
+            // configuration list and watching only these go red.
+            check("reasonText: the configurations provoke all 13 rejected reasons",
+                  reasonsInChannel("rejected"), 13);
+            check("reasonText: the configurations provoke all 1 blocked reasons",
+                  reasonsInChannel("blocked"), 1);
             check("reasonText: an unknown code is passed through, not guessed at",
                   Model.reasonText("something-new"), "something-new");
 

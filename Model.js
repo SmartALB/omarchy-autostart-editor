@@ -338,6 +338,18 @@ function reasonText(code) {
     if (code === "workspace-invalid")   return "the workspace number or monitor name is not allowed";
     if (code === "workspace-duplicate") return "this workspace is listed twice";
     if (code === "too-many")            return "there are too many entries";
+    // The blocked channel's own reason, and the likeliest of the whole set to
+    // actually happen: two entries for one window class with different places
+    // is the natural mistake the either-or placement rule invites. The wording
+    // has to say what to DO, because unlike every code above this one stops
+    // the save rather than dropping one entry -- there is nothing the user can
+    // ignore their way past.
+    //
+    // Worded to read after a list of labels, which is the only frame it ever
+    // appears in ("Nimbus A, Nimbus B: these match ...").
+    if (code === "class-conflict")
+        return "these match the same window class but want different places -- "
+             + "one of the two placements has to go";
     return String(code);
 }
 

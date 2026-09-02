@@ -1088,5 +1088,41 @@ else
   fi
 fi
 
+# 22 -- a reason code is never shown to the user raw. Every place Panel.qml
+#       touches a `.reason` has to hand it to Model.reasonText, which is the
+#       one function that turns a code into English and the one place a test
+#       can check the wording exists at all.
+#
+#       This is the class-level half of round 2's defect. The instance was
+#       that Model.js had no wording for "class-conflict"; the reason nobody
+#       noticed for a round is that this file spelled the sentence out twice
+#       BY HAND for the blocked channel and never called reasonText on it, so
+#       the only place a reason becomes English was the only place that reason
+#       never went. Wording duplicated into QML is wording no suite here can
+#       reach -- nothing in this project can execute a file that imports
+#       Quickshell.
+#
+#       Line-scoped with its neighbours, the same same-line-or-adjacent
+#       idiom checks 6 and 9b already use for values that wrap. `.reasonText`
+#       itself is excluded by the boundary so the call does not count as its
+#       own subject.
+reason_pat='\.reason([^A-Za-z0-9_]|$)'
+raw_reasons=""
+mapfile -t panel_lines <<<"$stripped_panel"
+for ((i = 0; i < ${#panel_lines[@]}; i++)); do
+  grep -qE "$reason_pat" <<<"${panel_lines[$i]}" || continue
+  window="${panel_lines[$i]}"
+  (( i > 0 )) && window="${panel_lines[$((i - 1))]}
+$window"
+  (( i + 1 < ${#panel_lines[@]} )) && window="$window
+${panel_lines[$((i + 1))]}"
+  grep -qF 'Model.reasonText(' <<<"$window" \
+    || raw_reasons="$raw_reasons
+Panel.qml:$((i + 1)): ${panel_lines[$i]}"
+done
+raw_reasons="$(sed '/^$/d' <<<"$raw_reasons")"
+[[ -z "$raw_reasons" ]] && ok "Panel: every reason code is worded through Model.reasonText" \
+                       || bad "Panel: every reason code is worded through Model.reasonText" "$raw_reasons"
+
 printf '\nqml structure: total=%d failed=%d\n' "$run" "$failed"
 (( failed == 0 ))

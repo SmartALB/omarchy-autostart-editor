@@ -374,8 +374,13 @@ Panel {
     function apply() {
         root.errorText = ""
         if (root.blocked.length > 0) {
-            root.errorText = "Two programs match the same window class but want "
-                           + "different places: " + root.blocked[0].labels.join(", ")
+            // Through Model.reasonText, not spelled out here. This sentence
+            // used to be written twice in this file and a third time nowhere
+            // -- Model.js had no wording for "class-conflict" at all -- so the
+            // one place a reason code turns into English was the one place
+            // this reason never reached. One wording, one home, tested there.
+            root.errorText = root.blocked[0].labels.join(", ") + ": "
+                           + Model.reasonText(root.blocked[0].reason)
             return
         }
         writeProc.command = run.runnerOut(
@@ -1184,8 +1189,8 @@ Panel {
                                 required property var modelData
                                 textFormat: Text.PlainText
                                 width: body.width
-                                text: modelData.labels.join(", ")
-                                    + " match the same window class but want different places"
+                                text: modelData.labels.join(", ") + ": "
+                                    + Model.reasonText(modelData.reason)
                                 color: root.warn
                                 font.family: root.fontFam
                                 font.pixelSize: Style.font.caption
