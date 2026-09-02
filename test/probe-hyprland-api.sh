@@ -114,6 +114,25 @@ else
 fi
 
 echo
-hyprctl eval "hl.dsp.window.close({ window = '$addr' })" >/dev/null 2>&1 \
-  || hyprctl dispatch closewindow "address:$addr" >/dev/null 2>&1
-info "probe window closed; every rule set here is inert and gone at the next Hyprland start"
+# Hyprland dispatchers are not needed to end this window -- the script started
+# it itself, so hyprctl -j clients' .pid is enough to kill it directly. This
+# also sidesteps the Lua API's "ok" fallacy on window.close/closewindow: eval
+# and dispatch both answered "ok" for those without moving the needle (see
+# the notes file), so this is not a trust-the-verb close, it is a checked one.
+close_pid="$(hyprctl -j clients | jq -r --arg a "$addr" '.[] | select(.address == $a) | .pid')"
+if [[ -z "$close_pid" || "$close_pid" == "null" ]]; then
+  fail "could not find a pid for $addr -- probe window needs manual cleanup"
+else
+  kill "$close_pid" 2>/dev/null
+  closed="no"
+  for _ in $(seq 1 12); do
+    still="$(hyprctl -j clients | jq -r --arg a "$addr" '.[] | select(.address == $a) | .address')"
+    [[ -z "$still" ]] && { closed="yes"; break; }
+    sleep 0.25
+  done
+  if [[ "$closed" == "yes" ]]; then
+    info "probe window closed (pid $close_pid terminated, verified gone from hyprctl -j clients)"
+  else
+    fail "probe window still present after kill $close_pid -- needs manual cleanup"
+  fi
+fi
