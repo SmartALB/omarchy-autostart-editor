@@ -10,6 +10,12 @@
 
 **Spec:** `docs/superpowers/specs/2026-09-02-omarchy-autostart-layout-design.md`
 
+**Arbeitsverzeichnis:** `~/repos/omarchy-autostart-layout`. **Niemals** direkt in
+`~/.config/omarchy/plugins/` entwickeln: Quickshell hält dort ein
+`inotifywait -m -r`, jedes Schreiben löst einen Shell-Neustart aus und reißt
+laufende `Process`-Objekte mit. Für die Handprüfschritte in Task 14, 15 und 17
+einmal `./install` laufen lassen, danach `omarchy-restart-shell` und 8 s warten.
+
 ## Global Constraints
 
 Diese gelten für **jede** Aufgabe, auch wenn sie dort nicht wiederholt werden.

@@ -449,9 +449,16 @@ trotzdem grün.
 
 ## 10. Repo und Veröffentlichung
 
-Repo `SmartALB/omarchy-autostart-layout`, öffentlich, `main` geschützt;
-Arbeitsverzeichnis ist das Plugin-Verzeichnis selbst
-(`~/.config/omarchy/plugins/smartalb.autostart/`).
+Repo `SmartALB/omarchy-autostart-layout`, öffentlich, `main` geschützt.
+
+**Arbeitsverzeichnis ist `~/repos/omarchy-autostart-layout`, nicht das
+Plugin-Verzeichnis.** Quickshell hält ein `inotifywait -m -r` auf
+`~/.config/omarchy/plugins`; jedes Anfassen einer Datei dort löst einen
+Shell-Neustart aus und reißt laufende `Process`-Objekte mit. Wer dort
+entwickelt, lädt die Shell des Nutzers hundertfach neu und macht jede eigene
+Messung unzuverlässig. Für die Handprüfschritte kopiert `./install` in
+`~/.config/omarchy/plugins/smartalb.autostart/` — genau der Fall, für den der
+Installer die Unterscheidung zwischen `SOURCE` und `TARGET` hat.
 
 Im Wurzelverzeichnis: `manifest.json`, `README.md`, `LICENSE` (MIT) und
 `preview.png` **an der Wurzel** — dort sucht die Validierung; bei
