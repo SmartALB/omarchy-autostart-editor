@@ -133,7 +133,60 @@ FAKE
     export HYPRCTL="$path"
 }
 
+# --- the invocation guard ---------------------------------------------------
+#
+# EVERY test function a suite DEFINES must also be CALLED, and one that is not
+# fails the run BY NAME.
+#
+# THE FAILURE MODE, and it is not hypothetical: on 2026-09-03 an edit to
+# run-tests.sh dropped the `test_envelope_codes_match_the_script` invocation
+# line. Two assertions had just been added and two had silently stopped
+# running, so the suite reported the same total as before -- 154 -- and stayed
+# green. A test that does not run looks exactly like a test that passes. The
+# only thing that caught it was a person noticing that a number had not moved
+# when it should have.
+#
+# It runs from summary() rather than as a test function of its own, because a
+# test function is exactly the thing that can lose its invocation. A suite that
+# never calls summary() prints no total at all, and that is loud.
+#
+# FAIL-CLOSED AT EVERY STEP: an unreadable suite file fails; a discovery that
+# finds no test functions fails, because a guard over an empty set is the same
+# blind shape one level up; and an invocation written in any shape but the bare
+# name on its own line -- which is the form every suite here uses -- reads as
+# missing rather than being waved through. The last one is deliberate: this
+# cannot parse shell, so what it cannot read, it refuses.
+assert_every_test_function_is_invoked() {
+    local file="$1"
+    if [[ ! -r "$file" ]]; then
+        TESTS_RUN=$((TESTS_RUN + 1)); TESTS_FAILED=$((TESTS_FAILED + 1))
+        printf 'FAIL suite: the invocation guard can read the suite file\n       %q is not readable, so not one invocation could be verified\n' "$file"
+        return
+    fi
+    local defined missing name
+    # `tr -d '[:space:]()'` would delete the NEWLINES too and glue every name
+    # into one -- measured, it reported all 58 as missing. Spaces and
+    # parentheses only, one name per line.
+    defined="$(grep -oE '^[[:space:]]*test_[A-Za-z0-9_]+\(\)' "$file" \
+               | tr -d ' ()' | sort -u)"
+    assert_eq "suite: the invocation guard found test functions to check" \
+              "$([[ -n "$defined" ]] && echo found \
+                 || echo 'NONE -- the discovery pattern matched nothing in '"$file")" \
+              "found"
+    missing=""
+    while IFS= read -r name; do
+        [[ -n "$name" ]] || continue
+        grep -qE "^[[:space:]]*${name}[[:space:]]*$" "$file" || missing="$missing $name"
+    done <<<"$defined"
+    assert_eq "suite: every test function defined is also invoked" \
+              "${missing:- none}" " none"
+}
+
 summary() {
+    # Before the total is printed, so the guard's own two assertions are part
+    # of the number it reports. SUITE_FILE lets a suite name its own file; the
+    # fallback works because every suite here cd's to its own directory first.
+    assert_every_test_function_is_invoked "${SUITE_FILE:-./$(basename "$0")}"
     printf '\ntotal=%d failed=%d\n' "$TESTS_RUN" "$TESTS_FAILED"
     [[ "$TESTS_FAILED" -eq 0 ]]
 }
