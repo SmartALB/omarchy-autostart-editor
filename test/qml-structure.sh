@@ -1097,11 +1097,25 @@ else
   if [[ -z "$focus_id" ]]; then
     surface_missing="$surface_missing focusTarget"
   else
-    catcher_block="$(block_of "$keyboard_block" PanelKeyCatcher)"
-    if [[ -z "$catcher_block" ]]; then
-      surface_missing="$surface_missing PanelKeyCatcher-block"
-    elif ! grep -qE "(^|[^A-Za-z0-9_])id:[[:space:]]*${focus_id}([^A-Za-z0-9_]|\$)" <<<"$catcher_block"; then
-      surface_missing="$surface_missing focusTarget-names-no-PanelKeyCatcher($focus_id)"
+    # The catcher's OWN id, not any id in its subtree. A first version asked
+    # only whether "id: <focusTarget>" appeared anywhere inside the
+    # PanelKeyCatcher block -- and the ScrollView is a CHILD of that block, so
+    # `focusTarget: scrollArea` satisfied it while pointing keyboard focus at
+    # a Flickable that fires none of the catcher's Keys handlers. Found by
+    # mutation probe; the check was blind exactly the way the four it replaced
+    # were. Same first-id-after-the-opener technique as runners_instance_id().
+    catcher_id="$(awk '
+        /(^|[^A-Za-z0-9_])PanelKeyCatcher[[:space:]]*\{/ { incatcher = 1 }
+        incatcher && /id:[[:space:]]*[A-Za-z_]/ {
+            match($0, /id:[[:space:]]*[A-Za-z_][A-Za-z0-9_]*/)
+            t = substr($0, RSTART, RLENGTH); sub(/id:[[:space:]]*/, "", t)
+            print t; exit
+        }
+    ' <<<"$keyboard_block")"
+    if [[ -z "$catcher_id" ]]; then
+      surface_missing="$surface_missing PanelKeyCatcher-with-an-id"
+    elif [[ "$focus_id" != "$catcher_id" ]]; then
+      surface_missing="$surface_missing focusTarget($focus_id)-is-not-the-PanelKeyCatcher($catcher_id)"
     fi
   fi
 
