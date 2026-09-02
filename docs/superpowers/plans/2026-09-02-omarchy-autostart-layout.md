@@ -2057,7 +2057,12 @@ In `test/harness.qml` einfügen:
                   for (i = 0; i < 200; i++) many.push(prog({ id: "p" + i }));
                   var c = Model.buildRuleChunks(Model.validate(cfg(many, [])));
                   for (i = 1; i < c.length; i++) {
-                      var n = (c[i].match(/\bput\(/g) || []).length;
+                      // \bput\( allein trifft auch die Zeile
+                      // `local function put(key, rule)` im Vorspann jedes
+                      // Blocks und zaehlt damit eine Regel zu viel. Gezaehlt
+                      // werden nur die Aufrufe, die eine kodierte Zeichenkette
+                      // uebergeben -- also echte Regeln.
+                      var n = (c[i].match(/\bput\(string\.char\(/g) || []).length;
                       if (n > 20) return "chunk " + i + " has " + n;
                   }
                   return "within";
@@ -2168,8 +2173,11 @@ CONFIG="${1:-}"
   "workspaces":[{"workspace":"6","monitor":"HDMI-A-1"},{"workspace":"2","monitor":"DP-3"}]}'
 
 tmp="$(mktemp -d)"; trap 'rm -rf "$tmp"' EXIT
+# Mit Zeitlimit, wie der QML-Laeufer: fehlt buildRuleChunks noch, haengt der
+# Dumper sonst unbegrenzt, statt schnell zu scheitern -- und der Schritt
+# "laufen lassen und den Fehlschlag sehen" wird dann unausfuehrbar.
 QT_FORCE_STDERR_LOGGING=1 QT_QPA_PLATFORM=offscreen \
-  "$QML" dump-chunks.qml -- "$CONFIG" 2>&1 \
+  /usr/bin/timeout -k 5 120 "$QML" dump-chunks.qml -- "$CONFIG" 2>&1 \
   | sed 's/^qml: //' > "$tmp/all"
 
 # Split on the marker into $tmp/chunk.NN
@@ -2343,7 +2351,11 @@ Run:
 ./test/run-qml-tests.sh
 ./test/run-tests.sh
 ```
-Expected: beide grün. Die Lua-Prüfung nennt mindestens vier kompilierte Blöcke.
+Expected: beide grün. Die Lua-Prüfung nennt die Anzahl der kompilierten
+Blöcke — bei der Standardkonfiguration sind das **zwei** (der Rücksetz-Block
+plus einer, weil die fünf Regelanweisungen zusammen in einen Block passen).
+Die Zusicherung im Shell-Test prüft ohnehin keine Anzahl, sondern nur, dass
+die `lua chunks: total=`-Zeile erscheint.
 
 - [ ] **Step 5: Drei Mutationsproben fahren**
 
