@@ -1,15 +1,13 @@
 #!/usr/bin/env bash
 # Removes Autostart Layout.
 #
-# It does NOT remove your configuration file: that is your data, and a
-# reinstall should find your list again. The path is printed so you can delete
-# it deliberately.
+# It removes the plugin and nothing else. There is no configuration of its own
+# to keep or delete: the only file it ever wrote is ~/.config/hypr/autostart.lua,
+# which is your own file and is left exactly as it stands.
 set -euo pipefail
 
 ID="smartalb.autostart"
 TARGET="${XDG_CONFIG_HOME:-$HOME/.config}/omarchy/plugins/$ID"
-CONFIG="${XDG_CONFIG_HOME:-$HOME/.config}/omarchy/autostart-layout.json"
-MARKER_DIR="${XDG_RUNTIME_DIR:-/run/user/$(id -u)}/$ID"
 
 # Written as `if`, not as `[[ -d x ]] && rm -rf x`: an && chain whose first
 # link is false yields status 1, and under `set -e` that is one edit away
@@ -22,19 +20,12 @@ else
     echo "Nothing installed at $TARGET"
 fi
 
-if [[ -d "$MARKER_DIR" ]]; then
-    rm -rf -- "$MARKER_DIR"
-fi
-
 cat <<NOTE
 
 Remove the widget from your bar in ~/.config/omarchy/shell.json, then run
 omarchy-restart-shell.
 
-Your configuration was kept:
-  $CONFIG
-
-Rules that are already set live on until Hyprland restarts. They are held in
-the running compositor and in no file, so there is nothing left to delete --
-log out and back in, or run: hyprctl reload
+Nothing else was touched. Your autostart entries are in your own
+~/.config/hypr/autostart.lua and keep working without this plugin; the last
+backup it took, if any, is beside it as autostart.lua.bak.
 NOTE

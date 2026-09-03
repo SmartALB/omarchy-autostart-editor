@@ -1,338 +1,47 @@
 // Autostart Layout -- all decision logic, plain JavaScript, no QML API.
 // Kept free of QML imports so it can run headless in test/harness.qml.
-
-// Encode a string as a Lua string.char(...) expression.
 //
-// This is the second of the two layers that keep the class field from becoming
-// code inside the compositor. The first is the character allowlist in
-// validate(); this one makes an escape not merely rejected but impossible to
-// write down, because the payload consists of digits and commas only. It does
-// not rely on the allowlist having run.
-function luaBytes(s) {
-    var out = [];
-    for (var i = 0; i < s.length; i++) {
-        var c = s.charCodeAt(i);
-        if (c < 1 || c > 126) {
-            throw new Error("luaBytes: byte out of range at index " + i + ": " + c);
-        }
-        out.push(c);
-    }
-    return "string.char(" + out.join(",") + ")";
-}
-
-// --- allowlists -----------------------------------------------------------
+// This plugin edits ONE file: ~/.config/hypr/autostart.lua. It reads that
+// file, shows what it can represent of it, and writes one line of it at a
+// time. It has no configuration of its own, applies nothing to the running
+// compositor, and generates no Lua for `hyprctl eval`.
 //
-// The class field is the only free-text value that reaches Lua inside the
-// compositor. This allowlist is layer one of two: it catches nonsense early
-// and says so in words a person can act on. It is deliberately NOT the thing
-// that makes injection impossible -- luaBytes() is, and it does not rely on
-// this having run: every value crossing into a Lua chunk is re-encoded as
-// string.char(...) bytes there, so a value this allowlist let through could
-// still not close a quote or a brace. Two layers, and the second one is the
-// one that holds.
-//
-// Allowed: letters, digits, space, and the metacharacters a Hyprland class
-// regex actually needs. Absent by construction: " ' { } ; = backtick,
-// newline, and everything outside ASCII.
-var CLASS_RE     = /^[A-Za-z0-9 ._^$()|\[\]?*+\\:-]{1,200}$/;
-var MONITOR_RE   = /^[A-Za-z0-9._-]{1,64}$/;
-var WORKSPACE_RE = /^([1-9]|[1-9][0-9])$/;
-var ID_RE        = /^[a-z0-9]{1,16}$/;
+// THE ESCAPING BOUNDARY IS luaQuote, and it is the only one left. An earlier
+// version of this plugin generated Lua chunks and handed them to
+// `hyprctl eval`, and the defence there was luaBytes(): every value re-encoded
+// as string.char(...) digits, so a quote or a brace in a window class could
+// not be written down at all. That whole route is gone -- no chunks, no eval,
+// no generated payload -- and with it luaBytes. What remains is one writer of
+// one file, and its boundary is three things that hold together: the character
+// allowlist in autostartCharRefused (a line break or a control character
+// cannot be written at all), luaQuote's real escaping of the two characters a
+// Lua literal can carry escaped, and the `luac5.1 -p` gate in
+// bin/omarchy-autostart-hypr-write, which refuses a candidate file that does
+// not compile. A readable literal is deliberate here: this file is
+// hand-maintained by its owner, and string.char(98,114,97,118,101) in it
+// would be safe and useless.
 
-var MAX_PROGRAMS   = 200;
-var MAX_WORKSPACES = 99;
 var MAX_NAME       = 100;
 var MAX_COMMAND    = 500;
 
-function isString(v) { return typeof v === "string"; }
-
-function labelOf(program, index) {
-    if (program && isString(program.name) && program.name.length > 0) return program.name;
-    if (program && isString(program.id)) return program.id;
-    return "entry #" + (index + 1);
-}
-
-// A placement is either-or by design: a workspace lives on exactly one
-// monitor, so "workspace 2" and "monitor DP-4" are not two wishes with a
-// precedence, they are two statements one of which must be false.
-function placementProblem(placement) {
-    if (!placement || !isString(placement.kind)) return "placement-invalid";
-    if (placement.kind === "none") {
-        return placement.value === undefined ? null : "placement-invalid";
-    }
-    if (placement.kind === "workspace") {
-        if (placement.monitor !== undefined) return "placement-invalid";
-        return WORKSPACE_RE.test(placement.value) ? null : "placement-invalid";
-    }
-    if (placement.kind === "monitor") {
-        if (placement.workspace !== undefined) return "placement-invalid";
-        return MONITOR_RE.test(placement.value) ? null : "placement-invalid";
-    }
-    return "placement-invalid";
-}
-
-function programProblem(p) {
-    if (!p || typeof p !== "object")                       return "not-an-object";
-    if (!isString(p.id) || !ID_RE.test(p.id))              return "id-invalid";
-    if (!isString(p.name) || p.name.length < 1
-        || p.name.length > MAX_NAME)                       return "name-invalid";
-    if (typeof p.enabled !== "boolean")                    return "enabled-invalid";
-    if (!isString(p.command) || p.command.length < 1
-        || p.command.length > MAX_COMMAND)                 return "command-invalid";
-    // A command ending in "&&", "||" or "|" is an incomplete shell command and
-    // a syntax error in any context -- no wrapping can rescue it. Refusing it
-    // by name is better than letting it reach the shell, where it would be one
-    // more entry that fails at login with nobody watching.
-    if (/(\|\||&&|\|)\s*$/.test(p.command))                return "command-incomplete";
-    if (!isString(p["class"]) || !CLASS_RE.test(p["class"])) return "class-not-allowed";
-    return placementProblem(p.placement);
-}
-
-function placementKey(placement) {
-    if (!placement || placement.kind === "none") return "none";
-    return placement.kind + ":" + placement.value;
-}
-
-function validate(config) {
-    var out = { programs: [], workspaces: [], rejected: [], blocked: [] };
-    var i, seenIds = Object.create(null), seenWs = Object.create(null);
-
-    // A string has .length and bracket indexing, so a hand-edited
-    // "programs": "cursor" would otherwise be walked character by character
-    // and produce one meaningless rejection per letter. A present-but-wrong
-    // value is named; an absent key is not an error at all.
-    if (config && config.programs !== undefined && !Array.isArray(config.programs)) {
-        out.rejected.push({ kind: "program", label: "programs", reason: "not-a-list" });
-    }
-    if (config && config.workspaces !== undefined && !Array.isArray(config.workspaces)) {
-        out.rejected.push({ kind: "workspace", label: "workspaces", reason: "not-a-list" });
-    }
-    var programs   = (config && Array.isArray(config.programs))   ? config.programs   : [];
-    var workspaces = (config && Array.isArray(config.workspaces)) ? config.workspaces : [];
-
-    for (i = 0; i < programs.length; i++) {
-        var p = programs[i];
-        var label = labelOf(p, i);
-        if (out.programs.length >= MAX_PROGRAMS) {
-            out.rejected.push({ kind: "program", label: label, reason: "too-many" });
-            continue;
-        }
-        var problem = programProblem(p);
-        if (problem) {
-            out.rejected.push({ kind: "program", label: label, reason: problem });
-            continue;
-        }
-        if (seenIds[p.id]) {
-            out.rejected.push({ kind: "program", label: label, reason: "id-duplicate" });
-            continue;
-        }
-        seenIds[p.id] = true;
-        out.programs.push(p);
-    }
-
-    for (i = 0; i < workspaces.length; i++) {
-        var w = workspaces[i];
-        var wLabel = (w && isString(w.workspace)) ? ("workspace " + w.workspace)
-                                                  : ("row #" + (i + 1));
-        if (out.workspaces.length >= MAX_WORKSPACES) {
-            out.rejected.push({ kind: "workspace", label: wLabel, reason: "too-many" });
-            continue;
-        }
-        if (!w || typeof w !== "object"
-            || !WORKSPACE_RE.test(w.workspace) || !MONITOR_RE.test(w.monitor)) {
-            out.rejected.push({ kind: "workspace", label: wLabel, reason: "workspace-invalid" });
-            continue;
-        }
-        if (seenWs[w.workspace]) {
-            out.rejected.push({ kind: "workspace", label: wLabel, reason: "workspace-duplicate" });
-            continue;
-        }
-        seenWs[w.workspace] = true;
-        out.workspaces.push(w);
-    }
-
-    // Two programs matching the same class but wanting different places is a
-    // contradiction this code can see, so saving is blocked rather than one of
-    // them silently winning inside the compositor.
-    //
-    // A plain {} is not safe as a map for strings that come from the
-    // configuration: "__proto__" reads back as Object.prototype rather than
-    // undefined, so the guard below would skip initialising the array and
-    // .push would not exist. The class allowlist deliberately permits "_" --
-    // real classes need it (nimbus-chat.example.org__-Default) -- so the map
-    // has to tolerate it rather than the allowlist forbid it.
-    var byClass = Object.create(null);
-    for (i = 0; i < out.programs.length; i++) {
-        var prog = out.programs[i];
-        var key  = prog["class"];
-        if (!byClass[key]) byClass[key] = [];
-        byClass[key].push(prog);
-    }
-    for (var cls in byClass) {
-        var group = byClass[cls], places = Object.create(null), labels = [];
-        for (i = 0; i < group.length; i++) {
-            places[placementKey(group[i].placement)] = true;
-            labels.push(labelOf(group[i], i));
-        }
-        var distinct = 0;
-        for (var k in places) distinct++;
-        if (distinct > 1) {
-            out.blocked.push({ reason: "class-conflict", labels: labels });
-        }
-    }
-
-    return out;
-}
-
-// --- Lua payload ----------------------------------------------------------
-//
-// Rules are set at runtime through `hyprctl eval`, because under the Lua
-// configuration `hyprctl keyword` is switched off ("keyword can't work with
-// non-legacy parsers. Use eval.") and because writing a require line into the
-// user's hyprland.lua would not survive the next Omarchy upgrade.
-//
-// Every value crossing into Lua goes through luaBytes(). The payload is
-// therefore digits and commas: an escape is not defended against, it cannot
-// be written down.
-var RULE_PREFIX = "smartalb.autostart";
-
-var MAX_RULES_PER_CHUNK = 20;
-var MAX_CHUNK_BYTES     = 65536;   // 64 KiB
-var MAX_EVAL_CALLS      = 20;
-
-// Rules the plugin has already set are remembered in the compositor's own Lua
-// state and switched off before new ones go in, so re-applying does not pile
-// them up. `if old and old.set_enabled` keeps this working even where a rule
-// object has no such method.
-var CHUNK_PRELUDE = [
-    "do",
-    "local S = _G.__smartalb_autostart",
-    "if not S then S = { rules = {} } _G.__smartalb_autostart = S end",
-    "local function put(key, rule)",
-    "local old = S.rules[key]",
-    "if old and old.set_enabled then old:set_enabled(false) end",
-    "S.rules[key] = rule",
-    "end"
-].join("\n");
-
-function resetChunk() {
-    return [
-        CHUNK_PRELUDE,
-        "for key, rule in pairs(S.rules) do",
-        "if rule and rule.set_enabled then rule:set_enabled(false) end",
-        "S.rules[key] = nil",
-        "end",
-        "end"
-    ].join("\n");
-}
-
-function windowRuleStatement(program) {
-    var placement = program.placement;
-    if (!placement || placement.kind === "none") return null;
-    var key   = RULE_PREFIX + ":p:" + program.id;
-    var field = (placement.kind === "workspace") ? "workspace" : "monitor";
-    return "put(" + luaBytes(key) + ", hl.window_rule({ name = " + luaBytes(key)
-         + ", match = { class = " + luaBytes(program["class"]) + " }, "
-         + field + " = " + luaBytes(placement.value) + " }))";
-}
-
-function workspaceRuleStatement(row) {
-    var key = RULE_PREFIX + ":w:" + row.workspace;
-    return "put(" + luaBytes(key) + ", hl.workspace_rule({ workspace = "
-         + luaBytes(row.workspace) + ", monitor = " + luaBytes(row.monitor) + " }))";
-}
-
-function buildRuleChunks(model) {
-    var statements = [], i, statement;
-    var workspaces = (model && model.workspaces) || [];
-    var programs   = (model && model.programs)   || [];
-
-    for (i = 0; i < workspaces.length; i++) {
-        statements.push(workspaceRuleStatement(workspaces[i]));
-    }
-    for (i = 0; i < programs.length; i++) {
-        statement = windowRuleStatement(programs[i]);
-        if (statement) statements.push(statement);
-    }
-
-    var chunks = [resetChunk()];
-    var current = [], bytes = CHUNK_PRELUDE.length + 4;
-
-    function flush() {
-        if (current.length === 0) return;
-        chunks.push(CHUNK_PRELUDE + "\n" + current.join("\n") + "\nend");
-        current = [];
-        bytes = CHUNK_PRELUDE.length + 4;
-    }
-
-    for (i = 0; i < statements.length; i++) {
-        statement = statements[i];
-        if (current.length >= MAX_RULES_PER_CHUNK
-            || bytes + statement.length + 1 > MAX_CHUNK_BYTES) {
-            flush();
-        }
-        current.push(statement);
-        bytes += statement.length + 1;
-    }
-    flush();
-
-    // With the caps from validate() -- 200 programs, 99 workspaces -- this
-    // cannot trigger. It exists so that raising a cap without raising this one
-    // stops here instead of spawning an unbounded number of processes.
-    if (chunks.length > MAX_EVAL_CALLS) {
-        throw new Error("buildRuleChunks: " + chunks.length
-                        + " eval calls exceed the limit of " + MAX_EVAL_CALLS);
-    }
-    for (i = 0; i < chunks.length; i++) {
-        if (chunks[i].length > MAX_CHUNK_BYTES) {
-            throw new Error("buildRuleChunks: chunk " + i + " exceeds "
-                            + MAX_CHUNK_BYTES + " bytes");
-        }
-    }
-    return chunks;
-}
-
-// --- derived values -------------------------------------------------------
-
-// The lowest workspace number the table does not use yet, as the string the
-// schema stores. Bounded by MAX_WORKSPACES, which is why this lives here and
-// not in the panel: the bound and the allowlist that has to agree with it are
-// both in this file.
-//
-// When every number is taken it returns the last one rather than nothing. The
-// row the panel then adds is a duplicate, validate() names it as
-// "workspace-duplicate" and the user changes it -- a visible dead end, rather
-// than a button that silently does nothing.
-//
-// A malformed row contributes whatever it stringifies to and therefore blocks
-// no legal number; rows do not have to be valid to be counted, because this
-// runs on a draft that is mid-edit by definition.
-function firstFreeWorkspace(rows) {
-    var used = Object.create(null), i;
-    var list = rows || [];
-    for (i = 0; i < list.length; i++) {
-        used[String(list[i] && list[i].workspace)] = true;
-    }
-    for (i = 1; i <= MAX_WORKSPACES; i++) {
-        if (used[String(i)] === undefined) return String(i);
-    }
-    return String(MAX_WORKSPACES);
-}
-
-// Every code bin/omarchy-autostart-config can answer with. Declared once so
-// two halves can bind the class between them without either being a
+// Every code the bin/ helpers can answer with, across BOTH of them:
+// bin/omarchy-autostart-hypr and bin/omarchy-autostart-hypr-write. Declared
+// once so two halves can bind the class between them without either being a
 // hand-copied claim: test/harness.qml requires every code IN HERE to have
-// wording, and test/run-tests.sh requires THIS LIST to be exactly the codes
-// grepped out of the script. Neither half alone would notice a code added to
-// the script, and neither would notice wording quietly dropped.
-// The codes the bin/ helpers can answer with, across BOTH of them:
-// bin/omarchy-autostart-config and bin/omarchy-autostart-hypr. A shell
-// assertion in test/run-tests.sh derives this list from the two scripts and
-// fails if one turns up without wording, so this array is not allowed to be a
-// hand-maintained mirror of them for long.
+// wording, and test/run-tests.sh derives THIS LIST from the two scripts and
+// fails if one turns up without wording. Neither half alone would notice a
+// code added to a script, and neither would notice wording quietly dropped.
+//
+// THREE OF THESE WERE UNWORDED UNTIL THE REMOVAL EXPOSED IT: the shell
+// assertion read bin/omarchy-autostart-config and bin/omarchy-autostart-hypr,
+// and never the writer -- so does-not-compile, is-a-symlink and
+// no-lua-compiler reached the user through envelopeText's unknown-code
+// fallback. Losing the config script is what made the writer the second
+// emitter and put them in front of the assertion.
 function envelopeCodes() {
-    return ["bad-schema", "insecure-permissions", "internal", "not-a-file",
-            "not-json", "stale", "too-large", "unreadable", "write-failed"];
+    return ["does-not-compile", "insecure-permissions", "internal",
+            "is-a-symlink", "no-lua-compiler", "not-a-file", "stale",
+            "too-large", "unreadable", "write-failed"];
 }
 
 // Plain wording for the envelope the bin/ helpers answer with. Every code
@@ -353,92 +62,37 @@ function envelopeText(code, detail) {
     var extra = (detail === undefined || detail === null || String(detail) === "")
                 ? "" : " " + String(detail);
     if (code === undefined || code === null || String(code) === "")
-        return "The configuration helper gave no answer at all." + extra;
+        return "The helper gave no answer at all." + extra;
     if (code === "insecure-permissions")
-        return "The configuration file can be written by someone else, so it was not used."
+        return "autostart.lua can be written by someone else, so it was not used."
              + " Make it writable only by you." + extra;
-    // Worded for both directions on purpose: read and write share
-    // read_bounded in bin/omarchy-autostart-config, so this same code also
-    // reaches a user who has just pressed Apply, where "too large to read"
-    // would describe the wrong operation.
     if (code === "too-large")
-        return "The configuration file is too large to handle." + extra;
-    if (code === "not-json")
-        return "The configuration file is not valid JSON, so nothing was changed." + extra;
-    if (code === "bad-schema")
-        return "The configuration file has a version this plugin does not understand." + extra;
+        return "autostart.lua is too large for this panel to handle." + extra;
     if (code === "stale")
         return "The file changed on disk since the panel read it."
-             + " Close and reopen the panel, then apply again." + extra;
+             + " Close and reopen the panel, then try again." + extra;
     if (code === "not-a-file")
-        return "The configuration path is not a regular file; a symlink or a directory"
-             + " there is refused." + extra;
+        return "That path is not a regular file; a directory there is refused." + extra;
+    if (code === "is-a-symlink")
+        return "autostart.lua is a symlink, and this panel will not write through"
+             + " one -- it would replace the link or the file at the other end of"
+             + " it, and neither is what you asked for. Edit it by hand." + extra;
+    if (code === "does-not-compile")
+        return "The changed file did not compile as Lua, so nothing was written."
+             + " Your file is exactly as it was." + extra;
+    if (code === "no-lua-compiler")
+        return "luac5.1 is not installed, so the changed file cannot be checked"
+             + " before it is written -- and a file that runs at every login is"
+             + " not written unchecked. Install lua51 (or luac5.1) and try again." + extra;
     if (code === "write-failed")
-        return "The configuration could not be written, so nothing was saved." + extra;
+        return "autostart.lua could not be written, so nothing was changed." + extra;
     if (code === "internal")
-        return "The configuration helper could not build its answer." + extra;
-    // bin/omarchy-autostart-hypr's own code. A file that exists but cannot be
-    // read is NOT this -- that one is reported as absent, per file, so the
-    // other two are still shown. This is the case where the read itself
-    // failed partway through, which invalidates the whole envelope.
+        return "The helper could not build its answer." + extra;
     if (code === "unreadable")
-        return "One of your Hyprland configuration files could not be read,"
-             + " so none of them is shown." + extra;
-    // Named rather than shown bare, the same rule as reasonText's fallback.
-    return "The configuration helper reported an unknown problem: " + String(code) + "." + extra;
-}
-
-// Plain wording for the reason codes validate() reports, so the omissions list
-// is readable by the person who has to fix the entry rather than by whoever
-// wrote the validator. Every code the functions above can produce has an entry
-// here; test/harness.qml provokes them from real configurations and fails if
-// one turns up without wording, so a new code cannot be added upstream and
-// silently reach the user as a bare identifier.
-//
-// An unknown code is passed through unchanged rather than guessed at.
-function reasonText(code) {
-    if (code === "not-a-list")          return "this is not a list";
-    if (code === "not-an-object")       return "this entry is not an object";
-    if (code === "id-invalid")          return "the internal id is malformed";
-    if (code === "id-duplicate")        return "two entries share one id";
-    if (code === "name-invalid")        return "the name is empty or too long";
-    if (code === "enabled-invalid")     return "the on/off value is not true or false";
-    if (code === "command-invalid")     return "the command is empty or too long";
-    if (code === "command-incomplete")  return "the command ends in &&, || or | and cannot run";
-    if (code === "class-not-allowed")   return "the window class pattern is not allowed";
-    if (code === "placement-invalid")   return "the placement is not allowed";
-    if (code === "workspace-invalid")   return "the workspace number or monitor name is not allowed";
-    if (code === "workspace-duplicate") return "this workspace is listed twice";
-    if (code === "too-many")            return "there are too many entries";
-    // The blocked channel's own reason, and the likeliest of the whole set to
-    // actually happen: two entries for one window class with different places
-    // is the natural mistake the either-or placement rule invites. The wording
-    // has to say what to DO, because unlike every code above this one stops
-    // the save rather than dropping one entry -- there is nothing the user can
-    // ignore their way past.
-    //
-    // Worded to read after a list of labels, which is the only frame it ever
-    // appears in ("Nimbus A, Nimbus B: these match ...").
-    if (code === "class-conflict")
-        return "these match the same window class but want different places -- "
-             + "one of the two placements has to go";
-    return String(code);
-}
-
-// The monitor a program actually ends up on. With placement kind "workspace"
-// this is the monitor the workspace is pinned to -- which is why the panel can
-// show it greyed out behind the workspace choice and why placement is
-// either-or rather than two fields with a precedence. An empty string means
-// "the workspace is not pinned anywhere", not "unknown".
-function effectiveMonitor(program, workspaces) {
-    var placement = program && program.placement;
-    if (!placement || placement.kind === "none") return "";
-    if (placement.kind === "monitor") return placement.value;
-    var rows = workspaces || [];
-    for (var i = 0; i < rows.length; i++) {
-        if (rows[i].workspace === placement.value) return rows[i].monitor;
-    }
-    return "";
+        return "Your autostart.lua could not be read, so nothing is shown." + extra;
+    // Named rather than shown bare -- the same rule every other wording
+    // function in this file follows.
+    return "The helper reported an unknown problem: " + String(code) + "." + extra;
 }
 
 // Remove the field codes of the desktop entry specification. %% is an escaped
@@ -471,9 +125,9 @@ function stripFieldCodes(exec) {
 }
 
 // The command line an installed application declares, cleaned of the desktop
-// entry field codes. ONE place, because two callers now need exactly the same
-// derivation: the old half's programFromApp and the autostart panel's
-// application picker, which fills the add field with it.
+// entry field codes. It had two callers -- the removed half's programFromApp
+// and the autostart panel's application picker; the picker is the one left,
+// and it fills the add field with what this returns.
 //
 // It is a GUESS -- Exec= is a command line for a file manager to run, not
 // necessarily the one a user wants at login -- which is why the picker fills
@@ -483,176 +137,6 @@ function commandFromApp(app) {
     return stripFieldCodes(String(source.exec === undefined ? "" : source.exec));
 }
 
-// --- adding entries -------------------------------------------------------
-//
-// The three ways a program gets into the list -- picked from the installed
-// application list, picked from an open window, imported from the session --
-// all end here rather than in Panel.qml: every one of them derives something
-// (a free id, a pattern, a command, a whole configuration), and a derivation
-// in QML is a derivation no suite in this project can execute.
-
-// The lowest free "p<n>". ID_RE is checked rather than assumed: it is the
-// rule validate() will judge the entry by, and a change to it that this
-// generator did not follow would otherwise produce entries the panel refuses
-// the moment it creates them. What holds that claim is not this check --
-// "p<n>" satisfies ID_RE whatever the check does -- but the assertion that
-// walks 60 consecutive ids through validate(), which goes red the moment the
-// candidate shape changes. See test/harness.qml.
-//
-// The list this is handed is a DRAFT's program list, which comes from a file a
-// human may have edited: `null` is a shape validate() names by itself
-// ("not-an-object"), so it must not throw here either. Reading `.id` off null
-// is a TypeError, and it would take the whole add or import with it.
-function newId(existing) {
-    var used = Object.create(null), i;
-    for (i = 0; i < (existing || []).length; i++) {
-        var entry = existing[i];
-        if (entry && typeof entry === "object") used[entry.id] = true;
-    }
-    for (i = 1; i <= 100000; i++) {
-        var candidate = "p" + i;
-        if (!used[candidate] && ID_RE.test(candidate)) return candidate;
-    }
-    throw new Error("newId: no free id");
-}
-
-// Turn a window class into an anchored literal pattern. Every character that
-// is a regex metacharacter is escaped, so what looks like a pattern in a class
-// name stays a class name. The result is checked against the allowlist before
-// it is handed back -- a class picked from a window is not more trustworthy
-// than one typed in.
-function classLiteral(windowClass) {
-    // AN EMPTY CLASS IS REFUSED, and not because the allowlist would catch it:
-    // it would not. "^()$" satisfies CLASS_RE, and as a Hyprland match it says
-    // "a class that is the empty string" -- a pattern that identifies no
-    // particular window and, put through a matcher, is answered by whatever
-    // reports no class at all. A window can genuinely have none (Wayland
-    // app_id is set by the client, or not), so this is a real input, not a
-    // hypothetical one. The message says what to do instead, because this is
-    // the one refusal a user reaches by clicking rather than by typing.
-    if (String(windowClass) === "") {
-        throw new Error("classLiteral: refusing an empty window class -- it cannot"
-                        + " identify a window; type the class by hand or pick another window");
-    }
-    var escaped = String(windowClass).replace(/[.^$()|\[\]?*+\\:-]/g, "\\$&");
-    var pattern = "^(" + escaped + ")$";
-    if (!CLASS_RE.test(pattern)) {
-        throw new Error("classLiteral: refusing " + windowClass);
-    }
-    return pattern;
-}
-
-// The command a window's class suggests, or "" when nothing does. String()
-// around every value read out of the app list: the list is built from files
-// this plugin does not own, and an entry whose Exec= went missing would
-// otherwise throw inside stripFieldCodes and take the whole import with it.
-function guessCommand(windowClass, apps) {
-    var wanted = String(windowClass).toLowerCase(), i;
-    var list = apps || [];
-    for (i = 0; i < list.length; i++) {
-        if (list[i] && list[i].wmclass && String(list[i].wmclass).toLowerCase() === wanted) {
-            return stripFieldCodes(String(list[i].exec === undefined ? "" : list[i].exec));
-        }
-    }
-    // Second pass: the leading word of Exec often IS the class.
-    for (i = 0; i < list.length; i++) {
-        var exec = stripFieldCodes(String((list[i] && list[i].exec) === undefined ? "" : list[i].exec));
-        var first = exec.split(" ")[0];
-        if (first && first.toLowerCase() === wanted) return exec;
-    }
-    return "";
-}
-
-// One entry built from a picked .desktop application.
-//
-// Everything the panel would otherwise decide for itself is here: the free
-// id, the length cap the schema enforces, the field codes that must never
-// reach a shell, and the class pattern. It arrives DISABLED -- putting a
-// program in the list is not the same act as switching it on.
-//
-// An application with no usable StartupWMClass gets an EMPTY class rather
-// than one guessed from its name: validate() then names the entry as left
-// out and the row says so on screen, which is a dead end the user can close
-// with [From window]. A guessed class would match nothing -- or something
-// else -- and say nothing at all.
-function programFromApp(app, existing) {
-    var source = app || {};
-    var pattern = "";
-    if (source.wmclass) {
-        try { pattern = classLiteral(source.wmclass); } catch (e) { pattern = ""; }
-    }
-    return {
-        id: newId(existing),
-        name: String(source.name === undefined ? "" : source.name).substring(0, MAX_NAME),
-        enabled: false,
-        command: commandFromApp(source),
-        "class": pattern,
-        placement: { kind: "none" }
-    };
-}
-
-// The first-run import. Everything arrives disabled: a list the user has only
-// just seen must not open by itself at the next login. A window whose class
-// cannot be encoded is skipped rather than aborting the whole import -- one odd
-// window should not cost the other twenty.
-//
-// THE COMMAND IS NEVER GUESSED FROM THE CLASS. An earlier version of this
-// function fell back to the class name when guessCommand found nothing, and
-// that was an injection path, measured end to end: a window class is set by
-// the client, so a window calling itself `$(reboot)` imported as an entry
-// whose COMMAND was `$(reboot)`. The class pattern is escaped and that path is
-// defended; the command cannot be, because the command field is a shell
-// command line by design -- launchCommand renders it verbatim. No allowlist
-// can rescue that, so the value simply never comes from the window.
-//
-// The entry is still imported, with an empty command. validate() names it
-// "command-invalid", the row says so on screen (task 15), and the user types
-// the command -- which is exactly the situation: the plugin could not map this
-// window to a program, and only the user knows what started it. Dropping the
-// entry instead would hide the window that most needs attention; a
-// plausible-looking wrong command would hide that it was ever a guess.
-function importFromSession(windows, workspacesNow, apps) {
-    var config = { schemaVersion: 1, programs: [], workspaces: [] };
-    // Object.create(null), not {}: a window whose class is "__proto__" would
-    // read back as already-seen from a plain object and be skipped silently.
-    var seen = Object.create(null), i;
-
-    for (i = 0; i < (workspacesNow || []).length; i++) {
-        var row = workspacesNow[i];
-        // The same shape guard as newId's, for the same reason: a row that is
-        // not an object is a shape validate() names, not one that may throw.
-        if (!row || typeof row !== "object") continue;
-        if (WORKSPACE_RE.test(row.workspace) && MONITOR_RE.test(row.monitor)) {
-            config.workspaces.push({ workspace: row.workspace, monitor: row.monitor });
-        }
-    }
-
-    for (i = 0; i < (windows || []).length; i++) {
-        var window = windows[i];
-        if (!window || typeof window !== "object") continue;
-        if (seen[window["class"]]) continue;
-        var pattern, command;
-        try { pattern = classLiteral(window["class"]) } catch (e) { continue }
-        // The only source for a command is the installed application list.
-        // When nothing there matches, the field stays empty -- see the note
-        // above this function.
-        command = guessCommand(window["class"], apps);
-        if (command.length > MAX_COMMAND) continue;
-        seen[window["class"]] = true;
-        config.programs.push({
-            id: newId(config.programs),
-            name: String(window["class"]).substring(0, MAX_NAME),
-            enabled: false,
-            command: command,
-            "class": pattern,
-            placement: WORKSPACE_RE.test(window.workspace)
-                     ? { kind: "workspace", value: window.workspace }
-                     : { kind: "none" }
-        });
-    }
-    return config;
-}
-
 // What to tell the user about an application list that did not arrive whole.
 //
 // Two facts, three outcomes, and they are NOT interchangeable: "too long" is
@@ -660,9 +144,9 @@ function importFromSession(windows, workspacesNow, apps) {
 // could only say the second one because the panel threw away the marker that
 // distinguishes them. "" means nothing went wrong and nothing is said.
 //
-// Here rather than in Panel.qml for the reason reasonText and envelopeText are
-// here: wording in QML is wording no suite in this project can execute, and
-// this one is not merely wording -- it is a decision over two inputs.
+// Here rather than in Panel.qml for the reason envelopeText is here: wording
+// in QML is wording no suite in this project can execute, and this one is not
+// merely wording -- it is a decision over two inputs.
 //
 // The substring Panel.qml looks for on stderr is Runners.qml's own truncation
 // marker; test/qml-structure.sh binds those two files together so a reworded
@@ -685,214 +169,25 @@ function appsProblem(unparseable, truncated) {
     return "";
 }
 
-// Is there anything in this configuration at all? The panel offers
-// [Import current session] only for an empty one and refuses the import
-// otherwise, and BOTH lists have to be empty for that: the import returns a
-// whole configuration, workspace table included, so running it over a draft
-// that has workspace rows but no programs would discard them.
-//
-// Here rather than in Panel.qml because it is the condition on a destructive
-// action, and a condition in QML is one no suite in this project can execute.
-function isEmptyConfig(config) {
-    var programs   = (config && config.programs)   || [];
-    var workspaces = (config && config.workspaces) || [];
-    return programs.length === 0 && workspaces.length === 0;
-}
-
-// The command field is a shell command line by design -- the same trust level
-// as a line in ~/.config/hypr/autostart.lua -- and it is handed to bash as one
-// single argv element, never pasted into a larger command line.
-//
-// The redirections are not cosmetic: anything started from a Quickshell
-// Process inherits its stdout and stderr pipes, and when the command chain
-// ends Quickshell tears those pipes down and takes the application with it.
-// From a terminal the same command works, because nobody tears anything down.
-function launchCommand(command) {
-    // The braces are load-bearing. The command field is a shell command
-    // line, so it may contain `&&`, `;` or a pipe -- and a redirection
-    // binds only to the last command of such a chain. Without the group,
-    // `sleep 2 && myapp` would leave `sleep 2` holding Quickshell's
-    // stdout and stderr, and Quickshell tears those down when the chain
-    // ends, taking the application with it. Grouping also makes the
-    // entries safe to join with `&` when several are launched at once.
-    //
-    // Terminated by a newline, not by "; ": a command ending in "&", ";" or a
-    // trailing #comment is a legitimate shell command line, and "; }" after it
-    // is a syntax error -- the group then never runs and the program never
-    // starts, silently. A newline closes the list in every one of those cases.
-    return "{ uwsm-app -- " + command + "\n} </dev/null >/dev/null 2>&1";
-}
-
-// Workspace rules only take effect when a workspace is CREATED, so a workspace
-// that already exists has to be moved explicitly. One that does not exist yet
-// is left alone -- the rule will place it when it appears.
-function workspaceMoves(model, workspacesNow) {
-    var wanted = (model && model.workspaces) || [];
-    var now = workspacesNow || [];
-    var current = Object.create(null), moves = [], i;
-    for (i = 0; i < now.length; i++) current[now[i].workspace] = now[i].monitor;
-    for (i = 0; i < wanted.length; i++) {
-        var row = wanted[i];
-        if (current[row.workspace] === undefined) continue;
-        if (current[row.workspace] !== row.monitor) {
-            moves.push({ workspace: row.workspace, monitor: row.monitor });
-        }
-    }
-    return moves;
-}
-
-// --- reconcile ------------------------------------------------------------
-//
-// Windows are moved by ADDRESS, never by class: the class regex is matched
-// once, in grep -E, and never travels into Lua. Addresses are checked against
-// a shape before they are encoded, because they come out of hyprctl and
-// hyprctl's output is not ours.
-var ADDRESS_RE = /^0x[0-9a-f]{1,16}$/;
-
-// Both expressions are the forms task 1 measured against a real window.
-//
-// A window is NEVER addressed by a string here, and the loop below is the
-// whole reason this function exists in the shape it does.
-//
-// Measured on 2026-09-02 with a counting instrument -- 5 runs of 7 trials per
-// form, each with a negative control using an address that does not exist,
-// aborting on the first collateral event. This form: 35/35 moved the right
-// window, negative control clean 5/5.
-//
-// The mechanism behind three separate incidents, in which the probe moved the
-// user's Chatterbox window, two of his terminals and his Signal window:
-// hl.get_window("<bare hex>") always returns nil, a window field set to nil
-// means the KEY IS ABSENT, and window.move then acts on the ACTIVE window.
-// A bare hex address is not a valid selector; "address:<hex>" is.
-//
-// Two shorter forms measured clean as well -- window = "address:<hex>" as a
-// plain string, and hl.get_window("address:<hex>") behind an `if w then`.
-// Neither is used here. Their safety rests on Hyprland no-oping an
-// unresolvable string, a property of the runtime. This form's safety rests on
-// the shape of our own code: on the miss path no dispatcher is called at all.
-//
-// And the most instructive measurement is of a form NOT used:
-// hl.get_window("address:<hex>") WITHOUT the guard scored 7/7 on live
-// addresses and moved Signal on its negative control. Nothing but the
-// negative control separates it from the safe forms.
-function windowMoveExpression(address, placement) {
-    var field = (placement.kind === "workspace") ? "workspace" : "monitor";
-    return "do for _, w in ipairs(hl.get_windows({})) do "
-         + "if w.address == " + luaBytes(address) + " then "
-         + "hl.dispatch(hl.dsp.window.move({ "
-         + field + " = " + luaBytes(placement.value) + ", window = w, follow = false })) "
-         + "end end end";
-}
-
-function workspaceMoveExpression(move) {
-    return "hl.dsp.workspace.move({ workspace = " + luaBytes(move.workspace)
-         + ", monitor = " + luaBytes(move.monitor) + " })";
-}
-
-// Which hyprctl verb a payload needs.
-//
-// Two shapes exist. A block -- a rule block or a guarded window move, both
-// starting with `do` -- goes to eval. A bare dispatcher expression goes to
-// dispatch.
-//
-// To be precise about what was measured, since an earlier version of this
-// comment overstated it: for the WORKSPACE move both verbs work (7 of 7
-// each), so dispatch here is a choice, not a necessity. For the WINDOW move
-// the choice is forced: only the eval route is safe (see
-// windowMoveExpression). Keeping the decision in one tested function is why
-// Panel.qml does not carry it as an inline string comparison.
-function verbFor(payload) {
-    return String(payload).indexOf("hl.dsp.") === 0 ? "dispatch" : "eval";
-}
-
-function buildReconcileChunks(model, workspacesNow, matches) {
-    var out = [], i;
-
-    var moves = workspaceMoves(model, workspacesNow);
-    for (i = 0; i < moves.length; i++) out.push(workspaceMoveExpression(moves[i]));
-
-    // Object.create(null), not {} -- the same reason as everywhere else in
-    // this file. ID_RE forbids the underscore in "__proto__", so a plain {}
-    // would in fact be safe for this particular map today, but that safety
-    // would depend on a fact living in a different function; keeping every
-    // map in this file prototype-less is what makes that reasoning
-    // unnecessary to redo on every read.
-    var byId = Object.create(null);
-    var programs = (model && model.programs) || [];
-    for (i = 0; i < programs.length; i++) byId[programs[i].id] = programs[i];
-
-    var hits = matches || [];
-    for (i = 0; i < hits.length; i++) {
-        var program = byId[hits[i].id];
-        if (!program) continue;
-        var placement = program.placement;
-        if (!placement || placement.kind === "none") continue;
-        if (!ADDRESS_RE.test(hits[i].address)) {
-            throw new Error("buildReconcileChunks: refusing address " + hits[i].address);
-        }
-        out.push(windowMoveExpression(hits[i].address, placement));
-    }
-    return out;
-}
-
-// Which enabled programs have no window at all. Basis for [Launch missing];
-// the reconcile itself never starts anything, because saving should not open
-// windows.
-function missingIds(model, matches) {
-    // Object.create(null) rather than {} -- see the note in validate(): a key
-    // of "__proto__" reads back as Object.prototype from a plain object.
-    var seen = Object.create(null), out = [], i;
-    var hits = matches || [];
-    for (i = 0; i < hits.length; i++) seen[hits[i].id] = true;
-    var programs = (model && model.programs) || [];
-    for (i = 0; i < programs.length; i++) {
-        if (programs[i].enabled && !seen[programs[i].id]) out.push(programs[i].id);
-    }
-    return out;
-}
-
 // Single-quote for bash -c. Inside single quotes a shell metacharacter is
 // inert; the only thing to handle is the quote itself.
 function shellQuote(s) {
     return "'" + String(s).replace(/'/g, "'\\''") + "'";
 }
 
-// ==========================================================================
-// THE CUTOVER
-// ==========================================================================
-//
-// ONE place, named once, read everywhere. The plugin's old half -- the JSON
-// configuration under ~/.config/omarchy/autostart-layout.json and the
-// `hyprctl eval` route that applied it at runtime -- is DISCONNECTED here,
-// not deleted.
-//
-// Why disconnected and not deleted: the writer does not exist yet, and that
-// code is the reference the writer is built from (the chunking, the byte
-// encoding, the generation discipline, the start marker). Deleting it now
-// would mean writing it twice.
-//
-// Why disconnected at all: two sources of truth for the same fact -- which
-// program goes on which workspace -- is precisely what this change of
-// direction exists to end. From here on the truth is the user's own
-// ~/.config/hypr/*.lua, which Hyprland already applies at login by itself.
-//
-// WHERE THE PLUGIN'S EFFECT COMES FROM IN THE MEANTIME: from Hyprland, not
-// from this plugin. hyprland.lua already requires hypr.autostart,
-// hypr.workspaces and hypr.windowrules, so every rule in those files keeps
-// working exactly as before, untouched. What the plugin does until the
-// writer lands is show that configuration truthfully.
-//
-// Both readers of this flag -- Panel.qml (offers nothing) and Service.qml
-// (applies nothing) -- consult THIS constant. Do not add a second switch.
-var WRITE_PATH_ENABLED = false;
+// The ONE consumer of this is the hand-over of the new file content to
+// bin/omarchy-autostart-hypr-write on stdin. An unquoted expansion of a whole
+// file's text into a shell command line is the one mistake here that would be
+// catastrophic and silent, which is why the structural suite asserts the call
+// site rather than trusting it.
 
 // ==========================================================================
-// THE READER FOR THE USER'S HYPRLAND LUA FILES
+// THE READER FOR autostart.lua
 // ==========================================================================
 //
-// Three hand-maintained files, with German section comments and factual
-// notes in them. This reader NEVER writes. What it must guarantee is the
-// foundation the later line surgery rests on:
+// One hand-maintained file, with German section comments and factual notes in
+// it. This reader never writes; the writer below it does, one line at a time.
+// What the reader must guarantee is the foundation that line surgery rests on:
 //
 //   * every entry carries `line` (1-based) and `raw` (the line verbatim),
 //   * a line that calls a known helper in a form this code cannot take
@@ -914,7 +209,12 @@ var WRITE_PATH_ENABLED = false;
 // `o.exec_on_start(o.launch("nimbus"))` are the SAME fact and are reported
 // identically, with `launcher: "uwsm-app"`.
 
-var HYPR_FILE_NAMES = ["autostart.lua", "windowrules.lua", "workspaces.lua"];
+// ONE file. This was a list of three -- autostart.lua, windowrules.lua and
+// workspaces.lua were all read and shown -- and it stays a LIST rather than a
+// bare string for the reason parseHyprFiles still loops over it: the section
+// shape the panel renders, and the "a file that is absent SAYS so" guarantee,
+// are per-name and do not change because there is one name.
+var HYPR_FILE_NAMES = ["autostart.lua"];
 
 // A file this reader looks at is small and hand-written. The cap is here so
 // that a pathological input costs a bounded amount of work rather than
@@ -922,33 +222,19 @@ var HYPR_FILE_NAMES = ["autostart.lua", "windowrules.lua", "workspaces.lua"];
 // caps the lines it is worth turning into entries.
 var MAX_HYPR_LINES = 2000;
 
-// The window-rule options this reader can represent, and therefore the only
-// ones a later writer may rewrite. Everything else -- opacity, size, tag,
-// center, tile, idle_inhibit, suppress_event and the rest of Hyprland's
-// vocabulary, all of which occur in Omarchy's own default configuration --
-// makes the line non-editable. That is the honest answer: a rewrite that
-// dropped an option it did not understand would silently change the user's
-// desktop.
-var WINDOW_FLAG_KEYS = ["float", "maximize", "fullscreen"];
-
-function isWindowFlagKey(key) {
-    for (var i = 0; i < WINDOW_FLAG_KEYS.length; i++) {
-        if (WINDOW_FLAG_KEYS[i] === key) return true;
-    }
-    return false;
-}
-
 // Why an entry could not be taken apart. Codes, never shown raw -- see
 // hyprReasonText, and the same two-sided guarantee the envelope codes have:
 // this list is what the parsers can set, and the harness proves every one of
 // them has wording.
+// FOUR CODES WERE DELETED WITH THE WINDOW-RULE AND WORKSPACE PARSERS --
+// table-match, unsupported-option, missing-option and value-out-of-range.
+// Nothing can produce them any more, and the harness assertion that every
+// code here has wording would have gone on passing over all four: an
+// assertion standing over something that no longer exists is how a suite
+// starts proving nothing.
 var HYPR_REASONS = [
     "nested-call",           // o.exec_on_start(o.launch_webapp_sole(...))
     "not-a-string",          // an argument that is not a plain Lua string
-    "table-match",           // o.window({ class = ..., title = ... }, ...)
-    "unsupported-option",    // a rules key this reader cannot represent
-    "missing-option",        // no workspace / no monitor to show
-    "value-out-of-range",    // a workspace or monitor outside the allowlist
     "incomplete-call"        // the call does not end on this line
 ];
 
@@ -971,17 +257,6 @@ function hyprReasonText(code) {
     case "not-a-string":
         return "An argument on this line is not a plain quoted string, so it "
              + "cannot be read as a value.";
-    case "table-match":
-        return "This rule matches on a table of properties (class and title, "
-             + "for instance) rather than on a single class pattern.";
-    case "unsupported-option":
-        return "This rule sets an option this panel cannot represent, so it "
-             + "is left exactly as it is.";
-    case "missing-option":
-        return "This rule does not say which workspace or monitor it means.";
-    case "value-out-of-range":
-        return "A workspace number or monitor name on this line lies outside "
-             + "what this panel accepts.";
     case "incomplete-call":
         return "This call does not end on its own line; only whole one-line "
              + "calls can be read.";
@@ -993,8 +268,8 @@ function hyprReasonText(code) {
 //
 // Decoded, not copied. `"(nimbus-chatgpt\\.com__-Default)"` in the file is
 // the characters `(nimbus-chatgpt\.com__-Default)` in the compositor, and
-// that is what the panel has to show and what CLASS_RE has to judge. The
-// verbatim form is preserved anyway -- it is in `raw`.
+// that is what the panel has to show. The verbatim form is preserved
+// anyway -- it is in `raw`.
 //
 // A character loop, not a regular expression. An escape-aware quoted-string
 // regex is the classic place a nested quantifier goes quadratic, and this
@@ -1063,57 +338,6 @@ function luaStringWhole(text) {
     if (!parsed) return null;
     if (parsed.next !== s.length) return null;
     return parsed.value;
-}
-
-// --- flat Lua tables ------------------------------------------------------
-//
-// `{ workspace = "1", float = true, maximize = true }` and nothing cleverer.
-// A nested table (`size = { 875, 600 }`), a positional element, a function
-// call, an identifier as a value: all null, all editable:false upstream. The
-// point is not to parse Lua; it is to know exactly when this reader does NOT
-// understand a line.
-//
-// Returns an array of { key, value, type } in file order, or null.
-function luaFlatTable(text) {
-    var s = String(text);
-    if (s.charAt(0) !== "{" || s.charAt(s.length - 1) !== "}") return null;
-    var body = s.substring(1, s.length - 1);
-    var out = [];
-    var i = 0;
-    while (i < body.length) {
-        while (i < body.length && (body.charAt(i) === " " || body.charAt(i) === "\t")) i += 1;
-        if (i >= body.length) break;
-        // The key. Anchored and bounded, no nested quantifier.
-        var keyMatch = /^[A-Za-z_][A-Za-z0-9_]{0,63}/.exec(body.substring(i));
-        if (!keyMatch) return null;
-        var key = keyMatch[0];
-        i += key.length;
-        while (i < body.length && (body.charAt(i) === " " || body.charAt(i) === "\t")) i += 1;
-        if (body.charAt(i) !== "=") return null;
-        i += 1;
-        while (i < body.length && (body.charAt(i) === " " || body.charAt(i) === "\t")) i += 1;
-        var c = body.charAt(i);
-        if (c === "\"" || c === "'") {
-            var str = luaStringAt(body, i);
-            if (!str) return null;
-            out.push({ key: key, value: str.value, type: "string" });
-            i = str.next;
-        } else {
-            var word = /^(true|false|[0-9]{1,10})/.exec(body.substring(i));
-            if (!word) return null;
-            if (word[0] === "true" || word[0] === "false") {
-                out.push({ key: key, value: word[0] === "true", type: "boolean" });
-            } else {
-                out.push({ key: key, value: parseInt(word[0], 10), type: "number" });
-            }
-            i += word[0].length;
-        }
-        while (i < body.length && (body.charAt(i) === " " || body.charAt(i) === "\t")) i += 1;
-        if (i >= body.length) break;
-        if (body.charAt(i) !== ",") return null;
-        i += 1;
-    }
-    return out;
 }
 
 // --- the shape every line goes through ------------------------------------
@@ -1307,123 +531,6 @@ function parseAutostartLua(text, fileName) {
     return entries;
 }
 
-// --- windowrules.lua ------------------------------------------------------
-//
-// Recognised:
-//   o.window("(notes-app)", { workspace = "2" })
-//   o.window("^(Playwright-E2E-Test)$", { workspace = "1", float = true, maximize = true })
-//
-// Deliberately NOT editable:
-//   o.window({ class = "...", title = "..." }, { ... })     table-match
-//   o.window(".*", { tag = "+default-opacity" })            unsupported-option
-//   o.window({ title = ".*is sharing.*" }, { workspace = "special silent" })
-function parseWindowRulesLua(text, fileName) {
-    var name = fileName || "windowrules.lua";
-    var lines = hyprLines(text);
-    var inBracket = hyprLineStartsInBracket(lines);
-    var entries = [];
-    var limit = Math.min(lines.length, MAX_HYPR_LINES);
-    for (var n = 0; n < limit; n++) {
-        if (inBracket[n]) continue;   // inside a block comment or a long string
-        var raw = lines[n];
-        var call = hyprCallOnLine(raw, ["o.window"]);
-        if (!call) continue;
-        var entry = hyprEntry(name, n + 1, raw, call.name, "window");
-        if (call.reason) { entry.reason = call.reason; entries.push(entry); continue; }
-
-        var args = call.args;
-        if (args.charAt(0) === "{") { entry.reason = "table-match"; entries.push(entry); continue; }
-        var first = luaStringAt(args, 0);
-        if (!first) { entry.reason = "not-a-string"; entries.push(entry); continue; }
-        var after = args.substring(first.next).replace(/^[ \t]+/, "");
-        if (after.charAt(0) !== ",") { entry.reason = "not-a-string"; entries.push(entry); continue; }
-        var rulesText = after.substring(1).replace(/^[ \t]+/, "").replace(/[ \t]+$/, "");
-        var pairs = luaFlatTable(rulesText);
-        if (!pairs) { entry.reason = "unsupported-option"; entries.push(entry); continue; }
-
-        entry["class"] = first.value;
-        var workspace = null, flags = {}, unsupported = false;
-        for (var p = 0; p < pairs.length; p++) {
-            var key = pairs[p].key;
-            if (key === "workspace" && pairs[p].type === "string") {
-                workspace = pairs[p].value;
-            } else if (isWindowFlagKey(key) && pairs[p].type === "boolean") {
-                flags[key] = pairs[p].value;
-            } else {
-                unsupported = true;
-            }
-        }
-        if (unsupported) { entry.reason = "unsupported-option"; entries.push(entry); continue; }
-        if (workspace === null) { entry.reason = "missing-option"; entries.push(entry); continue; }
-        // The same allowlists the rest of this file judges by. A workspace
-        // Hyprland accepts but this panel does not represent ("special
-        // silent") is shown and left alone rather than quietly narrowed.
-        if (!WORKSPACE_RE.test(workspace) || !CLASS_RE.test(first.value)) {
-            entry.reason = "value-out-of-range";
-            entries.push(entry);
-            continue;
-        }
-        entry.editable = true;
-        entry.workspace = workspace;
-        entry.flags = flags;
-        entries.push(entry);
-    }
-    return entries;
-}
-
-// --- workspaces.lua -------------------------------------------------------
-//
-// Recognised:
-//   hl.workspace_rule({ workspace = "1", monitor = "DP-4" })
-function parseWorkspacesLua(text, fileName) {
-    var name = fileName || "workspaces.lua";
-    var lines = hyprLines(text);
-    var inBracket = hyprLineStartsInBracket(lines);
-    var entries = [];
-    var limit = Math.min(lines.length, MAX_HYPR_LINES);
-    for (var n = 0; n < limit; n++) {
-        if (inBracket[n]) continue;   // inside a block comment or a long string
-        var raw = lines[n];
-        var call = hyprCallOnLine(raw, ["hl.workspace_rule"]);
-        if (!call) continue;
-        var entry = hyprEntry(name, n + 1, raw, call.name, "workspace");
-        if (call.reason) { entry.reason = call.reason; entries.push(entry); continue; }
-
-        var pairs = luaFlatTable(call.args);
-        if (!pairs) { entry.reason = "not-a-string"; entries.push(entry); continue; }
-        var workspace = null, monitor = null, unsupported = false;
-        for (var p = 0; p < pairs.length; p++) {
-            var key = pairs[p].key;
-            if (key === "workspace" && pairs[p].type === "string") workspace = pairs[p].value;
-            else if (key === "monitor" && pairs[p].type === "string") monitor = pairs[p].value;
-            else unsupported = true;
-        }
-        if (unsupported) { entry.reason = "unsupported-option"; entries.push(entry); continue; }
-        if (workspace === null || monitor === null) {
-            entry.reason = "missing-option";
-            entries.push(entry);
-            continue;
-        }
-        if (!WORKSPACE_RE.test(workspace) || !MONITOR_RE.test(monitor)) {
-            entry.reason = "value-out-of-range";
-            entries.push(entry);
-            continue;
-        }
-        entry.editable = true;
-        entry.workspace = workspace;
-        entry.monitor = monitor;
-        entries.push(entry);
-    }
-    return entries;
-}
-
-function hyprParserFor(fileName) {
-    if (fileName === "autostart.lua")   return parseAutostartLua;
-    if (fileName === "windowrules.lua") return parseWindowRulesLua;
-    if (fileName === "workspaces.lua")  return parseWorkspacesLua;
-    return null;
-}
-
 // The three sections, always in file order and always all three -- a file
 // the reader did not find is a section that SAYS so, not a section that is
 // missing. Takes the `files` array of the bin/omarchy-autostart-hypr
@@ -1439,7 +546,6 @@ function parseHyprFiles(files) {
         var fileName = HYPR_FILE_NAMES[n];
         var f = byName[fileName] || {};
         var present = f.present === true;
-        var parse = hyprParserFor(fileName);
         sections.push({
             name: fileName,
             path: String(f.path || ""),
@@ -1455,22 +561,13 @@ function parseHyprFiles(files) {
             // is not the same claim as "the file is empty": `present` is what
             // says which.
             content: present ? String(f.content || "") : "",
-            entries: present ? parse(String(f.content || ""), fileName) : []
+            // parseAutostartLua by name and not through a lookup table: there
+            // is one parser, and a table of one entry is a table whose lookup
+            // can only ever answer one way.
+            entries: present ? parseAutostartLua(String(f.content || ""), fileName) : []
         });
     }
     return sections;
-}
-
-// --- what the panel says about the read -----------------------------------
-//
-// Wording lives here, like every other decision in this project, because
-// this is the file a suite can reach.
-function hyprEntryCount(sections) {
-    var total = 0;
-    for (var i = 0; i < (sections || []).length; i++) {
-        total += (sections[i].entries || []).length;
-    }
-    return total;
 }
 
 function hyprEditableCount(sections) {
@@ -1493,14 +590,12 @@ function hyprSectionNamed(sections, name) {
     return null;
 }
 
-// Which section this plugin may WRITE. Exactly one, named once: autostart.lua.
-// windowrules.lua and workspaces.lua are read and shown and nothing else, and
-// a section that is absent or truncated is not writable either -- line surgery
-// against a partial read would target line numbers the file does not have.
-//
-// A predicate rather than a `name === "autostart.lua"` comparison in the
-// panel: finding 1 of the task 18 review was exactly that comparison, made
-// where no suite can execute it.
+// Which section this plugin may WRITE. It is still a PREDICATE and not the
+// tautology it now looks like: a section that is absent or truncated is not
+// writable, because line surgery against a partial read would target line
+// numbers the file does not have. The name comparison stays too -- the panel
+// must not classify a section by its file name, which was finding 1 of the
+// task 18 review, made in the one file no suite can execute.
 function hyprSectionIsWritable(section) {
     var s = section || {};
     if (String(s.name) !== "autostart.lua") return false;
@@ -1509,21 +604,13 @@ function hyprSectionIsWritable(section) {
     return true;
 }
 
-// The bar widget's two numbers. Finding 1 of the task 18 review: the panel
-// classified the sections itself and summed them in QML, where no suite can
-// execute it, while these two counters already existed here unused.
-//
-// Programs are the autostart entries; placements are everything else, which
-// is what hyprEntryCount already counts across all three sections. Derived
-// by subtraction on purpose: a fourth file added to HYPR_FILE_NAMES lands in
-// "placements" automatically instead of silently counting as nothing.
+// The bar widget's ONE number: how many entries autostart.lua has. The
+// second number was hyprPlacementCount, everything the other two files
+// carried, and it is gone with them -- a tooltip saying "0 placements" would
+// describe a feature that no longer exists.
 function hyprProgramCount(sections) {
     var section = hyprSectionNamed(sections, "autostart.lua");
     return section ? (section.entries || []).length : 0;
-}
-
-function hyprPlacementCount(sections) {
-    return hyprEntryCount(sections) - hyprProgramCount(sections);
 }
 
 // The one note under a section header, or "" when the section has nothing to
@@ -1566,12 +653,15 @@ function hyprAutostartNoteText(sections) {
     return text;
 }
 
-// The one line in the head of the panel. It says two things and no more:
-// which half of this read can be edited, and which files were actually read.
+// The one line in the head of the panel: which file this edits, and whether
+// it was actually read. It named three files and said which of them was read
+// only; there is one now, and it is the writable one.
 //
-// autostart.lua is the ONE file this plugin writes -- see autostartApply
-// below. windowrules.lua and workspaces.lua are read and shown and nothing
-// else, and saying so here is what keeps the panel from implying otherwise.
+// The absent case is still spelled out rather than left to an empty list. A
+// user whose autostart.lua does not exist must be told that, not shown an
+// empty panel -- and this plugin does not create the file, because a file that
+// runs at every login is not brought into existence by a panel the user opened
+// to look at it.
 function hyprHeaderText(sections) {
     var list = sections || [];
     var read = [], absent = [];
@@ -1582,8 +672,7 @@ function hyprHeaderText(sections) {
             absent.push(list[i].name);
         }
     }
-    var text = "autostart.lua can be edited here; windowrules.lua and "
-             + "workspaces.lua are read only. ";
+    var text = "This panel edits your autostart.lua and nothing else. ";
     text += (read.length === 0) ? "No file was read."
                                 : "Read: " + read.join(", ") + ".";
     if (absent.length > 0) text += " Not found: " + absent.join(", ") + ".";
@@ -1608,17 +697,10 @@ function hyprEntryText(entry) {
     if (e.kind === "autostart") {
         return prefix + String(e.command) + (e.launcher === "uwsm-app" ? "" : "  (shell)");
     }
-    if (e.kind === "window") {
-        var flags = [], f = e.flags || {};
-        for (var k = 0; k < WINDOW_FLAG_KEYS.length; k++) {
-            if (f[WINDOW_FLAG_KEYS[k]] === true) flags.push(WINDOW_FLAG_KEYS[k]);
-        }
-        return prefix + String(e["class"]) + "  \u2192  workspace " + String(e.workspace)
-             + (flags.length > 0 ? "  [" + flags.join(", ") + "]" : "");
-    }
-    if (e.kind === "workspace") {
-        return prefix + "workspace " + String(e.workspace) + "  \u2192  " + String(e.monitor);
-    }
+    // A kind this function does not know falls through to the raw line, which
+    // is the same answer a non-editable entry gets: the line as it stands,
+    // never an invention. The "window" and "workspace" branches that stood
+    // here are gone with their parsers.
     return prefix + String(e.raw === undefined ? "" : e.raw);
 }
 
@@ -1642,13 +724,13 @@ function hyprEntryText(entry) {
 
 // Every character a command may contain, expressed as the ones it may not.
 //
-// The `eval` route encodes its payload with luaBytes() because nothing there
-// is ever read by a person. THIS FILE IS READ BY A PERSON: his autostart.lua
-// is hand-maintained and carries his own German section comments, and
-// `o.launch_on_start(string.char(98,114,97,118,101))` in it would be
-// unusable even though it is safe. So the writer emits a real Lua string
-// literal -- and pays for that legibility with an allowlist, because a
-// literal cannot express a line break at all.
+// THIS FILE IS READ BY A PERSON: his autostart.lua is hand-maintained and
+// carries his own German section comments, and
+// `o.launch_on_start(string.char(98,114,97,118,101))` in it would be unusable
+// even though it is safe -- which is what the removed `eval` route wrote,
+// because nothing there was ever read by a person. So the writer emits a real
+// Lua string literal, and pays for that legibility with an allowlist, because
+// a literal cannot express a line break at all.
 //
 // Refused, and each of them for a reason that is about the FILE, not about
 // taste:
@@ -1671,9 +753,9 @@ function autostartCharRefused(code) {
 // A real Lua string literal: `\\` and `\"`, and nothing else.
 //
 // It THROWS on a character the allowlist refuses rather than returning
-// something, and that is deliberate -- the same shape luaBytes() has. A
-// caller that forgot to ask autostartCommandRefusal() first cannot smuggle a
-// line break into the file by not checking; it gets an exception instead.
+// something, and that is deliberate: a caller that forgot to ask
+// autostartCommandRefusal() first cannot smuggle a line break into the file
+// by not checking; it gets an exception instead.
 //
 // The two escapes are spelled through BACKSLASH and QUOTE rather than as
 // backslash-heavy literals. Two reasons, and neither is taste: a reader can
@@ -1757,7 +839,7 @@ function autostartWriteReasonText(code) {
 
 // What the panel says after a successful write, and it is the whole of what
 // this task promises: the file changed, the desktop did not. No
-// `hyprctl reload`, no `hyprctl eval`, nothing started, nothing killed.
+// `hyprctl reload`, nothing evaluated, nothing started, nothing killed.
 function autostartWrittenText() {
     return "Written. This takes effect at your next login -- this panel "
          + "starts nothing and reloads nothing.";
@@ -2165,8 +1247,9 @@ function autostartCandidatesForWindow(window, apps, entries) {
     // Deduplicated on the command itself, first occurrence kept: the highest
     // ranked source wins, and Termpane -- whose .desktop file matches both
     // by class and by binary -- offers `termpane` once, not twice.
-    // Object.create(null) for the reason newId uses it: a command of
-    // "__proto__" would read back as already seen from a plain object.
+    // Object.create(null), not {}: a command of "__proto__" would read back
+    // as already seen from a plain object, because every plain object has
+    // that key inherited.
     var seen = Object.create(null);
     var out = [];
     for (i = 0; i < ordered.length && out.length < MAX_CANDIDATES; i++) {

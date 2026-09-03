@@ -1,6 +1,15 @@
 #!/usr/bin/env bash
-# Lists the open windows as JSON, for "pick from window" and for the reconcile
-# step that moves already-open windows after Apply.
+# Lists the open windows as JSON, for the panel's "add from a running program"
+# picker. That is the ONE caller and the ONE subcommand left.
+#
+# TWO SUBCOMMANDS WERE DELETED WITH THE PLACEMENT HALF: `--workspaces` (the
+# workspaces listing, `hyprctl -j workspaces`) and `--match-file` (the
+# reconcile matcher that evaluated a program's class regex through `grep -E`
+# against the open windows). Nothing calls either any more. The GREP seam and
+# the MAX_WORKSPACES / MAX_PROGRAMS caps existed only for them and went too.
+#
+# The one `hyprctl` this plugin still runs is the `-j clients` below, and it
+# reads. Nothing here sets anything in the compositor.
 #
 # The output of hyprctl is not ours, so the window count is capped before
 # anything iterates over it -- the panel spawns work per window, and runtime is
@@ -12,22 +21,12 @@ set -uo pipefail
 
 HYPRCTL="${HYPRCTL:-hyprctl}"
 
-# Absolute, and a named seam like HYPRCTL -- not a PATH lookup. The linear
-# time guarantee that lets this script evaluate an untrusted regex belongs
-# to a POSIX ERE automaton, and "grep" does not always mean that: on the
-# machine this was written on, `grep` is a shell function wrapping ugrep
-# while /usr/bin/grep is GNU grep. A non-interactive shell resolves to the
-# latter, but the guarantee should not depend on that.
-GREP="${GREP:-/usr/bin/grep}"
-
 # A named seam like the two above, and the only reason the command line half of
 # this script is testable at all: a sandbox cannot create /proc/<pid>/cmdline,
 # so the tests point this at a directory of their own.
 PROC_DIR="${PROC_DIR:-/proc}"
 
 MAX_WINDOWS=500
-MAX_WORKSPACES=99
-MAX_PROGRAMS=200
 
 # The command line cap. 500 is MAX_COMMAND in Model.js -- the longest command
 # that file will write -- so a command line longer than this could not be
@@ -157,71 +156,10 @@ cmd_list_json() {
     ' <<<"$windows"
 }
 
-cmd_workspaces() {
-    local workspaces
-    workspaces="$("$HYPRCTL" -j workspaces 2>/dev/null)" || workspaces=""
-    if [[ -z "$workspaces" ]] || ! jq -e 'type == "array"' <<<"$workspaces" >/dev/null 2>&1; then
-        echo "[]"; exit 0
-    fi
-    jq -c --argjson max "$MAX_WORKSPACES" '
-        map(select((.id // 0) > 0))
-        | .[0:$max]
-        | map({ workspace: ((.id // 0) | tostring), monitor: (.monitor // "") })
-    ' <<<"$workspaces"
-}
-
-# Match each program's class regex against the open windows.
-#
-# The regex is evaluated HERE, by grep -E, and nowhere else. grep -E runs an
-# automaton: it does not backtrack, so a class such as ^(a+)+$ costs linear
-# time instead of hanging the caller. JavaScript RegExp would backtrack, and
-# QML gives JavaScript no timeout to be rescued by.
-cmd_match_file() {
-    local file="$1"
-    [[ -f "$file" ]] || { echo "[]"; exit 0; }
-
-    local windows; windows="$(cmd_list_json)"
-    local classes; classes="$(jq -r '.[] | .class' <<<"$windows")"
-
-    # The hand-over file carries `id<TAB>class-regex` per line. That is only
-    # unambiguous because the class allowlist in Model.js contains no tab --
-    # anyone widening it must revisit this, or a tab in a class would split a
-    # line into the wrong fields. Task 6 was bitten by exactly that shape when
-    # a value from /usr/share/applications contained a tab. The id side is
-    # ours ([a-z0-9]{1,16}), and `read` assigns the remainder of the line to
-    # the last variable, so a tab surviving into the regex would stay intact
-    # rather than shift a field.
-    local lines=0
-    {
-        # The "|| [[ -n "$id$regex" ]]" is load-bearing, not defensive
-        # decoration: `read` returns failure on the final line of a file with
-        # no trailing newline, so a bare "while read; do" silently drops that
-        # last line -- its program then shows as not running for no visible
-        # reason. The panel happens to write a trailing newline today, but a
-        # reader must not depend on what its caller happens to do.
-        while IFS=$'\t' read -r id regex || [[ -n "$id$regex" ]]; do
-            [[ -n "$id" && -n "$regex" ]] || continue
-            lines=$((lines + 1))
-            (( lines > MAX_PROGRAMS )) && break
-            # Feed the classes in and keep the line numbers, so the match maps
-            # back to the window without a second pass over the JSON.
-            while IFS= read -r hit; do
-                printf '%s\t%s\n' "$id" "$hit"
-            done < <(printf '%s\n' "$classes" | "$GREP" -n -E -- "$regex" 2>/dev/null | cut -d: -f1)
-        done < "$file"
-    } | jq -R -s --argjson w "$windows" '
-        split("\n") | map(select(length > 0) | split("\t"))
-        | map({ id: .[0], window: $w[(.[1] | tonumber) - 1] })
-        | map(select(.window != null))
-        | map({ id, address: .window.address, class: .window.class,
-                workspace: .window.workspace, monitor: .window.monitor })
-    '
-}
-
+# One subcommand, and an argument is still refused rather than ignored: a
+# caller that passes the deleted --workspaces or --match-file must see that it
+# is gone, not silently receive the window list instead.
 case "${1:-}" in
-    "")           cmd_list_json ;;
-    --workspaces) cmd_workspaces ;;
-    --match-file) shift; [[ -n "${1:-}" ]] || { echo "usage: ${0##*/} --match-file <path>" >&2; exit 2; }
-                  cmd_match_file "$1" ;;
-    *)            echo "usage: ${0##*/} [--workspaces | --match-file <path>]" >&2; exit 2 ;;
+    "") cmd_list_json ;;
+    *)  echo "usage: ${0##*/}" >&2; exit 2 ;;
 esac

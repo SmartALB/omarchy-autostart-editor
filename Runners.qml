@@ -11,22 +11,18 @@ Item {
     // Absolute paths. A PATH-resolved interpreter is a different program on a
     // different machine, and tidying PATH protects nothing here: Omarchy lives
     // in /usr/bin too.
+    //
+    // FOUR TOOLS WERE NAMED HERE AND ARE GONE: hyprctl and setsid belonged to
+    // the removed apply and launch routes (this plugin issues no `hyprctl`
+    // from QML any more and starts nothing), and mktemp/rm existed only to
+    // hand a match file to `omarchy-autostart-windows --match-file`, which
+    // went with the placement model. The one hyprctl left in this plugin is
+    // `hyprctl -j clients` INSIDE bin/omarchy-autostart-windows, where the
+    // running-programs picker needs it.
     readonly property string binTimeout: "/usr/bin/timeout"
     readonly property string binBash: "/usr/bin/bash"
-    readonly property string binHyprctl: "/usr/bin/hyprctl"
-    readonly property string binSetsid: "/usr/bin/setsid"
-
-    // For the one command shape that needs a real file on disk to hand over:
-    // bin/omarchy-autostart-windows --match-file asks `[[ -f ]]` before
-    // reading, so a pipe and a process substitution are both refused -- and
-    // silently, it answers "[]" and every program then reads as not running.
-    // Named here rather than at that call site, because one place names the
-    // tools.
-    readonly property string binMktemp: "/usr/bin/mktemp"
-    readonly property string binRm: "/usr/bin/rm"
 
     readonly property int shellSeconds: 120
-    readonly property int hyprSeconds: 20
 
     // Anything past this is not an answer, it is a flood.
     readonly property int maxOutBytes: 262144
@@ -42,36 +38,23 @@ Item {
                 root.binBash, "-c", cmd]
     }
 
-    // The launch route's own runner. Plain `runner()` lets GNU `timeout` put
-    // its child in a NEW process group and, at the deadline, signal the
-    // WHOLE group -- fine for our own short bin/ scripts, fatal for the
-    // autostarted programs, which are backgrounded grandchildren of that
-    // group. Measured, two long-lived backgrounded grandchildren, 2 s
-    // deadline: 0 of 2 survived without `--foreground`, 2 of 2 with it.
-    // `--foreground` only stops TIMEOUT's own deadline from reaching them;
-    // Service.qml additionally detaches each entry with `setsid -f` so a
-    // teardown of this Process (Component.onDestruction, or a superseded
-    // generation) cannot reach them either -- see launchAll() there.
-    function launcher(cmd) {
-        return [root.binTimeout, "--foreground", "-k", "5", String(root.shellSeconds),
-                root.binBash, "-c", cmd]
-    }
-
     // The limit belongs on the producing side, so the bytes are never held in
     // the first place.
     //
-    // Terminated by a newline, not by "; }": the autostart command field is a
-    // shell command line by design (see launchCommand in Model.js), and a
-    // command legitimately ending in "&", ";", "&&" or a trailing #comment
-    // makes "; }" after it a syntax error -- the group then never runs and
-    // nothing is collected, silently. A newline closes the list in every one
-    // of those cases, the same fix as launchCommand.
+    // Terminated by a newline, not by "; }": an autostart command is a shell
+    // command line by design, and a command legitimately ending in "&", ";",
+    // "&&" or a trailing #comment makes "; }" after it a syntax error -- the
+    // group then never runs and nothing is collected, silently. A newline
+    // closes the list in every one of those cases.
     //
     // A bare pipe reports HEAD's exit status, not the producer's -- head
     // always succeeds, so a caller reading exitCode after `cmd | head -c N`
-    // alone never sees a failure. This is exactly how the marker's
-    // claim/refuse gate went inert (Service.qml's markerProc): a refused
-    // claim exits 1, but through this shape that 1 was thrown away.
+    // alone never sees a failure. This is exactly how the deleted start
+    // marker's claim/refuse gate once went inert: a refused claim exits 1,
+    // but through this shape that 1 was thrown away, so every login re-ran
+    // the autostart. The marker is gone; the defect it taught is not, and
+    // tool() still routes every bin/ call through this wrapper.
+    //
     // ${PIPESTATUS[0]} recovers the producer's own status. `set -o
     // pipefail` was the other candidate and was rejected: it also rescores
     // any pipeline that happens to live INSIDE cmd, and nothing handed to
@@ -108,13 +91,6 @@ Item {
             + "\ns=$?"
             + "\nif [ $s -eq 141 ]; then echo 'runnerErr: producer output exceeded the cap -- truncated, not a failure' >&2; exit 0; fi"
             + "\nexit $s")
-    }
-
-    // Without a shell. Both hyprctl verbs take a Lua string; handing it over as
-    // one argv element means there is no second quoting question to get wrong.
-    function hypr(verb, payload) {
-        return [root.binTimeout, "-k", "5", String(root.hyprSeconds),
-                root.binHyprctl, verb, payload]
     }
 
     // One of our own bin/ scripts. Its output is already bounded by the

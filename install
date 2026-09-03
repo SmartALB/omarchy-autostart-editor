@@ -15,7 +15,6 @@ set -euo pipefail
 ID="smartalb.autostart"
 SOURCE="$(cd "$(dirname "$0")" && pwd)"
 TARGET="${XDG_CONFIG_HOME:-$HOME/.config}/omarchy/plugins/$ID"
-CONFIG="${XDG_CONFIG_HOME:-$HOME/.config}/omarchy/autostart-layout.json"
 
 if [[ "$(id -u)" -eq 0 ]]; then
     echo "error: do not run this as root. It installs into your own config." >&2
@@ -30,7 +29,7 @@ else
     # imports things the shell does not provide, and .git is a checkout
     # rather than plugin content. Neither belongs in the plugins directory.
     for item in manifest.json README.md LICENSE CHECKLIST.md preview.png \
-                BarWidget.qml Panel.qml Service.qml Runners.qml Model.js bin; do
+                BarWidget.qml Panel.qml Runners.qml Model.js bin; do
         [[ -e "$SOURCE/$item" ]] || continue
         cp -r "$SOURCE/$item" "$TARGET/"
     done
@@ -45,19 +44,21 @@ Two things to know:
   1. Restart the shell so the widget appears:  omarchy-restart-shell
   2. Add the widget to your bar in ~/.config/omarchy/shell.json
 
-Step 2 is not optional, and skipping it fails quietly. That one entry enables
-both halves of the plugin -- the widget you click AND the background part that
-applies your list at login. Until the id is referenced from shell.json,
-Omarchy treats the plugin as disabled: nothing in the bar, nothing at login,
-no error anywhere. Check it took with:
+Step 2 is not optional, and skipping it fails quietly: until the id is
+referenced from shell.json, Omarchy treats the plugin as disabled -- nothing
+in the bar, no error anywhere. Check it took with:
 
   omarchy plugin list | grep smartalb.autostart
 
-The row should read "enabled" and list both bar-widget and service.
+The row should read "enabled" and list bar-widget.
 
-Your configuration will live in
-  $CONFIG
-with mode 0600. It holds command lines that are run as you when your session
-starts -- the same trust level as ~/.config/hypr/autostart.lua. The plugin
-applies nothing at all if that file ever becomes writable by anyone else.
+This plugin has NO configuration of its own. It edits exactly one file, the
+one you already own:
+
+  ~/.config/hypr/autostart.lua
+
+It writes that file one line at a time, keeps the previous content in
+autostart.lua.bak, refuses to write anything that does not compile, and
+starts nothing and reloads nothing -- your entries take effect at your next
+login, as they always did.
 NOTE

@@ -47,17 +47,23 @@ BarWidget {
     // is injected from its onLoaded -- so this flag is no longer about lazy
     // loading. What it is about is that the panel reads the configuration in
     // open() and not at creation: until the first open there is nothing to
-    // report, and showing "0 programs, 0 placements" before that would be a
-    // false statement about the user's configuration rather than merely an
+    // report, and showing "0 programs" before that would be a
+    // false statement about the user's autostart.lua rather than merely an
     // unknown one. The plain name is shown instead.
+    //
+    // ONE number now. There was a second, placementCount, and it counted the
+    // placements of the removed half; Panel.qml's `counted` signal carries
+    // one argument since. A two-argument handler connected to a
+    // one-argument signal is not an error in QML -- the extra parameter
+    // simply arrives undefined -- so the tooltip would have read
+    // "3 programs, undefined placements" with nothing failing anywhere.
     property bool countsKnown: false
     property int programCount: 0
-    property int placementCount: 0
 
     readonly property string tooltip:
         root.countsKnown
-            ? "Autostart Layout \u2014 " + root.programCount + " programs, "
-              + root.placementCount + " placements"
+            ? "Autostart Layout \u2014 " + root.programCount
+              + (root.programCount === 1 ? " program" : " programs")
             : "Autostart Layout"
 
     readonly property bool opened: panelLoader.item ? panelLoader.item.opened : false
@@ -121,9 +127,9 @@ BarWidget {
     // Creating the panel object eagerly is cheap; READING THE CONFIGURATION is
     // not, and the panel deliberately does that in open() rather than at
     // creation, so this costs no processes at shell start. That is also why
-    // countsKnown below stays false until the first open: the counts are
+    // countsKnown above stays false until the first open: the count is
     // unknown, not zero, and saying "0 programs" before the file has been read
-    // would be a false statement about the user's configuration.
+    // would be a false statement about the user's autostart.lua.
     Loader {
         id: panelLoader
         active: true
@@ -135,9 +141,8 @@ BarWidget {
             // may still be null at this instant, and onBarChanged does not
             // fire for a value that was already set before this Loader ran.
             Qt.callLater(root.injectPanel)
-            item.counted.connect(function(programs, placements) {
+            item.counted.connect(function(programs) {
                 root.programCount = programs
-                root.placementCount = placements
                 root.countsKnown = true
             })
         }

@@ -5,15 +5,14 @@
   "version": "1.0.0",
   "author": "SmartALB",
   "license": "MIT",
-  "description": "Choose which programs start with your session and where their windows go",
-  "kinds": ["bar-widget", "service"],
+  "description": "Edit the programs that start with your Hyprland session",
+  "kinds": ["bar-widget"],
   "entryPoints": {
-    "barWidget": "BarWidget.qml",
-    "service": "Service.qml"
+    "barWidget": "BarWidget.qml"
   },
   "barWidget": {
     "displayName": "Autostart Layout",
-    "description": "Autostart programs, their workspace or monitor, and which monitor each workspace lives on",
+    "description": "Show, add, change and remove the entries in your autostart.lua",
     "category": "System",
     "allowMultiple": false,
     "defaultSection": "right"
