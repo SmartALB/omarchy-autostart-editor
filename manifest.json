@@ -1,0 +1,21 @@
+{
+  "schemaVersion": 1,
+  "id": "smartalb.autostart",
+  "name": "Autostart Layout",
+  "version": "1.0.0",
+  "author": "SmartALB",
+  "license": "MIT",
+  "description": "Choose which programs start with your session and where their windows go",
+  "kinds": ["bar-widget", "service"],
+  "entryPoints": {
+    "barWidget": "BarWidget.qml",
+    "service": "Service.qml"
+  },
+  "barWidget": {
+    "displayName": "Autostart Layout",
+    "description": "Autostart programs, their workspace or monitor, and which monitor each workspace lives on",
+    "category": "System",
+    "allowMultiple": false,
+    "defaultSection": "right"
+  }
+}

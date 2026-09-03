@@ -1,0 +1,53 @@
+#!/usr/bin/env bash
+# Installs Autostart Layout into ~/.config/omarchy/plugins/.
+#
+# Nothing privileged happens here and there is no system-wide tier -- no
+# option, no flag, no code path. This plugin needs no root, no elevation
+# helper and no rule file of any kind. It copies files into your own
+# configuration directory and stops.
+#
+# The shell suite greps this file for a system-tier flag and requires zero
+# hits, which is why the word is not spelled out even in this comment: a test
+# that cannot tell prose from code is a test that has to be given nothing
+# ambiguous to read.
+set -euo pipefail
+
+ID="smartalb.autostart"
+SOURCE="$(cd "$(dirname "$0")" && pwd)"
+TARGET="${XDG_CONFIG_HOME:-$HOME/.config}/omarchy/plugins/$ID"
+CONFIG="${XDG_CONFIG_HOME:-$HOME/.config}/omarchy/autostart-layout.json"
+
+if [[ "$(id -u)" -eq 0 ]]; then
+    echo "error: do not run this as root. It installs into your own config." >&2
+    exit 1
+fi
+
+if [[ "$SOURCE" == "$TARGET" ]]; then
+    echo "Already in place at $TARGET -- nothing to copy."
+else
+    mkdir -p "$TARGET"
+    # An explicit list, not a wildcard: test/ is a development harness that
+    # imports things the shell does not provide, and .git is a checkout
+    # rather than plugin content. Neither belongs in the plugins directory.
+    for item in manifest.json README.md LICENSE CHECKLIST.md preview.png \
+                BarWidget.qml Panel.qml Service.qml Runners.qml Model.js bin; do
+        [[ -e "$SOURCE/$item" ]] || continue
+        cp -r "$SOURCE/$item" "$TARGET/"
+    done
+    chmod +x "$TARGET"/bin/*
+    echo "Installed to $TARGET"
+fi
+
+cat <<NOTE
+
+Two things to know:
+
+  1. Restart the shell so the widget appears:  omarchy-restart-shell
+  2. Add the widget to your bar in ~/.config/omarchy/shell.json
+
+Your configuration will live in
+  $CONFIG
+with mode 0600. It holds command lines that are run as you when your session
+starts -- the same trust level as ~/.config/hypr/autostart.lua. The plugin
+applies nothing at all if that file ever becomes writable by anyone else.
+NOTE

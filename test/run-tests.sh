@@ -1029,4 +1029,207 @@ test_marker_claim_creates_the_marker_file
 test_marker_claims_once_per_hyprland_instance
 test_marker_release_removes_the_marker_file
 
+# --- the submission set: manifest, installer, README, preview --------------
+#
+# DEVIATION FROM THE TASK BRIEF, and it is the whole point of these checks.
+#
+# The brief's Step 1 asserted `kinds: ["bar-widget", "panel", "service"]` with
+# an `entryPoints.panel`. Read against the platform installed on this machine,
+# that is wrong twice over:
+#
+#   * /usr/share/omarchy/shell/shell.qml:429-436 (isBarWidgetPanelPlugin)
+#     routes summon/hide/toggle to the live bar instance ONLY for a plugin
+#     that declares "bar-widget" and none of panel/overlay/menu. Declaring
+#     "panel" hands the plugin to the panel loader instead, and the bar entry
+#     stops answering the hotkeys.
+#   * computePanelEntries() (shell.qml:585-601) then builds a SECOND Loader
+#     for entryPoints.panel, so Panel.qml is instantiated twice: once by
+#     BarWidget.qml's own Loader and once by the shell.
+#
+# The shipped plugin that has exactly our shape confirms it:
+# /usr/share/omarchy/shell/plugins/panels/clock/manifest.json ships a
+# Panel.qml, declares kinds ["bar-widget"] alone, and reaches its panel
+# through the widget's Loader.
+#
+# "service", by contrast, IS required and is NOT one of the harmful kinds:
+# nothing in this plugin instantiates Service.qml, so without the kind and
+# its entry point the autostart never runs at login (shell.qml:265-341,
+# _syncServices). It is absent from the loaderKinds list, so it does not
+# divert the bar routing.
+test_manifest_is_sound() {
+    local root="$PWD/.." m="$PWD/../manifest.json"
+    assert_status "manifest: is valid JSON" 0 jq -e . "$m"
+    assert_eq "manifest: id"            "$(jq -r .id "$m")"            "smartalb.autostart"
+    assert_eq "manifest: schemaVersion is the number 1, not the string" \
+              "$(jq -r '.schemaVersion == 1' "$m")" "true"
+    assert_eq "manifest: name"          "$(jq -r .name "$m")"          "Autostart Layout"
+    assert_eq "manifest: version"       "$(jq -r .version "$m")"       "1.0.0"
+    assert_eq "manifest: license"       "$(jq -r .license "$m")"       "MIT"
+    assert_eq "manifest: not in the omarchy namespace" \
+              "$(jq -r '.id | startswith("omarchy.")' "$m")" "false"
+
+    # The positive half.
+    for kind in bar-widget service; do
+        assert_eq "manifest: declares kind $kind" \
+                  "$(jq -r --arg k "$kind" '.kinds | index($k) != null' "$m")" "true"
+    done
+    for pair in "barWidget:BarWidget.qml" "service:Service.qml"; do
+        local key="${pair%%:*}" file="${pair#*:}"
+        assert_eq "manifest: entryPoint $key" \
+                  "$(jq -r --arg k "$key" '.entryPoints[$k]' "$m")" "$file"
+        assert_eq "manifest: $file exists" \
+                  "$([[ -f "$root/$file" ]] && echo yes || echo no)" "yes"
+    done
+
+    # The negative half, which is the half that matters. Each of these four
+    # kinds would move this plugin off the bar-widget route.
+    for kind in panel overlay menu bar; do
+        assert_eq "manifest: does NOT declare kind $kind" \
+                  "$(jq -r --arg k "$kind" '.kinds | index($k) != null' "$m")" "false"
+    done
+    assert_eq "manifest: declares no kind beyond those two" \
+              "$(jq -r '.kinds | sort | join(",")' "$m")" "bar-widget,service"
+    assert_eq "manifest: entryPoints has no panel key either" \
+              "$(jq -r '.entryPoints | has("panel")' "$m")" "false"
+    # ... and Panel.qml is still shipped, because the widget's own Loader
+    # opens it. A manifest with no panel kind and no Panel.qml on disk is a
+    # plugin whose button does nothing.
+    assert_eq "manifest: Panel.qml ships anyway, for the widget's Loader" \
+              "$([[ -f "$root/Panel.qml" ]] && echo yes || echo no)" "yes"
+
+    assert_eq "manifest: defaultSection is one the registry accepts" \
+              "$(jq -r '.barWidget.defaultSection' "$m")" "right"
+    assert_eq "manifest: allowMultiple is off" \
+              "$(jq -r '.barWidget.allowMultiple' "$m")" "false"
+}
+
+test_repository_has_what_validation_looks_for() {
+    local root="$PWD/.."
+    for f in README.md LICENSE CHECKLIST.md manifest.json; do
+        assert_eq "root: $f is present" \
+                  "$([[ -f "$root/$f" ]] && echo yes || echo no)" "yes"
+    done
+    assert_eq "root: no symlink anywhere in the plugin" \
+              "$(find "$root" -name .git -prune -o -type l -print | wc -l)" "0"
+}
+
+# preview.png CANNOT be produced by anything in this project: it is a
+# screenshot of the running panel, and nothing here may load the panel into a
+# live shell. A test that simply demands the file would therefore be a test
+# that can only be satisfied by fabricating one, and a fabricated screenshot
+# is worse than a missing one.
+#
+# So this asserts the honest property instead, and it holds in BOTH states:
+# either the file is there and is a real PNG, or it is not there and the
+# shipped checklist still names it as owed. What it refuses is the third
+# state -- gone from disk AND gone from the checklist -- which is how an
+# obligation quietly disappears.
+test_the_preview_is_either_taken_or_still_owed() {
+    local root="$PWD/.." state
+    if [[ -f "$root/preview.png" ]]; then
+        if [[ "$(od -An -tx1 -N8 < "$root/preview.png" | tr -d ' \n')" == "89504e470d0a1a0a" ]]; then
+            state="present as a real PNG"
+        else
+            state="PRESENT BUT NOT A PNG -- a placeholder is not a screenshot"
+        fi
+    elif grep -q 'preview\.png' "$root/CHECKLIST.md" 2>/dev/null; then
+        state="absent, and the checklist names it as owed"
+    else
+        state="ABSENT AND UNRECORDED -- neither taken nor owed by anyone"
+    fi
+    case "$state" in
+        "present as a real PNG"|"absent, and the checklist names it as owed")
+            state="accounted for" ;;
+    esac
+    assert_eq "preview: the screenshot is either taken or still owed in writing" \
+              "$state" "accounted for"
+}
+
+# The security baseline reads the README too. On smartalb.vpn four pacman lines
+# in prose raised the privilege and package-manager capabilities and cost a
+# round of manual review. This plugin needs no privilege at all, so the words
+# must not be there either.
+test_nothing_privileged_anywhere() {
+    local root="$PWD/.." hits
+    hits="$(grep -rniE '\b(sudo|pkexec|visudo|sudoers|pacman|systemctl|polkit)\b' \
+            "$root"/{README.md,CHECKLIST.md,LICENSE,install,uninstall,manifest.json} \
+            "$root"/*.qml "$root/Model.js" "$root/bin"/* 2>/dev/null || true)"
+    assert_eq "no privileged verb in code, installer, README or checklist" "$hits" ""
+}
+
+test_install_is_executable_and_unprivileged() {
+    local root="$PWD/.."
+    assert_eq "install is executable"   "$([[ -x "$root/install"   ]] && echo yes || echo no)" "yes"
+    assert_eq "uninstall is executable" "$([[ -x "$root/uninstall" ]] && echo yes || echo no)" "yes"
+    assert_eq "mutations.sh is executable" \
+              "$([[ -x "$root/test/mutations.sh" ]] && echo yes || echo no)" "yes"
+    assert_eq "install has no --system tier" \
+              "$(grep -c -- '--system' "$root/install" || true)" "0"
+    # A refusal, not a request: run as root it must stop, because it installs
+    # into a per-user config directory and root's copy would help nobody.
+    assert_eq "install refuses to run as root" \
+              "$(grep -c 'id -u' "$root/install" || true)" "1"
+}
+
+# install and uninstall are exercised against a SANDBOX, never against the
+# real ~/.config/omarchy/plugins. setup_sandbox redirects XDG_CONFIG_HOME and
+# XDG_RUNTIME_DIR, which is exactly what both scripts resolve their target
+# from -- so the round trip is real and lands nowhere near the live shell.
+test_install_copies_the_plugin_into_the_sandbox() {
+    setup_sandbox
+    local root; root="$(cd "$PWD/.." && pwd)"
+    local target="$XDG_CONFIG_HOME/omarchy/plugins/smartalb.autostart"
+    local out; out="$("$root/install" 2>&1)"
+    assert_eq "install: the target directory was created" \
+              "$([[ -d "$target" ]] && echo yes || echo no)" "yes"
+    for f in manifest.json README.md LICENSE BarWidget.qml Panel.qml Service.qml \
+             Runners.qml Model.js bin/omarchy-autostart-config; do
+        assert_eq "install: $f arrived" \
+                  "$([[ -f "$target/$f" ]] && echo yes || echo no)" "yes"
+    done
+    assert_eq "install: the bin scripts are executable at the target" \
+              "$([[ -x "$target/bin/omarchy-autostart-config" ]] && echo yes || echo no)" "yes"
+    # The install must not carry the development tree along: test/ holds a
+    # harness that imports nothing the shell provides, and .git is a
+    # checkout, not plugin content.
+    assert_eq "install: the test directory is NOT copied into the plugin" \
+              "$([[ -e "$target/test" ]] && echo copied || echo left-behind)" "left-behind"
+    assert_contains "install: it says where it put things" "$out" "$target"
+    assert_contains "install: it names the restart the widget needs" "$out" "omarchy-restart-shell"
+    teardown_sandbox
+}
+
+test_uninstall_removes_the_plugin_but_keeps_the_configuration() {
+    setup_sandbox
+    local root; root="$(cd "$PWD/.." && pwd)"
+    local target="$XDG_CONFIG_HOME/omarchy/plugins/smartalb.autostart"
+    local config="$XDG_CONFIG_HOME/omarchy/autostart-layout.json"
+    "$root/install" >/dev/null 2>&1
+    printf '{"schemaVersion":1,"programs":[],"workspaces":[]}' > "$config"
+    chmod 600 "$config"
+    mkdir -p "$XDG_RUNTIME_DIR/smartalb.autostart"
+    local out; out="$("$root/uninstall" 2>&1)"
+    assert_eq "uninstall: the plugin directory is gone" \
+              "$([[ -e "$target" ]] && echo still-there || echo gone)" "gone"
+    assert_eq "uninstall: the start marker directory is gone" \
+              "$([[ -e "$XDG_RUNTIME_DIR/smartalb.autostart" ]] && echo still-there || echo gone)" "gone"
+    # The configuration is the user's data. A reinstall must find the list
+    # again, so removing the plugin may not remove it.
+    assert_eq "uninstall: the configuration file is KEPT" \
+              "$([[ -f "$config" ]] && echo kept || echo DELETED)" "kept"
+    assert_contains "uninstall: it prints the path it kept" "$out" "$config"
+    # Twice in a row must be quiet, not an error: nothing left to remove is
+    # the normal state of a second run.
+    assert_status "uninstall: running it again succeeds" 0 "$root/uninstall"
+    teardown_sandbox
+}
+
+test_manifest_is_sound
+test_repository_has_what_validation_looks_for
+test_the_preview_is_either_taken_or_still_owed
+test_nothing_privileged_anywhere
+test_install_is_executable_and_unprivileged
+test_install_copies_the_plugin_into_the_sandbox
+test_uninstall_removes_the_plugin_but_keeps_the_configuration
+
 summary
