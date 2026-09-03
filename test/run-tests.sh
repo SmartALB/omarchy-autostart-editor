@@ -1178,6 +1178,29 @@ test_the_preview_is_either_taken_or_still_owed() {
     esac
     assert_eq "preview: the screenshot is either taken or still owed in writing" \
               "$state" "accounted for"
+
+    # AND THE README MUST BE CORRECT IN WHICHEVER STATE THAT IS. The README
+    # shipped for a while with `![...](preview.png)` at line 6 pointing at a
+    # file that did not exist: every suite green, and a broken image as the
+    # first thing on the first page a marketplace reviewer opens. The
+    # assertion above passes in both states by design, so on its own it could
+    # never have caught that.
+    #
+    # So the two are coupled, and the coupling holds in both directions:
+    # no file means no reference, and a file that exists must be shown.
+    # CHECKLIST.md A1 carries the exact line to paste when the screenshot is
+    # taken, which is what makes the second direction satisfiable.
+    local refs coupling
+    refs="$(grep -c '](preview\.png)' "$root/README.md" || true)"
+    if [[ -f "$root/preview.png" ]]; then
+        [[ "$refs" -ge 1 ]] && coupling="consistent" \
+            || coupling="preview.png exists but README.md never shows it"
+    else
+        [[ "$refs" -eq 0 ]] && coupling="consistent" \
+            || coupling="README.md links preview.png ($refs time(s)) but the file does not exist -- a broken image on the first page"
+    fi
+    assert_eq "preview: the README matches whether the screenshot exists" \
+              "$coupling" "consistent"
 }
 
 # The security baseline reads the README too. On smartalb.vpn four pacman lines

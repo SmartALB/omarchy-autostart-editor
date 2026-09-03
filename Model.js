@@ -26,7 +26,10 @@ function luaBytes(s) {
 // compositor. This allowlist is layer one of two: it catches nonsense early
 // and says so in words a person can act on. It is deliberately NOT the thing
 // that makes injection impossible -- luaBytes() is, and it does not rely on
-// this having run. See the spec, section 6.
+// this having run: every value crossing into a Lua chunk is re-encoded as
+// string.char(...) bytes there, so a value this allowlist let through could
+// still not close a quote or a brace. Two layers, and the second one is the
+// one that holds.
 //
 // Allowed: letters, digits, space, and the metacharacters a Hyprland class
 // regex actually needs. Absent by construction: " ' { } ; = backtick,
@@ -349,8 +352,12 @@ function envelopeText(code, detail) {
     if (code === "insecure-permissions")
         return "The configuration file can be written by someone else, so it was not used."
              + " Make it writable only by you." + extra;
+    // Worded for both directions on purpose: read and write share
+    // read_bounded in bin/omarchy-autostart-config, so this same code also
+    // reaches a user who has just pressed Apply, where "too large to read"
+    // would describe the wrong operation.
     if (code === "too-large")
-        return "The configuration file is too large to read." + extra;
+        return "The configuration file is too large to handle." + extra;
     if (code === "not-json")
         return "The configuration file is not valid JSON, so nothing was changed." + extra;
     if (code === "bad-schema")

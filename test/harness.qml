@@ -1005,10 +1005,19 @@ QtObject {
                   "The configuration helper reported an unknown problem: brand-new.");
             check("envelopeText: the detail is appended when there is one",
                   Model.envelopeText("too-large", "300000 bytes"),
-                  "The configuration file is too large to read. 300000 bytes");
+                  "The configuration file is too large to handle. 300000 bytes");
             check("envelopeText: no trailing space when there is no detail",
                   Model.envelopeText("too-large", ""),
-                  "The configuration file is too large to read.");
+                  "The configuration file is too large to handle.");
+
+            // --- bounds reachable through the JS namespace ---------------------
+            // Panel.qml's workspaceOptions() derives its upper bound from
+            // Model.MAX_WORKSPACES rather than restating 99. That only works
+            // if a top-level `var` in this file is reachable as a property of
+            // the import namespace -- asserted here, in the same engine that
+            // runs the plugin, so the claim is measured rather than assumed.
+            check("MAX_WORKSPACES is reachable through the import namespace",
+                  Model.MAX_WORKSPACES, 99);
 
             // --- shellQuote ----------------------------------------------------
             check("shellQuote: plain path",      Model.shellQuote("/a/b"), "'/a/b'");

@@ -3,8 +3,6 @@
 An Omarchy bar widget for Hyprland: choose which programs start with your
 session, and where their windows go.
 
-![The Autostart Layout panel](preview.png)
-
 ## What it does
 
 Four things, all from one panel behind a bar button:
@@ -15,6 +13,8 @@ Four things, all from one panel behind a bar button:
 2. **A placement per program** -- a workspace, or a monitor. The plugin sets
    the matching window rule so the program's window lands there.
 3. **A workspace-to-monitor table.** Workspace 3 always on `DP-4`, and so on.
+   Read "Known limits" for what this does and does not do at login: a
+   workspace that already exists when you log in is not moved.
 4. **A "Launch missing" button** for the enabled programs that have no window
    at the moment, so you do not have to log out to try your list.
 
@@ -134,8 +134,13 @@ Two things follow from that:
 
 - A manual `hyprctl reload` drops them, because a reload rebuilds the
   compositor's rule set from the configuration files, which never contained
-  them. The background part of the plugin notices the reload and puts them
-  back, so the gap is short rather than permanent.
+  them. The background part of the plugin notices the reload and sets the
+  **rules** again, so a window opened after that lands where you configured
+  it. It does **not** re-run the workspace-to-monitor moves: a workspace that
+  is already open stays on whichever monitor the reload left it on until you
+  open the panel and press **Apply**, which does perform the moves. So the gap
+  is short for the rules and, for the current layout, lasts until the next
+  Apply.
 - Nothing is left behind when you remove the plugin. Log out, or run
   `hyprctl reload`, and the rules are gone.
 
@@ -151,6 +156,16 @@ a window-class pattern that matches nothing; open the row and check both.
 ## Known limits
 
 - Workspaces 1 to 99 only. Named workspaces are not supported.
+- **At login the table sets rules, and a rule only fires when a workspace is
+  created.** Workspace 1 already exists before the shell starts, so pinning
+  workspace 1 to a particular monitor is honoured for workspaces created after
+  login, not for the one you are already looking at. The panel's **Apply**
+  button does move workspaces that are already open -- the background part
+  that runs at login deliberately does not, because moving workspaces around
+  under you while your session is still coming up is worse than not moving
+  them. If your layout matters on the workspace you land in, open the panel
+  once and press **Apply**, or put the programs you care about on workspaces
+  you open later.
 - Placement is workspace or monitor. There are no `float`, `size`, `maximize`
   or `fullscreen` rules -- this is not a general window-rule editor.
 - Placement matches on window class, so several windows of the same class go
@@ -181,7 +196,7 @@ Three traps, each with the symptom you will recognise it by:
   Qt 5.15, does not load the harness at all, and exits 2 -- which collides
   with the runner's own "cannot run". The tool that fails with **no output
   whatsoever** and status 1 is `/usr/bin/qmltestrunner`, which is why it is
-  not used here. The runner's four exit codes: `0` green, `1` a test failed,
+  not used here. The runner's five exit codes: `0` green, `1` a test failed,
   `2` cannot run, `3` the harness itself broke, `4` the assertion-count guard
   failed.
 
@@ -194,7 +209,7 @@ settle -- every claim that needs a running Hyprland session to confirm.
 ./test/run-tests.sh        # the bin/ scripts, the manifest, install/uninstall
 ./test/run-qml-tests.sh    # Model.js, headless, in the Qt6 engine
 ./test/qml-structure.sh    # structural checks over the QML files
-./test/runners-shape.sh    # the shape of every command Runners.qml builds
+./test/runners-shape.sh    # runnerOut/runnerErr, run through a real bash
 ./test/lua-syntax.sh       # the Lua chunks compile
 ./test/mutations.sh        # every test above, checked against its own mutation
 ```
@@ -202,6 +217,13 @@ settle -- every claim that needs a running Hyprland session to confirm.
 `mutations.sh` is the one worth explaining: it breaks a guarded property on
 purpose, one at a time, and fails if the suite stays green. A test that
 survives the removal of the thing it tests was never testing it.
+
+`test/probe-hyprland-api.sh` is **not** part of any suite and is not run by
+any of the above. It is the measurement that established how Hyprland's Lua
+API behaves, and it acts on the live desktop: it creates and removes real
+windows and workspace rules. It snapshots before and after, verifies the
+restore and aborts on the first unexpected event, but do not run it in a
+session you care about.
 
 ## License
 

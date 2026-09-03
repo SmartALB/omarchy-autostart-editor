@@ -40,11 +40,25 @@ allowed to load the plugin into a running session.
    validation looks there and nowhere else -- an image under `images/` is
    treated as absent, which is how a submission ends up listed with the
    generic placeholder.
+5. **Then add it to the README**, as the fifth line, directly under the
+   two-line summary and above `## What it does`:
 
-The shell suite has an assertion for this that holds in both states: it passes
-while `preview.png` is absent *and* named here as owed, and it passes once the
-file is present and is a real PNG. It fails only if the obligation disappears
-from both places at once.
+   ```markdown
+   ![The Autostart Layout panel](preview.png)
+   ```
+
+   The README deliberately ships **without** that line, because a reference to
+   a file that does not exist renders as a broken image on the first page a
+   marketplace reviewer opens. The shell suite couples the two in both
+   directions: no file means no reference, and once the file exists the README
+   must show it. So step 5 is not optional -- omitting it turns the suite red,
+   which is the point.
+
+The shell suite has two assertions for this. The first holds in both states:
+it passes while `preview.png` is absent *and* named here as owed, and it passes
+once the file is present and is a real PNG; it fails only if the obligation
+disappears from both places at once. The second is the coupling in step 5 --
+the README must reference the image exactly when the image exists.
 
 ### A2. Enable the plugin in `shell.json`, and confirm the service came up
 
@@ -167,6 +181,22 @@ reloads the shell after any change under the plugin directory and takes running
     message naming the exact command to fix the mode, and apply **nothing**.
 13. Log out and back in: the enabled programs start, each exactly once, in
     their configured places.
+14. **And check what the workspace table did NOT do at login.** Pin the
+    workspace you land in (normally workspace 1) to a monitor that is not the
+    one it is on, log out and back in, and confirm that it did **not** move.
+    That is the expected result, not a defect: the service sets workspace
+    *rules*, and a workspace rule fires when a workspace is **created**
+    (`Model.js:695-698`), while workspace 1 exists before the shell starts.
+    The service never calls `buildReconcileChunks` or `workspaceMoves` -- that
+    is deliberate, per the design spec's separation of "at session start"
+    (rules only) from "on saving in the panel" (rules, then the reconcile).
+    Then open the panel, press **Apply**, and confirm the workspace *does*
+    move. Both halves have to hold: README "Known limits" now states this, and
+    a user who reads it and finds the opposite is looking at a real bug.
+    *If you would rather it did move at login:* the behavioural fix is to give
+    the service the reconcile step the panel already has, and that is a change
+    with its own risk -- moving workspaces under a session that is still coming
+    up -- so it is a decision, not a cleanup.
 
 ---
 
@@ -267,10 +297,13 @@ failure -- check for an error line in the panel.
 ### C9. Would a Hyprland refusal of the pattern be visible at all?
 
 Ask this question before C9b. `hl.window_rule` is called without `pcall`, so a
-Lua error inside the chunk is not caught by us, and the only signal the panel
-has is `hyprctl`'s exit code -- which nothing here has measured for the *eval*
-verb. A rule Hyprland silently ignores and a rule it applies look identical
-from the panel.
+Lua error inside the chunk is not caught by us. Both appliers now check the
+same two things -- `hyprctl`'s exit code **and** the answer `"ok"` (`Panel.qml`
+used to check only the exit code, which made the interactive path the weaker
+of the two; a structural check now binds them together). Neither is a
+measurement of effect: this project's own probe recorded `hyprctl` answering
+`"ok"` for a dispatch with no visible effect at all. So a rule Hyprland
+silently ignores and a rule it applies still look identical from the panel.
 
 *Exercise:* feed `hyprctl eval` a chunk that is certain to fail (a call to a
 nonexistent `hl.` function) and record the exit code and stderr. If it exits 0,

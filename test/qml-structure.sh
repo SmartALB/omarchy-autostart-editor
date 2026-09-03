@@ -111,8 +111,12 @@ hits="$(sed '/^$/d' <<<"$hits")"
 [[ -z "$hits" ]] && ok "no PATH-resolved interpreter in any qml file or Model.js" \
                  || bad "no PATH-resolved interpreter in any qml file or Model.js" "$hits"
 
-# 2 -- the three absolute binaries are the only ones named, in either quote
-#      style.
+# 2 -- the four binaries this fixed list names are each named absolutely, in
+#      either quote style. Runners.qml declares SIX tool paths; the remaining
+#      two (binMktemp, binRm) are covered by construction in check 2b below,
+#      which requires every declared bin<Something> to be an absolute
+#      literal. So nothing here is unguarded -- the list is a floor, not the
+#      whole set, and it used to say "three" while checking four.
 stripped_runners="$(strip_comments Runners.qml)"
 for expected in /usr/bin/timeout /usr/bin/bash /usr/bin/hyprctl /usr/bin/setsid; do
   bin_pat="[\"']${expected}[\"']"
@@ -1498,6 +1502,159 @@ if [[ -z "$marker_missing" ]]; then
 else
   bad "the truncation marker is the same text in the file that writes it and the file that reads it" \
       "the literal '$truncation_marker' is absent from:$marker_missing -- a reworded marker stops being recognised and a merely-long application list is reported as broken"
+fi
+
+# --- THE LAUNCH ROUTE ------------------------------------------------------
+#
+# THE GAP THIS CLOSES, measured by the final review: swapping
+# `run.launcher(` for `run.runner(` at Service.qml's launch site left ALL
+# FIVE suites green -- 70 structural, 6 runner-shape, 213 shell -- and kills
+# the user's programs 120 s after login. `--foreground`, `setsid -f` and the
+# `bash -n` gate appeared in NO test in this repository. They are the three
+# measured fixes that keep a launched program alive past `timeout`'s deadline
+# and past a Quickshell Process teardown, and the wrapper carrying them is
+# duplicated verbatim in two files with nothing binding the copies.
+#
+# Read through the comment-stripped view like everything else here, and
+# scoped to the launch FUNCTION rather than to the file, so a mention
+# anywhere else cannot stand in for the call that actually launches.
+
+# The body of one function, from its header to the line that starts the
+# process, on the comment-stripped view.
+launch_block() {
+  local file="$1" start="$2"
+  strip_comments "$file" \
+    | awk -v start="$start" '
+        $0 ~ start { inb = 1 }
+        inb { print }
+        inb && /launchProc\.running[[:space:]]*=[[:space:]]*true/ { exit }'
+}
+
+for pair in "Service.qml:function launchAll" "Panel.qml:function launchMissing"; do
+  lf="${pair%%:*}"; lstart="${pair#*:}"
+  block="$(launch_block "$lf" "$lstart")"
+
+  if [[ -z "$block" ]]; then
+    bad "$lf: the launch function was found at all" \
+        "no block between '$lstart' and 'launchProc.running = true' -- every check below would have been vacuous"
+    continue
+  fi
+  ok "$lf: the launch function was found at all"
+
+  # 1. The route. run.runner() lets GNU timeout put its child in a new
+  #    process group and signal the WHOLE group at the deadline; measured,
+  #    0 of 2 backgrounded grandchildren survived without --foreground.
+  if grep -qE 'launchProc\.command[[:space:]]*=[[:space:]]*run\.launcher\(' <<<"$block"; then
+    ok "$lf: the launch goes through run.launcher()"
+  else
+    bad "$lf: the launch goes through run.launcher()" \
+        "no 'launchProc.command = run.launcher(' in the launch function: $block"
+  fi
+
+  # 2. And not through the plain runner, which is the exact one-word swap
+  #    that killed the programs and stayed green.
+  if grep -qE 'run\.runner\(' <<<"$block"; then
+    bad "$lf: the launch does NOT go through run.runner()" \
+        "run.runner( appears inside the launch function -- that is the swap that kills every launched program at timeout's deadline"
+  else
+    ok "$lf: the launch does NOT go through run.runner()"
+  fi
+
+  # 3. Each entry detached, so a teardown of this Process
+  #    (Component.onDestruction, or a superseded generation) cannot reach
+  #    the programs either. --foreground alone does not cover that.
+  if grep -qE 'binSetsid[[:space:]]*\+[[:space:]]*"[[:space:]]*-f[[:space:]]*"' <<<"$block"; then
+    ok "$lf: each launched entry is detached with setsid -f"
+  else
+    bad "$lf: each launched entry is detached with setsid -f" \
+        "no 'binSetsid + \" -f \"' in the launch function -- a Process teardown then reaches the launched programs"
+  fi
+
+  # 4. The parse gate. Closing the entry's stdio also closes the only
+  #    channel on which it could report a syntax error, and Model.validate
+  #    accepts an unbalanced quote (a shell-syntax problem, not a
+  #    field-shape one). Without the gate the failure is silent.
+  if grep -qE 'binBash[[:space:]]*\+[[:space:]]*"[[:space:]]*-n[[:space:]]+-c[[:space:]]*"' <<<"$block"; then
+    ok "$lf: each entry is gated by a bash -n parse check"
+  else
+    bad "$lf: each entry is gated by a bash -n parse check" \
+        "no 'binBash + \" -n -c \"' in the launch function -- a malformed command line then fails with nothing on any stream"
+  fi
+done
+
+# The class-level answer to the two file-scoped blocks above: a THIRD launch
+# site added in some future task is covered the moment it assigns
+# launchProc.command, with nobody having to remember to extend a list here.
+# Every such assignment in any qml file must name run.launcher().
+launch_assign="$(grep_stripped_all 'launchProc\.command[[:space:]]*=' || true)"
+launch_bad="$(grep -vE 'run\.launcher\(' <<<"$launch_assign" | sed '/^$/d' || true)"
+launch_count="$(grep -c . <<<"$launch_assign" || true)"
+if [[ "$launch_count" -lt 2 ]]; then
+  bad "every launchProc.command assignment goes through run.launcher()" \
+      "found $launch_count assignment(s); there are two launch sites (Service.qml, Panel.qml), so the discovery pattern is broken and this check proves nothing"
+elif [[ -n "$launch_bad" ]]; then
+  bad "every launchProc.command assignment goes through run.launcher()" "$launch_bad"
+else
+  ok "every launchProc.command assignment goes through run.launcher() ($launch_count sites)"
+fi
+
+# --foreground itself, in the helper the two sites above go through. Grepping
+# it over test/ returned no hits before this block existed.
+launcher_body="$(awk '/function[[:space:]]+launcher[[:space:]]*\(/ {inb=1} inb {print} inb && /^[[:space:]]*}/ && !/function/ {exit}' <<<"$stripped_runners")"
+runner_body="$(awk '/function[[:space:]]+runner[[:space:]]*\(/ {inb=1} inb {print} inb && /^[[:space:]]*}/ && !/function/ {exit}' <<<"$stripped_runners")"
+if grep -qF -- '--foreground' <<<"$launcher_body"; then
+  ok "Runners.qml: launcher() passes --foreground to timeout"
+else
+  bad "Runners.qml: launcher() passes --foreground to timeout" \
+      "not in the launcher() body: $launcher_body -- without it timeout signals the whole process group at the deadline and every launched program dies with it"
+fi
+# The two helpers must stay distinguishable: if runner() also carried
+# --foreground, a launch site swapped onto runner() would look harmless here.
+if grep -qF -- '--foreground' <<<"$runner_body"; then
+  bad "Runners.qml: runner() is the plain route and does NOT pass --foreground" \
+      "runner() carries --foreground, so the launcher/runner distinction the launch checks rely on no longer exists: $runner_body"
+else
+  ok "Runners.qml: runner() is the plain route and does NOT pass --foreground"
+fi
+
+stripped_service="$(strip_comments Service.qml)"
+
+# --- the two appliers must judge hyprctl the same way ----------------------
+#
+# Service.qml and Panel.qml send the SAME payload through the SAME run.hypr()
+# helper. Panel.qml used to read only exitCode while Service.qml also required
+# the answer "ok", which made the interactive path -- the one where the user
+# pressed Apply and is watching -- the weaker of the two. Bound across both
+# files against one literal, comment-stripped, so a comment saying the right
+# thing cannot stand in for either check.
+ok_missing=""
+grep -qE '!==[[:space:]]*"ok"' <<<"$stripped_service" || ok_missing="$ok_missing Service.qml"
+grep -qE '!==[[:space:]]*"ok"' <<<"$stripped_panel"   || ok_missing="$ok_missing Panel.qml"
+if [[ -z "$ok_missing" ]]; then
+  ok "both appliers require hyprctl's \"ok\", not just a zero exit"
+else
+  bad "both appliers require hyprctl's \"ok\", not just a zero exit" \
+      "the '!== \"ok\"' check is absent from:$ok_missing -- a chunk hyprctl refused then reads as applied on that path"
+fi
+
+# --- no second copy of a Model.js bound in Panel.qml ------------------------
+#
+# Panel.qml's own header declares that every derivation lives in Model.js.
+# workspaceOptions() restated MAX_WORKSPACES as a bare 99, which is the copy
+# that drifts silently: the picker would offer a number validate() rejects, or
+# stop offering one it accepts.
+ws_opts="$(awk '/function[[:space:]]+workspaceOptions[[:space:]]*\(/ {inb=1} inb {print} inb && /^[[:space:]]*}/ && !/function/ {exit}' <<<"$stripped_panel")"
+if [[ -z "$ws_opts" ]]; then
+  bad "Panel.qml: workspaceOptions takes its bound from Model, not a literal" \
+      "workspaceOptions() was not found at all, so this check would have been vacuous"
+elif ! grep -qF 'Model.MAX_WORKSPACES' <<<"$ws_opts"; then
+  bad "Panel.qml: workspaceOptions takes its bound from Model, not a literal" \
+      "no Model.MAX_WORKSPACES in workspaceOptions(): $ws_opts"
+elif grep -qE '(^|[^A-Za-z0-9_.])99([^A-Za-z0-9_]|$)' <<<"$ws_opts"; then
+  bad "Panel.qml: workspaceOptions takes its bound from Model, not a literal" \
+      "a bare 99 is still in workspaceOptions(), so the bound exists twice: $ws_opts"
+else
+  ok "Panel.qml: workspaceOptions takes its bound from Model, not a literal"
 fi
 
 printf '\nqml structure: total=%d failed=%d\n' "$run" "$failed"

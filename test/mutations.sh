@@ -35,7 +35,46 @@ cd "$(dirname "$0")/.."
 ROOT="$PWD"
 
 WORK="$(TMPDIR=/tmp mktemp -d)" || { echo "mutations: mktemp -d failed" >&2; exit 2; }
-trap 'rm -rf -- "$WORK"' EXIT
+
+# THE FILE UNDER MUTATION RIGHT NOW, or empty between probes. An interrupted
+# run used to leave a shipped file mutated AND delete the backup its own
+# failure message pointed at -- reproduced during the final review, which left
+# manifest.json carrying an injected "overlay": "Panel.qml" entry point with
+# the copy already gone. Two probes make that more than cosmetic: one adds
+# `rm -f -- "$CONFIG"` to `uninstall`, another adds a privileged verb to
+# README.md.
+#
+# So the restore runs on EVERY exit path, and it runs BEFORE the work
+# directory is removed. `restore_now` is idempotent and safe to call with
+# nothing in flight. Note the ordering: the INT/TERM handlers restore and then
+# exit, which fires the EXIT trap, which restores again (a no-op the second
+# time) and only then deletes the backups.
+IN_FLIGHT=""
+IN_FLIGHT_BACKUP=""
+
+restore_now() {
+    [[ -n "$IN_FLIGHT" && -n "$IN_FLIGHT_BACKUP" && -f "$IN_FLIGHT_BACKUP" ]] || return 0
+    if cp -- "$IN_FLIGHT_BACKUP" "$ROOT/$IN_FLIGHT"; then
+        printf '\nmutations: interrupted -- restored %s from its copy\n' "$IN_FLIGHT" >&2
+    else
+        printf '\nmutations: INTERRUPTED AND COULD NOT RESTORE %s.\n       Restore it by hand from %s BEFORE that directory is gone.\n' \
+               "$IN_FLIGHT" "$IN_FLIGHT_BACKUP" >&2
+        # Leave the backup behind rather than deleting the only copy.
+        WORK=""
+    fi
+    IN_FLIGHT=""; IN_FLIGHT_BACKUP=""
+}
+
+cleanup() {
+    restore_now
+    [[ -n "$WORK" ]] && rm -rf -- "$WORK"
+    return 0
+}
+
+trap cleanup EXIT
+trap 'restore_now; exit 130' INT
+trap 'restore_now; exit 143' TERM
+trap 'restore_now; exit 129' HUP
 
 run=0; failed=0
 
@@ -53,10 +92,14 @@ probe() {
     fi
     cp -- "$ROOT/$file" "$backup" || { fail "$name" "could not copy $file aside"; return; }
 
+    # From here until the restore below, an interrupt must put this file back.
+    IN_FLIGHT="$file"; IN_FLIGHT_BACKUP="$backup"
+
     sed -i -e "$expr" -- "$ROOT/$file"
     if cmp -s -- "$ROOT/$file" "$backup"; then
         # Restore anyway, so a later probe on the same file starts clean.
         cp -- "$backup" "$ROOT/$file"
+        IN_FLIGHT=""; IN_FLIGHT_BACKUP=""
         fail "$name" "the mutation changed nothing -- the pattern no longer matches $file"
         return
     fi
@@ -69,9 +112,12 @@ probe() {
 
     cp -- "$backup" "$ROOT/$file"
     if ! cmp -s -- "$ROOT/$file" "$backup"; then
+        # Keep the backup: it is the only copy of the original left.
+        WORK=""
         fail "$name" "the restore of $file did not take -- STOP and restore it by hand from $backup"
         return
     fi
+    IN_FLIGHT=""; IN_FLIGHT_BACKUP=""
     if ! "$suite" >/dev/null 2>&1; then
         fail "$name" "the suite did not recover after $file was restored"
     fi
@@ -121,6 +167,37 @@ probe "runners: the producer's own exit status" "$SHAPE_SUITE" Runners.qml \
 
 probe "barwidget: the glyph stays a \\u escape" "$STRUCT_SUITE" BarWidget.qml \
   's/"\\uf135"/""/'
+
+# --- the launch route -------------------------------------------------------
+#
+# THE DEFECT THESE EXIST FOR, measured by the final review: swapping
+# `run.launcher(` for `run.runner(` at either launch site left ALL FIVE suites
+# green and killed the user's programs 120 s after login. Each direction is
+# probed separately and on BOTH files, because the wrapper is duplicated
+# verbatim and nothing else binds the copies to each other.
+
+probe "launch: Service.qml must use launcher, not the plain runner" "$STRUCT_SUITE" Service.qml \
+  's/run\.launcher(/run.runner(/'
+
+probe "launch: Panel.qml must use launcher, not the plain runner" "$STRUCT_SUITE" Panel.qml \
+  's/run\.launcher(/run.runner(/'
+
+probe "launch: entries must be detached with setsid -f" "$STRUCT_SUITE" Service.qml \
+  's/run\.binSetsid + " -f " + //'
+
+probe "launch: entries must be gated by a bash -n parse check" "$STRUCT_SUITE" Service.qml \
+  's/run\.binBash + " -n -c "/run.binBash + " -c "/'
+
+probe "launch: launcher() must pass --foreground to timeout" "$STRUCT_SUITE" Runners.qml \
+  's/"--foreground", //'
+
+# --- the two appliers, and the one duplicated bound ------------------------
+
+probe "apply: the panel must require hyprctl's ok, not just a zero exit" "$STRUCT_SUITE" Panel.qml \
+  's/!== "ok"/!== "OK"/'
+
+probe "panel: the workspace bound must come from Model" "$STRUCT_SUITE" Panel.qml \
+  's/i <= Model\.MAX_WORKSPACES/i <= 99/'
 
 # --- Model.js ---------------------------------------------------------------
 
@@ -176,6 +253,20 @@ probe "uninstall: the configuration is the user's data" "$SHELL_SUITE" uninstall
 
 probe "checklist: the preview obligation cannot just vanish" "$SHELL_SUITE" CHECKLIST.md \
   's/preview\.png/preview-image/g'
+
+# The README and preview.png must agree -- that is how a broken image sat at
+# the top of the first page a reviewer opens while all five suites stayed
+# green. The coupling is state-dependent, so the mutation has to be: with no
+# image on disk, ADDING a reference must go red; once the screenshot has been
+# taken, REMOVING it must go red. A single fixed expression would silently
+# stop proving anything the moment the file lands.
+if [[ -f preview.png ]]; then
+    probe "readme: the existing screenshot must be shown" "$SHELL_SUITE" README.md \
+      's|^!\[.*\](preview\.png)$||'
+else
+    probe "readme: no image reference while preview.png does not exist" "$SHELL_SUITE" README.md \
+      's|^## What it does$|![The Autostart Layout panel](preview.png)\n\n## What it does|'
+fi
 
 # --- the guards themselves --------------------------------------------------
 #

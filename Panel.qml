@@ -494,6 +494,33 @@ Panel {
 
     Process {
         id: evalProc
+        // SAME PAYLOAD, SAME HELPER, SAME CHECK AS Service.qml:361-386. This
+        // used to read only exitCode, which made the interactive path -- the
+        // one where the user is watching and pressed Apply -- the weaker of
+        // the two appliers. `hyprctl eval` answers "ok" when the Lua chunk
+        // parsed and ran without a Lua error; anything else means the chunk
+        // did NOT run.
+        //
+        // What "ok" does NOT mean, and the reason CHECKLIST.md C9 stays open:
+        // this project's own probe recorded hyprctl answering "ok" for a
+        // dispatch with no visible effect at all. So "ok" confirms the chunk
+        // was accepted, never that a rule inside it applies.
+        //
+        // Both handlers guard on `errorText === ""` and both fast-forward
+        // pendingIndex, so whichever of onStreamFinished and onExited
+        // Quickshell emits first, the outcome is the same and the message is
+        // the first one recorded. Chunks already sent are not rolled back:
+        // this bounds how much further gets out of sync, it is not an
+        // all-or-nothing guarantee.
+        stdout: StdioCollector {
+            waitForEnd: true
+            onStreamFinished: {
+                if (String(text || "").trim() !== "ok" && root.errorText === "") {
+                    root.errorText = "hyprctl refused a rule block; nothing further was applied"
+                    root.pendingIndex = root.pendingChunks.length
+                }
+            }
+        }
         onExited: function(exitCode, exitStatus) {
             if (exitCode !== 0 && root.errorText === "") {
                 root.errorText = "hyprctl refused a rule block; nothing further was applied"
@@ -798,9 +825,16 @@ Panel {
         return out
     }
 
+    // The bound comes from Model, never from a literal here: this file's own
+    // header says every derivation lives in Model.js, and a second copy of
+    // MAX_WORKSPACES is exactly the kind that drifts silently -- the picker
+    // would offer a number validate() then rejects, or stop offering one it
+    // accepts. Reachability of a top-level `var` through the JS namespace is
+    // asserted in test/harness.qml, in the same engine that runs this file.
     function workspaceOptions() {
         var out = []
-        for (var i = 1; i <= 99; i++) out.push({ value: String(i), label: String(i) })
+        for (var i = 1; i <= Model.MAX_WORKSPACES; i++)
+            out.push({ value: String(i), label: String(i) })
         return out
     }
 
