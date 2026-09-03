@@ -62,7 +62,14 @@ cd "$(dirname "$0")"
 # loop would fail this as well: it would have to be made countable, which is
 # the price of the guarantee and cheaper than the guarantee's absence.
 stripped="$(awk -f strip-comments.awk harness.qml)"
-occurrences="$(grep -oE "(^|[^A-Za-z0-9_\"'])(checkThrows|check)\\(" <<<"$stripped" | grep -c .)"
+# `|| true` on both counts, and it is load-bearing rather than defensive:
+# under `set -e` a `grep -c` that matches nothing exits 1, the assignment
+# fails, and the script dies THERE -- with status 1, which this file documents
+# as "tests failed". Measured: a deliberately broken counting pattern exited 1
+# silently and never reached the guard below, so the one branch written to
+# catch a broken guard was itself unreachable. That is the blind shape this
+# whole guard exists to refuse, one level up.
+occurrences="$(grep -oE "(^|[^A-Za-z0-9_\"'])(checkThrows|check)\\(" <<<"$stripped" | grep -c . || true)"
 definitions="$(grep -cE 'function[[:space:]]+(checkThrows|check)[[:space:]]*\(' <<<"$stripped" || true)"
 declared=$(( occurrences - definitions ))
 
