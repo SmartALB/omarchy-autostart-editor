@@ -381,7 +381,7 @@ probe "autostart: remove deletes one line, not two" "$QML_SUITE" Model.js \
   's|^        out.splice(wanted - 1, 1);$|        out.splice(wanted - 1, 2);|'
 
 probe "autostart: the file keeps its single trailing newline" "$QML_SUITE" Model.js \
-  's|^    return lines.join("\\\\n") + "\\\\n";$|    return lines.join("\\\\n");|'
+  's|return lines.join("\\n") + "\\n";|return lines.join("\\n");|'
 
 # THE NON-EDITABLE ENTRY, which in the user's file is the nested Chat line.
 # With this check gone, the plugin would rewrite a line it cannot represent.
@@ -425,11 +425,11 @@ probe "writer: an absent Lua compiler is a refusal, not a skip" "$SHELL_SUITE" b
 
 # THE FRESHNESS CHECK. This is a file the user also edits by hand.
 probe "writer: a file that changed on disk is refused" "$SHELL_SUITE" bin/omarchy-autostart-hypr-write \
-  's|^    \[\[ "$current" == "$expect_mtime" \]\] \\\\$|    [[ "$current" == "$current" ]] \\\\|'
+  's|\[\[ "$current" == "$expect_mtime" \]\]|[[ "$current" == "$current" ]]|'
 
 # THE ONLY WAY BACK: ~/.config/hypr is not under version control.
 probe "writer: the backup is taken before the replacement" "$SHELL_SUITE" bin/omarchy-autostart-hypr-write \
-  's|^    cp -p -- "$TARGET" "$BACKUP" \\\\$|    true \\\\|'
+  's|cp -p -- "$TARGET" "$BACKUP"|true|'
 
 probe "writer: a symlink is refused" "$SHELL_SUITE" bin/omarchy-autostart-hypr-write \
   's|^    \[\[ ! -h "$TARGET" \]\] \|\| err "is-a-symlink"|    [[ 1 -eq 1 ]] \|\| err "is-a-symlink"|'
@@ -444,10 +444,10 @@ probe "writer: a candidate past the cap is refused" "$SHELL_SUITE" bin/omarchy-a
   's|^        err "too-large" "the candidate exceeds $MAX_BYTES bytes"$|        true|'
 
 probe "writer: the replacement is staged beside the destination" "$SHELL_SUITE" bin/omarchy-autostart-hypr-write \
-  's|^    STAGEFILE="$(mktemp "$HYPR_DIR/.autostart.lua.XXXXXX")" \\\\$|    STAGEFILE="$(mktemp)" \\\\|'
+  's|mktemp "$HYPR_DIR/.autostart.lua.XXXXXX"|mktemp|'
 
 probe "writer: the staged file gets the original's permissions" "$SHELL_SUITE" bin/omarchy-autostart-hypr-write \
-  's|^    chmod --reference="$TARGET" "$STAGEFILE" \\\\$|    true \\\\|'
+  's|chmod --reference="$TARGET" "$STAGEFILE"|true|'
 
 # --- the panel's one route to the file --------------------------------------
 probe "panel: the write goes through the writer script, not a second route" "$STRUCT_SUITE" Panel.qml \
@@ -462,8 +462,17 @@ probe "panel: a refused operation never arms the Process" "$STRUCT_SUITE" Panel.
 probe "panel: the row controls are gated on the entry being editable" "$STRUCT_SUITE" Panel.qml \
   's|hyprEntryRow.entry.editable === true|true|'
 
-probe "panel: the counting is Model'"'"'s, not the panel'"'"'s" "$STRUCT_SUITE" Panel.qml \
+probe "panel: the two counts are derived in Model.js, not in the panel" "$STRUCT_SUITE" Panel.qml \
   's|Model.hyprProgramCount(root.hyprSections)|0|'
+
+# The change editor's focus hand-off. Without it a hidden TextField stays the
+# window's activeFocusItem and Escape is swallowed for the rest of the open
+# session -- the defect this project measured once already, on the program rows.
+probe "panel: the change editor hands focus back before it hides the field" "$STRUCT_SUITE" Panel.qml \
+  '/^    function autostartCloseEditor() {$/,/^    }$/{/forceActiveFocus/d}'
+
+probe "panel: the change editor is closed in exactly one place" "$STRUCT_SUITE" Panel.qml \
+  '/^    function reload() {$/,/^    }$/{s|root.autostartCloseEditor()|root.autostartEditLine = -1|}'
 
 # --- the guards themselves --------------------------------------------------
 #

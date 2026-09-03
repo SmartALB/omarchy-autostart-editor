@@ -1493,9 +1493,36 @@ QtObject {
             // --- which section may be written ----------------------------------
             check("hypr writable: autostart.lua is the one",
                   Model.hyprSectionIsWritable(sections[0]), true);
-            check("hypr writable: windowrules.lua is not",
+            // ALL THREE PRESENT AND NONE TRUNCATED, and that is the whole point
+            // of this second envelope. Against `sections` above, windowrules.lua
+            // is present:false and workspaces.lua is truncated:true -- so both
+            // are unwritable for a reason that is NOT their name, and a mutation
+            // probe proved it: disarming the name check left the suite green
+            // (probe "autostart: only autostart.lua is writable"). These two
+            // fixtures differ from autostart.lua in nothing but the name.
+            var allPresent = Model.parseHyprFiles([
+                { name: "autostart.lua",   path: "/h/autostart.lua",   present: true,
+                  mtime: 21, truncated: false, content: AUTOSTART_TEXT },
+                { name: "windowrules.lua", path: "/h/windowrules.lua", present: true,
+                  mtime: 22, truncated: false, content: WINDOWRULES_TEXT },
+                { name: "workspaces.lua",  path: "/h/workspaces.lua",  present: true,
+                  mtime: 23, truncated: false, content: WORKSPACES_TEXT }
+            ]);
+            check("hypr writable: the second envelope really has all three present",
+                  String(allPresent[0].present) + "," + String(allPresent[1].present)
+                  + "," + String(allPresent[2].present), "true,true,true");
+            check("hypr writable: and none of them truncated",
+                  String(allPresent[0].truncated) + "," + String(allPresent[1].truncated)
+                  + "," + String(allPresent[2].truncated), "false,false,false");
+            check("hypr writable: windowrules.lua is not writable, and only its NAME says so",
+                  Model.hyprSectionIsWritable(allPresent[1]), false);
+            check("hypr writable: workspaces.lua is not writable, and only its NAME says so",
+                  Model.hyprSectionIsWritable(allPresent[2]), false);
+            check("hypr writable: while autostart.lua in that same envelope is",
+                  Model.hyprSectionIsWritable(allPresent[0]), true);
+            check("hypr writable: windowrules.lua is not (absent in the first envelope)",
                   Model.hyprSectionIsWritable(sections[1]), false);
-            check("hypr writable: workspaces.lua is not",
+            check("hypr writable: workspaces.lua is not (truncated in the first envelope)",
                   Model.hyprSectionIsWritable(sections[2]), false);
             check("hypr writable: an absent autostart.lua is not",
                   Model.hyprSectionIsWritable({ name: "autostart.lua", present: false }), false);

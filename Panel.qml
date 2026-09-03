@@ -444,12 +444,31 @@ Panel {
     // Open the inline change editor on one row, closing whichever was open.
     // The command it starts from is the one the reader took OUT of the line,
     // not the raw line: what the user edits is what he sees.
+    // FOCUS FIRST, THEN HIDE, and this is not bookkeeping bolted on beside the
+    // real thing -- it is what the real thing was waiting for.
+    //
+    // The change editor is shown by a `visible:` binding on
+    // root.autostartEditLine. Setting that back to -1 with the field focused
+    // hides the field WITHOUT clearing focus and WITHOUT firing
+    // activeFocusChanged, so root.editorsFocused sticks at 1: Escape is
+    // swallowed for the rest of the open session and the now-invisible field
+    // stays the window's activeFocusItem. Measured in this project already,
+    // for the program rows -- see the table above setExpandedRow. The remedy
+    // there is the remedy here: move focus while the field still EXISTS.
+    //
+    // Every route that closes the editor goes through this, which is why there
+    // is no bare `autostartEditLine = -1` anywhere else in this file.
+    function autostartCloseEditor() {
+        if (keyCatcher) keyCatcher.forceActiveFocus()
+        root.autostartEditLine = -1
+        root.autostartEditCommand = ""
+    }
+
     function autostartEdit(entry) {
         root.autostartMessage = ""
         root.autostartError = ""
         if (root.autostartEditLine === entry.line) {
-            root.autostartEditLine = -1
-            root.autostartEditCommand = ""
+            root.autostartCloseEditor()
             return
         }
         root.autostartEditLine = entry.line
@@ -475,8 +494,7 @@ Panel {
                 root.autostartMessage = Model.autostartWrittenText()
                 root.autostartNewCommand = ""
                 root.autostartAddOpen = false
-                root.autostartEditLine = -1
-                root.autostartEditCommand = ""
+                root.autostartCloseEditor()
                 // Read the file again rather than patching the list in place:
                 // the mtime moved, and every later operation's freshness check
                 // is against the one on disk now.
@@ -488,6 +506,12 @@ Panel {
     // --- load -------------------------------------------------------------
     function reload() {
         root.errorText = ""
+        // The editor is keyed by LINE NUMBER, and a re-read can put a different
+        // editable entry on that line. autostartApply re-parses and would refuse
+        // a line that no longer holds an editable entry, but it cannot refuse a
+        // line that now holds someone else's -- so the editor closes here rather
+        // than being carried across a read.
+        root.autostartCloseEditor()
         root.readHypr()
         // The old half's read too, but only while it is connected. See
         // root.offersEditing.

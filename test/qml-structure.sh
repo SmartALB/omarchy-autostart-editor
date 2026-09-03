@@ -1893,6 +1893,35 @@ else
       "found $quote_sites occurrences in the code of Model.js (expected 2: the definition and autostartLine)"
 fi
 
+# 36b -- THE CHANGE EDITOR IS CLOSED THROUGH ITS SETTER, WHICH MOVES FOCUS
+#        FIRST. A TextField hidden by a `visible:` binding clears no focus and
+#        fires no activeFocusChanged, so the editors-focused counter sticks and
+#        Escape is swallowed for the rest of the open session -- measured in
+#        this project once already, for the program rows. So: exactly ONE
+#        assignment of autostartEditLine = -1 in the whole file, it lives in
+#        autostartCloseEditor, and the focus hand-off comes before it.
+close_assignments="$(grep -cE 'autostartEditLine[[:space:]]*=[[:space:]]*-1' <<<"$stripped_panel" || true)"
+if [[ "$close_assignments" != "1" ]]; then
+  bad "autostart write: the change editor is closed in exactly one place" \
+      "found $close_assignments assignments of autostartEditLine = -1 in the code of Panel.qml (expected 1, inside autostartCloseEditor)"
+else
+  ok "autostart write: the change editor is closed in exactly one place"
+fi
+close_body="$(fn_body autostartCloseEditor <<<"$stripped_panel")"
+if [[ -z "$close_body" ]]; then
+  bad "autostart write: the close setter hands focus back before it hides the field" \
+      "autostartCloseEditor() is not in Panel.qml, so this check would have been vacuous"
+else
+  focus_line="$(grep -nE 'forceActiveFocus\(\)' <<<"$close_body" | head -1 | cut -d: -f1)"
+  hide_line="$(grep -nE 'autostartEditLine[[:space:]]*=[[:space:]]*-1' <<<"$close_body" | head -1 | cut -d: -f1)"
+  if [[ -n "$focus_line" && -n "$hide_line" ]] && (( focus_line < hide_line )); then
+    ok "autostart write: the close setter hands focus back before it hides the field"
+  else
+    bad "autostart write: the close setter hands focus back before it hides the field" \
+        "in autostartCloseEditor(): forceActiveFocus at ${focus_line:-none}, the hide at ${hide_line:-none}"
+  fi
+fi
+
 # 37 -- nothing in the write path reloads or evaluates anything. A change takes
 #       effect at the next login, and that is the whole promise of this task.
 if [[ -n "${write_body:-}" ]]; then
