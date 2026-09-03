@@ -217,6 +217,30 @@ probe "manifest: the service kind and entry point cannot come back together" "$S
   's|"kinds": \["bar-widget"\],|"kinds": ["bar-widget", "service"],|
    s|"barWidget": "BarWidget.qml"|"barWidget": "BarWidget.qml",\n    "service": "Service.qml"|'
 
+# --- an upgrade must not leave a removed file behind -----------------------
+#
+# THE DEFECT THIS EXISTS FOR, measured on the user's own machine: `install`
+# copied its file list over whatever was at the target, so Service.qml,
+# bin/omarchy-autostart-config and bin/omarchy-autostart-marker survived the
+# build that deleted them -- and every assertion this repository had about
+# `install` passed over that directory, because all of them asked only whether
+# the NEW files had arrived.
+#
+# The mutation puts the old shape back exactly: the previous directory is not
+# parked out of the way, and the staged content is merged into the target
+# instead of renamed onto it.
+probe "install: an upgrade must not leave a removed file behind" "$SHELL_SUITE" install \
+  's|^    if \[\[ -e "$TARGET" \]\]; then$|    if false; then|
+   s|^    mv -- "$STAGE" "$TARGET"$|    mkdir -p "$TARGET"; cp -r -- "$STAGE/." "$TARGET/"|'
+
+# And the two halves of the path guard, one probe each. An absence guard that
+# is never handed the input it refuses is a guard nobody has seen work.
+probe "install: only a directory the installer made may be removed" "$SHELL_SUITE" install \
+  's|^    if \[\[ "$base" != ".$ID."\* \]\]; then$|    if false; then|'
+
+probe "uninstall: a target that does not resolve to the plugin directory is refused" "$SHELL_SUITE" uninstall \
+  's|^    if \[\[ -z "$ID" \|\| "${target_real##\*/}" != "$ID" \|\| "${target_real%/\*}" != "$plugins_real" \]\]; then$|    if false; then|'
+
 probe "readme: a privileged verb in prose" "$SHELL_SUITE" README.md \
   's/^## Tests$/## Tests\n\nIf a test fails, re-run it with sudo.\n/'
 

@@ -4,20 +4,62 @@
 # It removes the plugin and nothing else. There is no configuration of its own
 # to keep or delete: the only file it ever wrote is ~/.config/hypr/autostart.lua,
 # which is your own file and is left exactly as it stands.
+#
+# THIS SCRIPT DOES NOT HAVE THE DEFECT `install` HAD. `install` used to copy
+# its file list over whatever was already at the target, so a file deleted
+# from the plugin lived on in the installed copy; this one removes the whole
+# directory, so nothing stale can survive it. What it DID share is the shape
+# that makes such a removal dangerous -- `rm -rf` against a path assembled
+# from variables -- and that is guarded below.
 set -euo pipefail
 
 ID="smartalb.autostart"
-TARGET="${XDG_CONFIG_HOME:-$HOME/.config}/omarchy/plugins/$ID"
+PLUGINS="${XDG_CONFIG_HOME:-$HOME/.config}/omarchy/plugins"
+TARGET="$PLUGINS/$ID"
 
-# Written as `if`, not as `[[ -d x ]] && rm -rf x`: an && chain whose first
-# link is false yields status 1, and under `set -e` that is one edit away
-# from a script that reports failure for the ordinary case of having nothing
-# left to remove. A second run must be quiet and succeed.
+# THE PATH IS CHECKED BEFORE IT IS DELETED, not trusted because of how it was
+# built. `rm -rf` against an assembled path is the shape that once became
+# `rm -rf /` in this project's own test sandbox: a glob does not resolve "..",
+# so "/tmp/.." matched /tmp/*. The fix there is the fix here -- resolve with
+# `realpath -m` first, then require the resolved path to be exactly the plugin
+# directory of THIS id, directly inside the resolved plugins directory.
+#
+# An empty or surprising $ID or $XDG_CONFIG_HOME is what this catches. With
+# $ID empty the target would be the plugins directory itself and this would
+# remove EVERY installed plugin; the basename comparison refuses that, rather
+# than relying on $ID being a literal three lines above.
 if [[ -d "$TARGET" ]]; then
-    rm -rf -- "$TARGET"
+    target_real="$(realpath -m -- "$TARGET")"
+    plugins_real="$(realpath -m -- "$PLUGINS")"
+    if [[ -z "$ID" || "${target_real##*/}" != "$ID" || "${target_real%/*}" != "$plugins_real" ]]; then
+        echo "error: refusing to remove $TARGET -- it does not resolve to $plugins_real/$ID." >&2
+        echo "       Nothing was removed. Delete the plugin directory by hand if that is what you want." >&2
+        exit 1
+    fi
+    rm -rf -- "$target_real"
     echo "Removed $TARGET"
 else
+    # Written as `if`, not as `[[ -d x ]] && rm -rf x`: an && chain whose first
+    # link is false yields status 1, and under `set -e` that is one edit away
+    # from a script that reports failure for the ordinary case of having
+    # nothing left to remove. A second run must be quiet and succeed.
     echo "Nothing installed at $TARGET"
+fi
+
+# A scratch directory of `install`'s own making, left behind only if an
+# install was interrupted at exactly the wrong moment. Removed under the same
+# two conditions install itself applies -- directly inside the resolved
+# plugins directory, and named with install's own ".$ID." prefix -- so this
+# loop can never reach anything else, including another plugin.
+if [[ -d "$PLUGINS" ]]; then
+    plugins_real="$(realpath -m -- "$PLUGINS")"
+    for scratch in "$plugins_real/.$ID."*; do
+        [[ -d "$scratch" ]] || continue
+        [[ "${scratch%/*}" == "$plugins_real" ]] || continue
+        [[ "${scratch##*/}" == ".$ID."* ]] || continue
+        rm -rf -- "$scratch"
+        echo "Removed a leftover scratch directory: $scratch"
+    done
 fi
 
 cat <<NOTE

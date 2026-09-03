@@ -1382,6 +1382,209 @@ test_install_copies_the_plugin_into_the_sandbox() {
     teardown_sandbox
 }
 
+# AN UPGRADE MUST NOT LEAVE A REMOVED FILE BEHIND, and this is the assertion
+# every existing one about `install` was missing.
+#
+# THE DEFECT, measured on the user's own machine. `install` copied its file
+# list over whatever was already at the target, so a file DELETED from the
+# plugin lived on in the installed copy forever. Installing the build that
+# removed the old half left Service.qml (695 lines, still carrying the apply
+# path that once put 347 rules into the running compositor),
+# bin/omarchy-autostart-config and bin/omarchy-autostart-marker sitting in the
+# user's plugin directory -- and every assertion this file had about `install`
+# passed over that directory, because all of them asked only whether the NEW
+# files had ARRIVED. "Present" and "the only thing present" are not the same
+# claim, and the second is the one that matters.
+#
+# What kept it harmless was luck bounded by a good platform design: a service
+# is created only when `kinds` contains "service" AND `entryPoints.service`
+# exists (shell.qml:289-290), and the freshly copied manifest had dropped
+# both. A manifest copied a moment later, or a future version declaring a
+# service kind for another reason, would have loaded a Service.qml from a
+# design that no longer exists.
+#
+# So the test installs an OLDER file set first -- the three files by their
+# real names, plus a fourth under bin/ to prove a nested removal is covered
+# too -- and then requires them GONE. The last assertion is the general form:
+# `diff -r` against a reference built from install's own list, so the target
+# is exactly that list and nothing else, whatever the list becomes later.
+test_install_removes_what_the_plugin_no_longer_ships() {
+    setup_sandbox
+    local root; root="$(cd "$PWD/.." && pwd)"
+    local plugins="$XDG_CONFIG_HOME/omarchy/plugins"
+    local target="$plugins/smartalb.autostart"
+
+    # The previous version, as it really stood on disk.
+    mkdir -p "$target/bin"
+    printf '// the apply path of a design that no longer exists\n' > "$target/Service.qml"
+    printf '#!/usr/bin/env bash\n' > "$target/bin/omarchy-autostart-config"
+    printf '#!/usr/bin/env bash\n' > "$target/bin/omarchy-autostart-marker"
+    printf '{"kinds":["bar-widget","service"]}\n' > "$target/manifest.json"
+
+    # Fail-closed: if the fixture did not actually land, every assertion below
+    # would be about an empty directory and would pass for the wrong reason.
+    assert_eq "upgrade: the older file set really is in place first" \
+              "$([[ -f "$target/Service.qml" \
+                 && -f "$target/bin/omarchy-autostart-config" \
+                 && -f "$target/bin/omarchy-autostart-marker" ]] && echo staged || echo NOT-STAGED)" \
+              "staged"
+
+    "$root/install" >/dev/null 2>&1
+
+    # THE ASSERTION THE OLD SHAPE COULD NOT PASS. One per file, by name, so a
+    # failure says which one survived.
+    local stale
+    for stale in Service.qml bin/omarchy-autostart-config bin/omarchy-autostart-marker; do
+        assert_eq "upgrade: $stale is GONE after installing over it" \
+                  "$([[ -e "$target/$stale" ]] && echo SURVIVED || echo gone)" "gone"
+    done
+
+    # And the new content is there, so "gone" was not achieved by installing
+    # nothing at all.
+    assert_eq "upgrade: and the current files did arrive" \
+              "$([[ -f "$target/Panel.qml" && -f "$target/Model.js" \
+                 && -f "$target/bin/omarchy-autostart-hypr-write" ]] && echo yes || echo no)" \
+              "yes"
+    assert_eq "upgrade: the manifest is the new one, not the one that was there" \
+              "$(jq -r '.kinds | join(",")' "$target/manifest.json")" "bar-widget"
+
+    # THE GENERAL FORM. A reference directory built from install's own list,
+    # compared whole: what is installed is exactly that list. This keeps
+    # holding when the list changes, which the per-file assertions above do
+    # not -- they name today's three.
+    local ref="$SANDBOX/reference"
+    mkdir -p "$ref"
+    local item
+    for item in manifest.json README.md LICENSE CHECKLIST.md preview.png \
+                BarWidget.qml Panel.qml Runners.qml Model.js bin; do
+        [[ -e "$root/$item" ]] || continue
+        cp -r "$root/$item" "$ref/"
+    done
+    assert_eq "upgrade: the installed directory is file-for-file the source list" \
+              "$(diff -r "$ref" "$target" >/dev/null 2>&1 && echo identical || echo DIFFERS)" \
+              "identical"
+
+    # The scratch directory install stages into is BESIDE the target, so it
+    # would be visible here if it were ever left behind.
+    assert_eq "upgrade: no scratch directory is left in the plugins directory" \
+              "$(find "$plugins" -maxdepth 1 -name '.smartalb.autostart.*' | wc -l)" "0"
+
+    # Installing twice in a row is the ordinary case and must be idempotent.
+    "$root/install" >/dev/null 2>&1
+    assert_eq "upgrade: installing again leaves the same directory" \
+              "$(diff -r "$ref" "$target" >/dev/null 2>&1 && echo identical || echo DIFFERS)" \
+              "identical"
+    teardown_sandbox
+}
+
+# THE PATH THAT REACHES `rm -rf` IS CHECKED, in both scripts. `rm -rf` against
+# an assembled path is the shape that once became `rm -rf /` in this project's
+# own test sandbox, so neither script may reach it on a path it has not
+# resolved and placed. Two directions, and both are probed rather than argued:
+#
+#   * install may delete ONLY a directory it made itself -- named with its own
+#     ".<id>." prefix, directly inside the plugins directory. The installed
+#     target can never satisfy that, which is what stops the installer from
+#     deleting inside a directory whose path came from a variable.
+#   * uninstall must refuse a target that does not resolve to
+#     <plugins>/<id>. With an empty id it would otherwise be the plugins
+#     directory itself, and the removal would take EVERY installed plugin.
+test_neither_script_deletes_a_path_it_has_not_placed() {
+    setup_sandbox
+    local root; root="$(cd "$PWD/.." && pwd)"
+    local plugins="$XDG_CONFIG_HOME/omarchy/plugins"
+
+    # A neighbour plugin, and a leftover scratch directory of install's own.
+    "$root/install" >/dev/null 2>&1
+    mkdir -p "$plugins/other.plugin" "$plugins/.smartalb.autostart.new.leftovr"
+    printf 'not ours\n' > "$plugins/other.plugin/keep-me"
+
+    "$root/uninstall" >/dev/null 2>&1
+    assert_eq "paths: uninstall removed our plugin" \
+              "$([[ -e "$plugins/smartalb.autostart" ]] && echo still-there || echo gone)" "gone"
+    assert_eq "paths: and its own leftover scratch directory" \
+              "$([[ -e "$plugins/.smartalb.autostart.new.leftovr" ]] && echo still-there || echo gone)" \
+              "gone"
+    assert_eq "paths: and touched NOTHING belonging to another plugin" \
+              "$([[ -f "$plugins/other.plugin/keep-me" ]] && echo kept || echo DELETED)" "kept"
+
+    # The id emptied: the target is then the plugins directory itself. A canary
+    # inside it says whether the guard held, because "the directory is still
+    # there" would also be true if only its contents had gone.
+    mkdir -p "$plugins/canary"
+    sed 's/^ID="smartalb.autostart"$/ID=""/' "$root/uninstall" > "$SANDBOX/uninstall-empty-id"
+    chmod +x "$SANDBOX/uninstall-empty-id"
+    local out status
+    out="$("$SANDBOX/uninstall-empty-id" 2>&1)"; status=$?
+    assert_eq "paths: uninstall with an empty id refuses and exits non-zero" \
+              "$([[ "$status" -ne 0 ]] && echo refused || echo "ACCEPTED ($status)")" "refused"
+    assert_contains "paths: and says what it refused" "$out" "refusing to remove"
+    assert_eq "paths: every other plugin is still there" \
+              "$([[ -d "$plugins/canary" && -f "$plugins/other.plugin/keep-me" ]] && echo kept || echo DELETED)" \
+              "kept"
+
+    # INSTALL'S OWN GUARD, HANDED THE PATHS IT MUST REFUSE.
+    #
+    # Nothing an ordinary install does reaches remove_scratch with a path it
+    # would refuse -- the installer only ever passes it directories it made
+    # itself -- so the guard is defence against a future edit, and a mutation
+    # probe proved that disarming it changed no observable behaviour at all.
+    # A guard nobody has seen refuse anything is a guard nobody knows works.
+    #
+    # So the function is lifted out of the script and asked directly. The
+    # extraction is fail-closed: if the function cannot be found, that is a
+    # failure rather than a silently empty test.
+    local fn; fn="$(sed -n '/^remove_scratch() {/,/^}/p' "$root/install")"
+    assert_eq "paths: install's remove_scratch could be read out of the script" \
+              "$([[ -n "$fn" ]] && grep -q 'rm -rf' <<<"$fn" && echo found || echo NOT-FOUND)" "found"
+    # A harness that defines the two globals the function reads, then asks it
+    # to remove three paths it must refuse and one it must accept.
+    local probe_dir="$SANDBOX/guard"
+    mkdir -p "$probe_dir/plugins/smartalb.autostart" \
+             "$probe_dir/plugins/other.plugin" \
+             "$probe_dir/plugins/.smartalb.autostart.new.abc123" \
+             "$probe_dir/outside"
+    local guard_out
+    guard_out="$(
+        ID="smartalb.autostart"
+        PLUGINS_REAL="$(realpath -m -- "$probe_dir/plugins")"
+        eval "$fn"
+        for candidate in "$probe_dir/plugins/smartalb.autostart" \
+                         "$probe_dir/plugins/other.plugin" \
+                         "$probe_dir/plugins/../outside" \
+                         "$probe_dir/plugins/.smartalb.autostart.new.abc123"; do
+            if remove_scratch "$candidate" 2>/dev/null; then echo "removed"; else echo "refused"; fi
+        done
+    )"
+    assert_eq "paths: the installed plugin directory is refused" \
+              "$(sed -n 1p <<<"$guard_out")" "refused"
+    assert_eq "paths: another plugin's directory is refused" \
+              "$(sed -n 2p <<<"$guard_out")" "refused"
+    assert_eq "paths: a '..' walk out of the plugins directory is refused" \
+              "$(sed -n 3p <<<"$guard_out")" "refused"
+    assert_eq "paths: and the installer's own scratch directory IS removed" \
+              "$(sed -n 4p <<<"$guard_out")" "removed"
+    # The refusals were refusals, not deletions that reported failure.
+    assert_eq "paths: all three refused directories are still on disk" \
+              "$([[ -d "$probe_dir/plugins/smartalb.autostart" \
+                 && -d "$probe_dir/plugins/other.plugin" \
+                 && -d "$probe_dir/outside" ]] && echo intact || echo DELETED)" "intact"
+    assert_eq "paths: and the accepted one is gone" \
+              "$([[ -e "$probe_dir/plugins/.smartalb.autostart.new.abc123" ]] && echo still-there || echo gone)" \
+              "gone"
+
+    # Fail-closed on the guard being reachable at all: a script that resolves
+    # no path cannot be checking one, and both behavioural halves above would
+    # then be passing for some other reason.
+    local script
+    for script in install uninstall; do
+        assert_eq "paths: $script resolves a path with realpath before deleting one" \
+                  "$([[ "$(grep -c 'realpath -m --' "$root/$script")" -ge 1 ]] && echo yes || echo no)" \
+                  "yes"
+    done
+    teardown_sandbox
+}
+
 # There is no configuration of this plugin's own left to keep: the JSON file
 # went with the removed half, and the only file it ever wrote is the user's own
 # ~/.config/hypr/autostart.lua. So the property has turned around -- what
@@ -1416,6 +1619,8 @@ test_the_preview_is_either_taken_or_still_owed
 test_nothing_privileged_anywhere
 test_install_is_executable_and_unprivileged
 test_install_copies_the_plugin_into_the_sandbox
+test_install_removes_what_the_plugin_no_longer_ships
+test_neither_script_deletes_a_path_it_has_not_placed
 test_uninstall_removes_the_plugin_and_touches_nothing_else
 
 summary

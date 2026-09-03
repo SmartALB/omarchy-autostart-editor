@@ -205,7 +205,23 @@ step (`autostart.lua.bak`), and this walkthrough writes more than once.
     reason.
 16. Log out and back in: your entries start, each exactly once, and the file
     the plugin wrote is what did it.
-17. `./uninstall`, then check: the plugin directory is gone and
+17. **Install over the previous version and check what is NOT there.** This
+    is the one step written from a defect that reached the user's machine:
+    `install` used to copy its file list over whatever was at the target, so
+    `Service.qml`, `bin/omarchy-autostart-config` and
+    `bin/omarchy-autostart-marker` survived the build that deleted them. It
+    replaces the directory now, and the shell suite holds that -- but the
+    installed copy is the thing the shell actually loads, so look at it:
+
+    ```bash
+    diff -r <(cd "$PWD" && ls -1) \
+            <(ls -1 ~/.config/omarchy/plugins/smartalb.autostart)
+    ```
+
+    The plugin directory must hold twelve entries and nothing else: the four
+    documents, the four QML/JS files, and `bin/` with its four scripts. A
+    `Service.qml` there is the defect back.
+18. `./uninstall`, then check: the plugin directory is gone and
     `~/.config/hypr/autostart.lua` is byte for byte what it was.
 
 ---

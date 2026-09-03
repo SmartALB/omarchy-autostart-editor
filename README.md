@@ -133,10 +133,14 @@ cd omarchy-autostart-layout
 omarchy-restart-shell
 ```
 
-`./install` copies the plugin to
-`~/.config/omarchy/plugins/smartalb.autostart/` and prints what to do next. It
-refuses to run as the root user, because it installs into a per-user
-configuration directory.
+`./install` puts the plugin at `~/.config/omarchy/plugins/smartalb.autostart/`
+and prints what to do next. It refuses to run as the root user, because it
+installs into a per-user configuration directory.
+
+**An upgrade replaces that directory rather than copying into it**, so a file
+this plugin no longer ships cannot survive in your installed copy. The new
+content is built in a scratch directory beside the target and renamed into
+place; if anything goes wrong in between, the previous version is put back.
 
 Then add the widget to your bar. Either use Omarchy's own plugin screen, or
 add the id to a bar section in `~/.config/omarchy/shell.json`:
@@ -164,11 +168,12 @@ The row should read `enabled` and list `bar-widget`.
 ./uninstall
 ```
 
-It removes the plugin directory and nothing else. Remove the widget from your
-bar in `shell.json` yourself afterwards, then run `omarchy-restart-shell`.
-Your autostart entries are in your own `autostart.lua` and keep working
-without the plugin; the last backup it took, if any, is beside it as
-`autostart.lua.bak`.
+It removes the plugin directory and nothing else -- it refuses to delete
+anything that does not resolve to exactly that directory. Remove the widget
+from your bar in `shell.json` yourself afterwards, then run
+`omarchy-restart-shell`. Your autostart entries are in your own
+`autostart.lua` and keep working without the plugin; the last backup it took,
+if any, is beside it as `autostart.lua.bak`.
 
 ## Where your data lives
 

@@ -10,30 +10,132 @@
 # hits, which is why the word is not spelled out even in this comment: a test
 # that cannot tell prose from code is a test that has to be given nothing
 # ambiguous to read.
+#
+# AN UPGRADE REPLACES THE DIRECTORY, IT DOES NOT COPY INTO IT.
+#
+# This script used to `cp` its file list over whatever was already at the
+# target, which meant a file DELETED from the plugin lived on in the installed
+# copy forever. Measured on the user's own machine, installing the build that
+# removed the old half: Service.qml (695 lines, still carrying the apply path
+# that once put 347 rules into the running compositor),
+# bin/omarchy-autostart-config and bin/omarchy-autostart-marker were all still
+# there afterwards, and every assertion this repository had about `install`
+# was satisfied by that directory -- they only ever asked whether the NEW
+# files had arrived.
+#
+# What kept it harmless was luck bounded by a good platform design: a service
+# is instantiated only when `kinds` contains "service" AND `entryPoints.service`
+# exists (shell.qml:289-290), and the freshly copied manifest had dropped
+# both, so the stale Service.qml sat inert. A manifest copied a moment later,
+# or a future version declaring a service kind for some other reason, would
+# have loaded a file from a design that no longer exists.
+#
+# So the new content is built in a scratch directory BESIDE the target and
+# renamed into place, and the directory that was there is renamed away and
+# then removed. The consequence is the property the old shape could not have:
+# what is installed is exactly the file list below, and nothing else.
 set -euo pipefail
 
 ID="smartalb.autostart"
 SOURCE="$(cd "$(dirname "$0")" && pwd)"
-TARGET="${XDG_CONFIG_HOME:-$HOME/.config}/omarchy/plugins/$ID"
+PLUGINS="${XDG_CONFIG_HOME:-$HOME/.config}/omarchy/plugins"
+TARGET="$PLUGINS/$ID"
 
 if [[ "$(id -u)" -eq 0 ]]; then
     echo "error: do not run this as root. It installs into your own config." >&2
     exit 1
 fi
 
+# WHAT MAY BE HANDED TO `rm -rf`, AND NOTHING ELSE MAY BE.
+#
+# `rm -rf` against a path built from variables is the shape that once became
+# `rm -rf /` in this project's own test sandbox -- a glob does not resolve
+# "..", so "/tmp/.." matched /tmp/* -- and the fix there was the same one used
+# here: resolve first, then require the resolved path to be where it claims to
+# be. Four conditions, all by construction rather than by intention:
+#
+#   * non-empty, and not "/";
+#   * an existing directory;
+#   * its parent, resolved with `realpath -m`, IS the resolved plugins
+#     directory -- so a symlink or a ".." in any component cannot walk out;
+#   * its basename begins with ".$ID." -- the shape only the two mktemp
+#     templates below produce.
+#
+# THE TARGET ITSELF CAN NEVER SATISFY THE LAST ONE, and that is the point of
+# the last one. This script replaces the plugin directory by renaming it. It
+# never deletes the directory the user has installed, and it never deletes
+# anything inside it.
+PLUGINS_REAL=""
+remove_scratch() {
+    local path="${1:-}" real base parent
+    [[ -n "$path" && "$path" != "/" ]] || return 0
+    [[ -d "$path" ]] || return 0
+    [[ -n "$PLUGINS_REAL" ]] || { echo "error: refusing to remove $path -- no resolved plugins directory to check it against" >&2; return 1; }
+    real="$(realpath -m -- "$path")"
+    base="${real##*/}"
+    parent="${real%/*}"
+    if [[ "$parent" != "$PLUGINS_REAL" ]]; then
+        echo "error: refusing to remove $path -- it does not lie directly in $PLUGINS_REAL" >&2
+        return 1
+    fi
+    if [[ "$base" != ".$ID."* ]]; then
+        echo "error: refusing to remove $path -- not a scratch directory this installer made" >&2
+        return 1
+    fi
+    rm -rf -- "$real"
+}
+
+# Failing between the two renames must not leave the user with no plugin at
+# all, so the parked copy is put back before the scratch directories go. The
+# original exit status is carried through by hand: a trap whose last command
+# succeeds would otherwise report success for a failed install.
+STAGE=""
+OLD=""
+cleanup() {
+    local status=$?
+    if [[ -n "$OLD" && -d "$OLD/previous" && ! -e "$TARGET" ]]; then
+        mv -- "$OLD/previous" "$TARGET" 2>/dev/null \
+            && echo "install failed; the previous version was put back at $TARGET" >&2
+    fi
+    remove_scratch "$STAGE" || true
+    remove_scratch "$OLD" || true
+    exit "$status"
+}
+
 if [[ "$SOURCE" == "$TARGET" ]]; then
     echo "Already in place at $TARGET -- nothing to copy."
 else
-    mkdir -p "$TARGET"
+    mkdir -p "$PLUGINS"
+    PLUGINS_REAL="$(realpath -m -- "$PLUGINS")"
+    trap cleanup EXIT
+
+    STAGE="$(mktemp -d "$PLUGINS/.$ID.new.XXXXXX")"
     # An explicit list, not a wildcard: test/ is a development harness that
     # imports things the shell does not provide, and .git is a checkout
     # rather than plugin content. Neither belongs in the plugins directory.
+    # Now that the directory is REPLACED rather than merged, this list is the
+    # whole of what gets installed -- which is what makes it worth reading.
     for item in manifest.json README.md LICENSE CHECKLIST.md preview.png \
                 BarWidget.qml Panel.qml Runners.qml Model.js bin; do
         [[ -e "$SOURCE/$item" ]] || continue
-        cp -r "$SOURCE/$item" "$TARGET/"
+        cp -r "$SOURCE/$item" "$STAGE/"
     done
-    chmod +x "$TARGET"/bin/*
+    if [[ -d "$STAGE/bin" ]]; then
+        chmod +x "$STAGE"/bin/*
+    fi
+
+    # Park whatever is there, then swap. `mv` INTO the mktemp'd directory
+    # rather than onto its name: reserving a free name and then renaming onto
+    # it is two steps with a gap between them, and moving inside a directory
+    # that already exists has no gap at all.
+    if [[ -e "$TARGET" ]]; then
+        OLD="$(mktemp -d "$PLUGINS/.$ID.old.XXXXXX")"
+        mv -- "$TARGET" "$OLD/previous"
+    fi
+    mv -- "$STAGE" "$TARGET"
+    STAGE=""
+    remove_scratch "$OLD"
+    OLD=""
     echo "Installed to $TARGET"
 fi
 
