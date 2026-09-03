@@ -18,7 +18,7 @@
 // Lua literal can carry escaped, and the `luac5.1 -p` gate in
 // bin/omarchy-autostart-hypr-write, which refuses a candidate file that does
 // not compile. A readable literal is deliberate here: this file is
-// hand-maintained by its owner, and string.char(98,114,97,118,101) in it
+// hand-maintained by its owner, and string.char(110,105,109,98,117,115) in it
 // would be safe and useless.
 
 // THE BUILD, SHOWN IN THE PANEL so a user looking at two machines can tell
@@ -807,7 +807,7 @@ function hyprEntryText(entry) {
 //
 // THIS FILE IS READ BY A PERSON: autostart.lua is hand-maintained, often
 // carries the owner's own section comments, and
-// `o.launch_on_start(string.char(98,114,97,118,101))` in it would be unusable
+// `o.launch_on_start(string.char(110,105,109,98,117,115))` in it would be unusable
 // even though it is safe -- which is what the removed `eval` route wrote,
 // because nothing there was ever read by a person. So the writer emits a real
 // Lua string literal, and pays for that legibility with an allowlist, because
@@ -1079,7 +1079,7 @@ function oneLineDifference(oldText, newText) {
 // between the two is not a rounding error, it is three distinct defects
 // waiting to be written into a file that runs at every login:
 //
-//   ai.elementlabs.modelbox  ->  /tmp/.mount_lm-stuFjMMHD/modelbox
+//   com.example.modelbox  ->  /tmp/.mount_modelbFjMMHD/modelbox
 //       An AppImage mount path. It changes at every start, so the entry is
 //       dead at the next boot -- and looks perfectly right until then.
 //   nimbus-browser
@@ -1130,7 +1130,7 @@ function commandNormalized(command) {
 // Does this command start from a path that will not exist at the next boot?
 //
 // THIS IS THE MOST IMPORTANT WARNING IN THIS TASK. The Modelbox window
-// reports /tmp/.mount_lm-stuFjMMHD/modelbox, the mount point of a running
+// reports /tmp/.mount_modelbFjMMHD/modelbox, the mount point of a running
 // AppImage. Written verbatim the entry fails silently at the next login,
 // months later, with nobody watching.
 //
@@ -1164,8 +1164,8 @@ function commandIsUnstablePath(command) {
 // match swallows the browser name in front of the host, because a hostname
 // label may contain a hyphen and the regular expression cannot know that this
 // particular hyphen separates the browser from the host. That token appears in
-// no command, so it reordered nothing and that window offered YouTube
-// Music first. Hence the second step: everything up to the last hyphen BEFORE
+// no command, so it reordered nothing and that window offered the wrong
+// webapp entry first. Hence the second step: everything up to the last hyphen BEFORE
 // the first dot is dropped. A host whose own first label contains a hyphen
 // ("nimbus-web-app.example.com") loses that label too and yields
 // "app.example.com" -- still a substring of the URL in the command, so the
@@ -1281,7 +1281,7 @@ function candidateWarningsFor(command, entries) {
 // stable, and the class is a strong signal), then the .desktop files that run
 // the same program -- those whose command mentions the host in the window
 // class ahead of those that do not, which is what puts Webmail (Nimbus) at the
-// top for the webmail window instead of YouTube Music -- and the running
+// top for the webmail window instead of Music (Web) -- and the running
 // command line last, because it is the one most likely to carry a volatile
 // path or the wrong window's flags.
 //

@@ -599,7 +599,7 @@ probe "panel: the change editor is closed in exactly one place" "$STRUCT_SUITE" 
 #
 # Every assurance this task added, handed the input it was written to catch.
 # The ranking probe is the one that matters most: without it the webmail
-# window offered YouTube Music first, and the suite said nothing.
+# window offered Music (Web) first, and the suite said nothing.
 
 # --- the running-programs picker is off, and off means unreachable ---------
 #

@@ -42,7 +42,7 @@ QtObject {
 
         try {
             // --- stripFieldCodes ----------------------------------------------
-            check("stripFieldCodes: %U goes",        Model.stripFieldCodes("cursor %U"), "cursor");
+            check("stripFieldCodes: %U goes",        Model.stripFieldCodes("editor %U"), "editor");
             check("stripFieldCodes: %F goes",        Model.stripFieldCodes("gimp %F"), "gimp");
             check("stripFieldCodes: %i %c %k go",    Model.stripFieldCodes("app %i %c %k"), "app");
             check("stripFieldCodes: %f in the middle",
@@ -248,10 +248,10 @@ QtObject {
                     "-- Schluesselverwaltung",
                     "o.launch_on_start(\"keyring-gui\")",
                     "",
-                    "-- Modelbox (am 28.08.2026 nach dem Upgrade neu installiert).",
-                    "-- Hinweis: modelbox.service startet den Server ohnehin headless",
-                    "-- (--run-as-service); diese Zeile oeffnet zusaetzlich das GUI-Fenster,",
-                    "-- so wie es vor dem Upgrade in autostart.conf stand.",
+                    "-- Modelbox laeuft ohnehin als Dienst im Hintergrund; diese",
+                    "-- Zeile oeffnet zusaetzlich das Fenster dazu. Steht bewusst",
+                    "-- ganz unten, damit es beim Anmelden nicht den Fokus von den",
+                    "-- Messengern wegnimmt.",
                     "o.launch_on_start(\"modelbox\")",
                     ""
             ];
@@ -1030,19 +1030,19 @@ QtObject {
                 { name: "Termpane", exec: "termpane", wmclass: "Termpane", icon: "" },
                 // Sorts BEFORE Webmail (Nimbus) in the real list, and that is
                 // load-bearing: without the host-token ordering the webmail
-                // window offers YouTube Music first.
-                { name: "YouTube Music",
-                  exec: "/opt/nimbus-bin/nimbus --profile-directory=Default --app-id=cinhimbnkkaeohfgghhklpknlkffjgod",
-                  wmclass: "crx_cinhimbnkkaeohfgghhklpknlkffjgod", icon: "" },
+                // window offers Music (Web) first.
+                { name: "Music (Web)",
+                  exec: "/opt/nimbus-bin/nimbus --profile-directory=Default --app-id=examplemusicappidaaaaaaaaaaaaaaa",
+                  wmclass: "crx_examplemusicappidaaaaaaaaaaaaaaa", icon: "" },
                 // ~/.local/share/applications/Webmail-nimbus.desktop, verbatim:
                 // the right command, and NO StartupWMClass.
                 { name: "Webmail (Nimbus)",
                   exec: "nimbus --app=https://mail.example.com/mail/", wmclass: "", icon: "" },
                 { name: "Nimbus", exec: "nimbus %U", wmclass: "nimbus-browser", icon: "" },
-                { name: "Modelbox", exec: "modelbox %U", wmclass: "LM-Studio", icon: "" },
+                { name: "Modelbox", exec: "modelbox %U", wmclass: "Modelbox", icon: "" },
                 { name: "Vaultkey", exec: "vaultkey %f", wmclass: "vaultkey", icon: "" },
                 { name: "Chatterbox", exec: "Chatterbox -- %U", wmclass: "ChatterboxDesktop", icon: "" },
-                { name: "Signal", exec: "msgbox-desktop -- %u", wmclass: "signal", icon: "" },
+                { name: "Msgbox", exec: "msgbox-desktop -- %u", wmclass: "msgbox", icon: "" },
                 { name: "Notes App",
                   exec: "notes-app --gtk-version=3 %U", wmclass: "", icon: "" },
                 { name: "Chat", exec: "omarchy-launch-webapp https://chat.example.org/",
@@ -1050,7 +1050,7 @@ QtObject {
             ];
 
             // A REAL hand-maintained autostart.lua, verbatim. notes-app is
-            // in it and signal is not -- which is what the already-present
+            // in it and msgbox is not -- which is what the already-present
             // warnings are judged against.
             var realAutostart =
                 "-- Autostart. Portiert aus autostart.conf.\n"
@@ -1069,7 +1069,7 @@ QtObject {
               + "-- Schluesselverwaltung\n"
               + "o.launch_on_start(\"keyring-gui\")\n"
               + "\n"
-              + "-- Modelbox (am 28.08.2026 nach dem Upgrade neu installiert).\n"
+              + "-- Modelbox laeuft ohnehin als Dienst im Hintergrund.\n"
               + "o.launch_on_start(\"modelbox\")\n";
             var realEntries = Model.parseAutostartLua(realAutostart, "autostart.lua");
 
@@ -1077,7 +1077,7 @@ QtObject {
             // /proc/1866/cmdline. It ENDS in --app=https://mail.example.com/
             // mail/, so the plain browser window reports a line that is wrong
             // for it -- which no amount of parsing can detect.
-            var braveRunning =
+            var nimbusRunning =
                 "/opt/nimbus-bin/nimbus --ozone-platform=wayland --ozone-platform-hint=wayland"
               + " --enable-features=TouchpadOverscrollHistoryNavigation"
               + " --load-extension=/usr/share/omarchy/default/chromium/extensions/copy-url,"
@@ -1123,49 +1123,49 @@ QtObject {
                   "desktop-binary|Notes App|notes-app --gtk-version=3"
                   + "|!program-already-present"
                   + "  ,  running||/opt/notes-app/notes-app|!program-already-present");
-            check("candidates row: signal",
-                  rendered(forWindow("signal", "/usr/lib/msgbox-desktop/msgbox-desktop",
+            check("candidates row: msgbox",
+                  rendered(forWindow("msgbox", "/usr/lib/msgbox-desktop/msgbox-desktop",
                                      "msgbox-desktop")),
-                  "desktop-class|Signal|msgbox-desktop --"
+                  "desktop-class|Msgbox|msgbox-desktop --"
                   + "  ,  running||/usr/lib/msgbox-desktop/msgbox-desktop");
             check("candidates row: Termpane",
                   rendered(forWindow("Termpane", "/usr/bin/termpane --working-directory=/home/user",
                                      "termpane")),
                   "desktop-class|Termpane|termpane"
                   + "  ,  running||/usr/bin/termpane --working-directory=/home/user");
-            check("candidates row: ai.elementlabs.modelbox",
-                  rendered(forWindow("ai.elementlabs.modelbox", "/tmp/.mount_lm-stuFjMMHD/modelbox",
+            check("candidates row: com.example.modelbox",
+                  rendered(forWindow("com.example.modelbox", "/tmp/.mount_modelbFjMMHD/modelbox",
                                      "modelbox")),
                   "desktop-binary|Modelbox|modelbox|!already-present"
-                  + "  ,  running||/tmp/.mount_lm-stuFjMMHD/modelbox"
+                  + "  ,  running||/tmp/.mount_modelbFjMMHD/modelbox"
                   + "|!unstable-path+program-already-present");
             check("candidates row: nimbus-browser",
-                  rendered(forWindow("nimbus-browser", braveRunning, "nimbus")),
+                  rendered(forWindow("nimbus-browser", nimbusRunning, "nimbus")),
                   "desktop-class|Nimbus|nimbus|!already-present"
-                  + "  ,  desktop-binary|YouTube Music|/opt/nimbus-bin/nimbus"
-                  + " --profile-directory=Default --app-id=cinhimbnkkaeohfgghhklpknlkffjgod"
+                  + "  ,  desktop-binary|Music (Web)|/opt/nimbus-bin/nimbus"
+                  + " --profile-directory=Default --app-id=examplemusicappidaaaaaaaaaaaaaaa"
                   + "|!program-already-present"
                   + "  ,  desktop-binary|Webmail (Nimbus)|nimbus"
                   + " --app=https://mail.example.com/mail/|!already-present"
-                  + "  ,  running||" + braveRunning + "|!program-already-present");
+                  + "  ,  running||" + nimbusRunning + "|!program-already-present");
             check("candidates row: nimbus-mail.example.com__mail_-Default",
-                  rendered(forWindow("nimbus-mail.example.com__mail_-Default", braveRunning, "nimbus")),
+                  rendered(forWindow("nimbus-mail.example.com__mail_-Default", nimbusRunning, "nimbus")),
                   "desktop-binary|Webmail (Nimbus)|nimbus"
                   + " --app=https://mail.example.com/mail/|!already-present"
-                  + "  ,  desktop-binary|YouTube Music|/opt/nimbus-bin/nimbus"
-                  + " --profile-directory=Default --app-id=cinhimbnkkaeohfgghhklpknlkffjgod"
+                  + "  ,  desktop-binary|Music (Web)|/opt/nimbus-bin/nimbus"
+                  + " --profile-directory=Default --app-id=examplemusicappidaaaaaaaaaaaaaaa"
                   + "|!program-already-present"
                   + "  ,  desktop-binary|Nimbus|nimbus|!already-present"
-                  + "  ,  running||" + braveRunning + "|!program-already-present");
+                  + "  ,  running||" + nimbusRunning + "|!program-already-present");
             check("candidates row: nimbus-chat.example.org__-Default",
-                  rendered(forWindow("nimbus-chat.example.org__-Default", braveRunning, "nimbus")),
-                  "desktop-binary|YouTube Music|/opt/nimbus-bin/nimbus"
-                  + " --profile-directory=Default --app-id=cinhimbnkkaeohfgghhklpknlkffjgod"
+                  rendered(forWindow("nimbus-chat.example.org__-Default", nimbusRunning, "nimbus")),
+                  "desktop-binary|Music (Web)|/opt/nimbus-bin/nimbus"
+                  + " --profile-directory=Default --app-id=examplemusicappidaaaaaaaaaaaaaaa"
                   + "|!program-already-present"
                   + "  ,  desktop-binary|Webmail (Nimbus)|nimbus"
                   + " --app=https://mail.example.com/mail/|!already-present"
                   + "  ,  desktop-binary|Nimbus|nimbus|!already-present"
-                  + "  ,  running||" + braveRunning + "|!program-already-present");
+                  + "  ,  running||" + nimbusRunning + "|!program-already-present");
 
             // --- THE WEBMAIL CASE, named ------------------------------------
             //
@@ -1174,13 +1174,13 @@ QtObject {
             // that reaches it, and the suggestion must be that command --
             // never the /proc line, which belongs to a browser process
             // serving three windows at once.
-            var webmail = forWindow("nimbus-mail.example.com__mail_-Default", braveRunning, "nimbus");
+            var webmail = forWindow("nimbus-mail.example.com__mail_-Default", nimbusRunning, "nimbus");
             check("webmail case: the top suggestion is the .desktop command",
                   webmail[0].command, "nimbus --app=https://mail.example.com/mail/");
             check("webmail case: and it is found by binary, not by class",
                   webmail[0].source, "desktop-binary");
             check("webmail case: it is NOT the /proc line",
-                  webmail[0].command === braveRunning, false);
+                  webmail[0].command === nimbusRunning, false);
             check("webmail case: the Name= is carried so five nimbus entries can be told apart",
                   webmail[0].name, "Webmail (Nimbus)");
             check("webmail case: nothing at all matched by class",
@@ -1216,13 +1216,13 @@ QtObject {
             // The most important warning in this task: a path that exists
             // today and not after a restart, written into a file nobody looks
             // at again until it silently stops working.
-            var modelbox = forWindow("ai.elementlabs.modelbox",
-                                     "/tmp/.mount_lm-stuFjMMHD/modelbox", "modelbox");
+            var modelbox = forWindow("com.example.modelbox",
+                                     "/tmp/.mount_modelbFjMMHD/modelbox", "modelbox");
             check("lm studio case: the running line is warned about",
                   modelbox[1].warning, "unstable-path");
             check("lm studio case: it is the running command that carries it",
                   modelbox[1].source + "|" + modelbox[1].command,
-                  "running|/tmp/.mount_lm-stuFjMMHD/modelbox");
+                  "running|/tmp/.mount_modelbFjMMHD/modelbox");
             check("lm studio case: the duplicate warning is not suppressed by it",
                   modelbox[1].warnings.join("+"), "unstable-path+program-already-present");
             check("lm studio case: the .desktop suggestion above it has no path at all",
@@ -1252,11 +1252,11 @@ QtObject {
             check("already-present: notes-app is in the fixture's autostart.lua",
                   forWindow("notes-app", "/opt/notes-app/notes-app",
                             "notes-app")[0].warning, "program-already-present");
-            check("already-present: and signal is not",
-                  forWindow("signal", "/usr/lib/msgbox-desktop/msgbox-desktop",
+            check("already-present: and msgbox is not",
+                  forWindow("msgbox", "/usr/lib/msgbox-desktop/msgbox-desktop",
                             "msgbox-desktop")[0].warning, "");
             check("already-present: an exact match is told apart from the same program",
-                  forWindow("ai.elementlabs.modelbox", "/tmp/.mount_x/modelbox",
+                  forWindow("com.example.modelbox", "/tmp/.mount_x/modelbox",
                             "modelbox")[0].warning, "already-present");
             check("already-present: nothing is warned about with no file to compare against",
                   Model.autostartCandidatesForWindow(
@@ -1279,24 +1279,24 @@ QtObject {
             // different answers, not one. The classes differ, so the lists
             // differ -- and that is the only thing that tells the webmail
             // window from the browser window at all.
-            var braveWindows = [
-                forWindow("nimbus-browser", braveRunning, "nimbus"),
-                forWindow("nimbus-mail.example.com__mail_-Default", braveRunning, "nimbus"),
-                forWindow("nimbus-chat.example.org__-Default", braveRunning, "nimbus")
+            var nimbusWindows = [
+                forWindow("nimbus-browser", nimbusRunning, "nimbus"),
+                forWindow("nimbus-mail.example.com__mail_-Default", nimbusRunning, "nimbus"),
+                forWindow("nimbus-chat.example.org__-Default", nimbusRunning, "nimbus")
             ];
             check("three windows: each gets its own list",
-                  braveWindows.length, 3);
+                  nimbusWindows.length, 3);
             check("three windows: and the three lists are not the same list",
-                  (rendered(braveWindows[0]) !== rendered(braveWindows[1]))
-                  && (rendered(braveWindows[1]) !== rendered(braveWindows[2]))
-                  && (rendered(braveWindows[0]) !== rendered(braveWindows[2])), true);
+                  (rendered(nimbusWindows[0]) !== rendered(nimbusWindows[1]))
+                  && (rendered(nimbusWindows[1]) !== rendered(nimbusWindows[2]))
+                  && (rendered(nimbusWindows[0]) !== rendered(nimbusWindows[2])), true);
             check("three windows: the top suggestion differs where the class does",
-                  braveWindows[0][0].command + " / " + braveWindows[1][0].command,
+                  nimbusWindows[0][0].command + " / " + nimbusWindows[1][0].command,
                   "nimbus / nimbus --app=https://mail.example.com/mail/");
             check("three windows: all three report the identical running command",
-                  braveWindows[0][braveWindows[0].length - 1].command
-                  === braveWindows[1][braveWindows[1].length - 1].command
-                  && braveWindows[1][braveWindows[1].length - 1].command === braveRunning, true);
+                  nimbusWindows[0][nimbusWindows[0].length - 1].command
+                  === nimbusWindows[1][nimbusWindows[1].length - 1].command
+                  && nimbusWindows[1][nimbusWindows[1].length - 1].command === nimbusRunning, true);
 
             // --- a window with nothing to offer -----------------------------
             check("no candidates: a window with no match and no command line",
@@ -1311,8 +1311,8 @@ QtObject {
                   "command-too-long");
             check("no candidates: a window that HAS suggestions gives no reason",
                   Model.autostartCandidateReason(
-                      { "class": "signal", command: "", program: "" },
-                      forWindow("signal", "", "")), "");
+                      { "class": "msgbox", command: "", program: "" },
+                      forWindow("msgbox", "", "")), "");
             check("no candidates: an empty class still offers its running line",
                   rendered(forWindow("", "/usr/bin/odd --flag", "odd")),
                   "running||/usr/bin/odd --flag");
@@ -1329,9 +1329,9 @@ QtObject {
                   (function() {
                       var all = [
                           forWindow("org.example.chatterbox", "/usr/bin/Chatterbox", "Chatterbox"),
-                          forWindow("signal", "/usr/lib/msgbox-desktop/msgbox-desktop", "msgbox-desktop"),
-                          forWindow("nimbus-browser", braveRunning, "nimbus"),
-                          forWindow("ai.elementlabs.modelbox", "/tmp/.mount_x/modelbox", "modelbox")
+                          forWindow("msgbox", "/usr/lib/msgbox-desktop/msgbox-desktop", "msgbox-desktop"),
+                          forWindow("nimbus-browser", nimbusRunning, "nimbus"),
+                          forWindow("com.example.modelbox", "/tmp/.mount_x/modelbox", "modelbox")
                       ];
                       var hits = 0;
                       for (var a = 0; a < all.length; a++) {
@@ -1428,12 +1428,12 @@ QtObject {
 
             // --- what the picker shows for a window -------------------------
             check("window label: class and title",
-                  Model.autostartWindowLabel({ "class": "signal", title: "Signal (139)" }),
-                  "signal -- Signal (139)");
+                  Model.autostartWindowLabel({ "class": "msgbox", title: "Msgbox (139)" }),
+                  "msgbox -- Msgbox (139)");
             check("window label: a window with no title is its class",
-                  Model.autostartWindowLabel({ "class": "signal", title: "" }), "signal");
+                  Model.autostartWindowLabel({ "class": "msgbox", title: "" }), "msgbox");
             check("window label: a window with no class is its title",
-                  Model.autostartWindowLabel({ "class": "", title: "Signal" }), "Signal");
+                  Model.autostartWindowLabel({ "class": "", title: "Msgbox" }), "Msgbox");
             check("window label: a window with neither is named as such",
                   Model.autostartWindowLabel({}), "(a window with no class and no title)");
 
@@ -1450,7 +1450,7 @@ QtObject {
             check("candidate wording: every source the model can emit is in that list",
                   (function() {
                       var all = [
-                          forWindow("nimbus-browser", braveRunning, "nimbus"),
+                          forWindow("nimbus-browser", nimbusRunning, "nimbus"),
                           forWindow("org.example.chatterbox", "/usr/bin/Chatterbox", "Chatterbox")
                       ];
                       var unknown = [];
@@ -1466,8 +1466,8 @@ QtObject {
             check("candidate wording: every warning the model can emit is in that list",
                   (function() {
                       var all = [
-                          forWindow("nimbus-browser", braveRunning, "nimbus"),
-                          forWindow("ai.elementlabs.modelbox", "/tmp/.mount_x/modelbox", "modelbox"),
+                          forWindow("nimbus-browser", nimbusRunning, "nimbus"),
+                          forWindow("com.example.modelbox", "/tmp/.mount_x/modelbox", "modelbox"),
                           forWindow("notes-app", "/opt/notes-app/notes-app",
                                     "notes-app")
                       ];

@@ -66,15 +66,15 @@ write_desktop() {
 
 test_apps_reads_name_exec_and_class() {
     setup_sandbox
-    write_desktop "$XDG_DATA_HOME/applications" "cursor.desktop" \
-        "Type=Application" "Name=Cursor" "Exec=cursor %U" \
-        "StartupWMClass=cursor" "Icon=cursor"
+    write_desktop "$XDG_DATA_HOME/applications" "editor.desktop" \
+        "Type=Application" "Name=Editor" "Exec=editor %U" \
+        "StartupWMClass=editor" "Icon=editor"
     local out; out="$(DESKTOP_DIRS="$XDG_DATA_HOME/applications" "$APPS_BIN")"
     assert_eq "apps: one entry"        "$(jq -r 'length'        <<<"$out")" "1"
-    assert_eq "apps: name"             "$(jq -r '.[0].name'     <<<"$out")" "Cursor"
-    assert_eq "apps: raw exec kept"    "$(jq -r '.[0].exec'     <<<"$out")" "cursor %U"
-    assert_eq "apps: wmclass"          "$(jq -r '.[0].wmclass'  <<<"$out")" "cursor"
-    assert_eq "apps: icon"             "$(jq -r '.[0].icon'     <<<"$out")" "cursor"
+    assert_eq "apps: name"             "$(jq -r '.[0].name'     <<<"$out")" "Editor"
+    assert_eq "apps: raw exec kept"    "$(jq -r '.[0].exec'     <<<"$out")" "editor %U"
+    assert_eq "apps: wmclass"          "$(jq -r '.[0].wmclass'  <<<"$out")" "editor"
+    assert_eq "apps: icon"             "$(jq -r '.[0].icon'     <<<"$out")" "editor"
     teardown_sandbox
 }
 
@@ -201,11 +201,11 @@ JSON
 test_windows_resolves_the_monitor_name() {
     setup_sandbox; fake_hyprctl_json
     cat > "$FAKE_CLIENTS" <<'JSON'
-[{"address":"0x1","class":"cursor","title":"main","workspace":{"id":6},"monitor":1}]
+[{"address":"0x1","class":"editor","title":"main","workspace":{"id":6},"monitor":1}]
 JSON
     local out; out="$("$WINDOWS_BIN")"
     assert_eq "windows: one window"      "$(jq -r 'length'         <<<"$out")" "1"
-    assert_eq "windows: class"           "$(jq -r '.[0].class'     <<<"$out")" "cursor"
+    assert_eq "windows: class"           "$(jq -r '.[0].class'     <<<"$out")" "editor"
     assert_eq "windows: workspace"       "$(jq -r '.[0].workspace' <<<"$out")" "6"
     assert_eq "windows: monitor by name" "$(jq -r '.[0].monitor'   <<<"$out")" "HDMI-A-1"
     teardown_sandbox
@@ -360,7 +360,7 @@ test_windows_unreadable_proc_is_an_empty_field() {
     # that exited between the two reads.
     cat > "$FAKE_CLIENTS" <<'JSON'
 [{"address":"0x1","class":"gone","title":"g","workspace":{"id":1},"monitor":0,"pid":4242},
- {"address":"0x2","class":"signal","title":"s","workspace":{"id":2},"monitor":0,"pid":1483}]
+ {"address":"0x2","class":"msgbox","title":"s","workspace":{"id":2},"monitor":0,"pid":1483}]
 JSON
     local out; out="$("$WINDOWS_BIN")"
     assert_eq "windows: an unreadable /proc entry is an empty command" \
@@ -462,13 +462,13 @@ JSON
 
 test_windows_the_program_is_a_basename_not_a_path() {
     setup_sandbox; fake_hyprctl_json; fake_proc
-    fake_cmdline 1883 /tmp/.mount_lm-stuFjMMHD/modelbox
+    fake_cmdline 1883 /tmp/.mount_modelbFjMMHD/modelbox
     cat > "$FAKE_CLIENTS" <<'JSON'
-[{"address":"0x1","class":"ai.elementlabs.modelbox","title":"Modelbox","workspace":{"id":8},"monitor":0,"pid":1883}]
+[{"address":"0x1","class":"com.example.modelbox","title":"Modelbox","workspace":{"id":8},"monitor":0,"pid":1883}]
 JSON
     local out; out="$("$WINDOWS_BIN")"
     assert_eq "windows: the AppImage mount path is reported as measured" \
-              "$(jq -r '.[0].command' <<<"$out")" "/tmp/.mount_lm-stuFjMMHD/modelbox"
+              "$(jq -r '.[0].command' <<<"$out")" "/tmp/.mount_modelbFjMMHD/modelbox"
     assert_eq "windows: and its program is the basename alone" \
               "$(jq -r '.[0].program' <<<"$out")" "modelbox"
     teardown_sandbox

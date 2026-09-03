@@ -562,7 +562,7 @@ Panel {
     }
 
     // [From window] -- fill a program's class from a window that is open right
-    // now. This is the route on which webapps and LM-Studio come out right
+    // now. This is the route on which webapps and Modelbox come out right
     // without the user having to know how either of them names itself.
 
     // --- layout -----------------------------------------------------------
