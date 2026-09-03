@@ -866,16 +866,23 @@ test_generated_lua_compiles
 # code added to the script with no wording, which is exactly how three of the
 # eight went unworded for two rounds.
 test_envelope_codes_match_the_script() {
-    local script="$PWD/../bin/omarchy-autostart-config"
+    # BOTH scripts that answer with an envelope, not just the first one. When
+    # bin/omarchy-autostart-hypr was added it brought a code of its own
+    # ("unreadable"), and a version of this test that named only the config
+    # script would have let it reach the user through envelopeText's
+    # unknown-code fallback -- worded, but worded as a problem with the
+    # configuration file rather than with a Hyprland file. The claim is about
+    # the set of codes THE PLUGIN can emit; it has to read every emitter.
+    local scripts=("$PWD/../bin/omarchy-autostart-config" "$PWD/../bin/omarchy-autostart-hypr")
     local from_script from_model
-    # Both reporters: `err "<code>"` and the two hardcoded printf fallbacks
-    # that stand in when jq itself cannot build the answer.
-    from_script="$( { grep -o 'err "[a-z-]*"' "$script" | sed 's/err "//; s/"//'
-                      grep -o '"error":"[a-z-]*"' "$script" | sed 's/"error":"//; s/"//'
+    # Both reporters: `err "<code>"` and the hardcoded printf fallbacks that
+    # stand in when jq itself cannot build the answer.
+    from_script="$( { grep -h -o 'err "[a-z-]*"' "${scripts[@]}" | sed 's/err "//; s/"//'
+                      grep -h -o '"error":"[a-z-]*"' "${scripts[@]}" | sed 's/"error":"//; s/"//'
                     } | sort -u | tr '\n' ' ')"
     from_model="$(sed -n '/^function envelopeCodes/,/^}/p' "$PWD/../Model.js" \
                   | grep -o '"[a-z-]*"' | tr -d '"' | sort -u | tr '\n' ' ')"
-    assert_eq "envelope: Model.envelopeCodes() is exactly what the script can emit" \
+    assert_eq "envelope: Model.envelopeCodes() is exactly what the two scripts can emit" \
               "$from_model" "$from_script"
     assert_eq "envelope: the extraction found something at all" \
               "$([[ -n "${from_script// /}" ]] && echo yes || echo no)" "yes"
@@ -928,6 +935,210 @@ test_runners_shape() {
 }
 
 test_runners_shape
+
+# --- the reader for the user's own Hyprland Lua files -----------------------
+#
+# The script under test here is the one that touches the USER'S OWN
+# hand-maintained configuration. Every assertion below runs against
+# setup_sandbox's redirected XDG_CONFIG_HOME, so "$HOME/.config/hypr" resolves
+# inside the sandbox and the real ~/.config/hypr is never opened -- which is
+# also asserted, once, at the end.
+HYPR_BIN="$PWD/../bin/omarchy-autostart-hypr"
+
+hypr_dir() { printf '%s/hypr' "$XDG_CONFIG_HOME"; }
+
+# The three real forms, verbatim from the user's files. The backslashes are
+# doubled here because they are doubled ON DISK: windowrules.lua contains the
+# four characters `\\.` and single-quoted printf passes them through unchanged.
+write_real_files() {
+    mkdir -p "$(hypr_dir)"
+    printf '%s\n' \
+        '-- Autostart. Portiert aus autostart.conf.' \
+        '' \
+        '-- Dienstliche Kommunikation' \
+        'o.launch_on_start("notes-app")' \
+        'o.exec_on_start(o.launch_webapp_sole("Chat", "https://chat.example.org/"))' \
+        > "$(hypr_dir)/autostart.lua"
+    printf '%s\n' \
+        '-- Workspace 8 - KI-Anwendungen' \
+        'o.window("LM[- ]?Studio", { workspace = "8" })' \
+        'o.window("(nimbus-chatgpt\\.com__-Default)", { workspace = "8" })' \
+        > "$(hypr_dir)/windowrules.lua"
+    printf '%s\n' \
+        'hl.workspace_rule({ workspace = "1", monitor = "DP-4" })' \
+        > "$(hypr_dir)/workspaces.lua"
+}
+
+test_hypr_read_answers_for_all_three_even_when_none_exists() {
+    setup_sandbox
+    local out; out="$("$HYPR_BIN" read)"
+    assert_eq "hypr: a missing directory is still ok" "$(jq -r .ok <<<"$out")" "true"
+    assert_eq "hypr: three entries regardless" "$(jq -r '.files | length' <<<"$out")" "3"
+    assert_eq "hypr: in file order" \
+              "$(jq -r '[.files[].name] | join(",")' <<<"$out")" \
+              "autostart.lua,windowrules.lua,workspaces.lua"
+    assert_eq "hypr: an absent file is present:false, not an error" \
+              "$(jq -r '[.files[].present] | join(",")' <<<"$out")" "false,false,false"
+    assert_eq "hypr: an absent file has mtime 0" \
+              "$(jq -r '[.files[].mtime] | join(",")' <<<"$out")" "0,0,0"
+    assert_eq "hypr: an absent file has empty content" \
+              "$(jq -r '[.files[].content] | join("|")' <<<"$out")" "||"
+    assert_eq "hypr: the directory it looked in is named" \
+              "$(jq -r .dir <<<"$out")" "$(hypr_dir)"
+    teardown_sandbox
+}
+
+# THE BYTE-FOR-BYTE CLAIM, and it is the one the later line surgery depends
+# on: what the script hands over must be exactly what is on disk. `cmp`
+# against the file itself, not a jq-to-jq comparison, because the whole
+# hazard is in the crossing -- a `$(...)` capture eats a trailing newline and
+# an unquoted expansion mangles a backslash, and windowrules.lua is full of
+# backslashes.
+test_hypr_read_delivers_the_bytes_unchanged() {
+    setup_sandbox
+    write_real_files
+    local out name; out="$("$HYPR_BIN" read)"
+    for name in autostart.lua windowrules.lua workspaces.lua; do
+        jq -j --arg n "$name" '.files[] | select(.name == $n) | .content' <<<"$out" \
+            > "$SANDBOX/$name.delivered"
+        assert_eq "hypr: $name is delivered byte for byte" \
+                  "$(cmp -s "$(hypr_dir)/$name" "$SANDBOX/$name.delivered" \
+                     && echo identical || echo DIFFERS)" "identical"
+    done
+    assert_eq "hypr: the doubled backslash survives the crossing" \
+              "$(jq -r '.files[1].content' <<<"$out" | grep -c 'chatgpt\\\\\.com')" "1"
+    assert_eq "hypr: every present file reports a real mtime" \
+              "$(jq -r '[.files[] | select(.mtime > 0)] | length' <<<"$out")" "3"
+    teardown_sandbox
+}
+
+test_hypr_read_reports_a_present_file_as_present() {
+    setup_sandbox
+    mkdir -p "$(hypr_dir)"
+    printf 'o.launch_on_start("nimbus")\n' > "$(hypr_dir)/autostart.lua"
+    local out; out="$("$HYPR_BIN" read)"
+    assert_eq "hypr: the one file that exists is present" \
+              "$(jq -r '[.files[].present] | join(",")' <<<"$out")" "true,false,false"
+    assert_eq "hypr: and it carries its full path" \
+              "$(jq -r '.files[0].path' <<<"$out")" "$(hypr_dir)/autostart.lua"
+    assert_eq "hypr: an empty file is present with empty content" \
+              "$(: > "$(hypr_dir)/workspaces.lua"; "$HYPR_BIN" read \
+                 | jq -r '.files[2] | "\(.present):\(.content)"')" "true:"
+    teardown_sandbox
+}
+
+# A DIRECTORY, A SYMLINK TARGET THAT IS NOT A FILE, AND AN UNREADABLE FILE all
+# read as absent rather than as an error envelope. The reason is the same in
+# all three: there is nothing to show and nothing a later writer could edit,
+# and reporting an error would take the OTHER TWO files off the screen with it.
+test_hypr_read_treats_a_non_file_as_absent() {
+    setup_sandbox
+    mkdir -p "$(hypr_dir)/autostart.lua"
+    local out; out="$("$HYPR_BIN" read)"
+    assert_eq "hypr: a directory at the path is not an error" "$(jq -r .ok <<<"$out")" "true"
+    assert_eq "hypr: a directory at the path reads as absent" \
+              "$(jq -r '.files[0].present' <<<"$out")" "false"
+    teardown_sandbox
+}
+
+test_hypr_read_treats_an_unreadable_file_as_absent() {
+    setup_sandbox
+    mkdir -p "$(hypr_dir)"
+    printf 'o.launch_on_start("nimbus")\n' > "$(hypr_dir)/autostart.lua"
+    chmod 000 "$(hypr_dir)/autostart.lua"
+    local out; out="$("$HYPR_BIN" read)"
+    # Skipped rather than asserted when the test happens to run as a user who
+    # can read anything: root would read the file and the assertion would be
+    # about the environment, not about the script. Reported either way, so a
+    # skip is visible rather than silent.
+    if [[ -r "$(hypr_dir)/autostart.lua" ]]; then
+        assert_eq "hypr: an unreadable file reads as absent (skipped: readable anyway)" \
+                  "skipped" "skipped"
+    else
+        assert_eq "hypr: an unreadable file reads as absent" \
+                  "$(jq -r '.files[0].present' <<<"$out")" "false"
+    fi
+    assert_eq "hypr: and the envelope is still ok" "$(jq -r .ok <<<"$out")" "true"
+    chmod 644 "$(hypr_dir)/autostart.lua"
+    teardown_sandbox
+}
+
+# The cap, and the exactness of it. MAX+1 bytes are read to DETECT the
+# overrun; MAX bytes are what may be handed on. A script that passed the
+# detection byte through would give a later writer one byte of content the cap
+# says is not there.
+test_hypr_read_caps_and_flags_an_oversized_file() {
+    setup_sandbox
+    mkdir -p "$(hypr_dir)"
+    # 64 KiB + 100 bytes.
+    head -c $((65536 + 100)) /dev/zero | tr '\0' 'x' > "$(hypr_dir)/windowrules.lua"
+    local out; out="$("$HYPR_BIN" read)"
+    assert_eq "hypr: an oversized file is delivered, not refused" \
+              "$(jq -r '.files[1].present' <<<"$out")" "true"
+    assert_eq "hypr: an oversized file is flagged as truncated" \
+              "$(jq -r '.files[1].truncated' <<<"$out")" "true"
+    assert_eq "hypr: an oversized file is cut to exactly the cap" \
+              "$(jq -r '.files[1].content' <<<"$out" | wc -c)" "65537"
+    assert_eq "hypr: a file at the cap is NOT flagged" \
+              "$(head -c 65536 /dev/zero | tr '\0' 'y' > "$(hypr_dir)/windowrules.lua"; \
+                 "$HYPR_BIN" read | jq -r '.files[1].truncated')" "false"
+    teardown_sandbox
+}
+
+# READ ONLY, ASSERTED. Not "the script has no write function" as prose in a
+# comment: the three files are checksummed before and after a read, and the
+# script is grepped for the verbs that could change one. The plugin is
+# installed and live on the user's machine while this is being built, and this
+# is the assertion that says so out loud.
+test_hypr_read_changes_nothing() {
+    setup_sandbox
+    write_real_files
+    local before after
+    before="$(cd "$(hypr_dir)" && sha256sum autostart.lua windowrules.lua workspaces.lua)"
+    "$HYPR_BIN" read >/dev/null
+    "$HYPR_BIN" read >/dev/null
+    after="$(cd "$(hypr_dir)" && sha256sum autostart.lua windowrules.lua workspaces.lua)"
+    assert_eq "hypr: reading twice changes not one byte of the three files" "$after" "$before"
+    assert_eq "hypr: nothing new appeared beside them" \
+              "$(cd "$(hypr_dir)" && ls -1 | sort | tr '\n' ' ')" \
+              "autostart.lua windowrules.lua workspaces.lua "
+    # No subcommand but `read`, and no verb in the file that could publish
+    # over one of the user's paths. `mv`, `>`-into-$HYPR_DIR and `tee` are the
+    # three shapes a write would plausibly arrive in.
+    assert_eq "hypr: there is no write subcommand" \
+              "$(printf 'x' | "$HYPR_BIN" write --expect-mtime 1 >/dev/null 2>&1; echo $?)" "2"
+    assert_eq "hypr: nothing in the script targets HYPR_DIR for writing" \
+              "$(grep -cE '(>|>>|tee|mv[^|]*)[[:space:]]*"?\$HYPR_DIR' "$HYPR_BIN" || true)" "0"
+    assert_eq "hypr: nothing in the script writes to \$path" \
+              "$(grep -cE '(>|>>|tee)[[:space:]]*"\$path"' "$HYPR_BIN" || true)" "0"
+    teardown_sandbox
+}
+
+# The seam, checked the same way the apps reader's is: the script must resolve
+# its directory from XDG_CONFIG_HOME, because that redirect is the ONLY thing
+# keeping every assertion above off the real ~/.config/hypr. A script that
+# hardcoded the path would pass every other test in this file while reading
+# the user's live configuration.
+test_hypr_read_resolves_its_directory_from_the_sandbox() {
+    setup_sandbox
+    write_real_files
+    local out; out="$("$HYPR_BIN" read)"
+    assert_eq "hypr: the directory read lies inside the sandbox" \
+              "$(case "$(jq -r .dir <<<"$out")" in "$SANDBOX"/*) echo inside ;; *) echo "OUTSIDE" ;; esac)" \
+              "inside"
+    assert_eq "hypr: no absolute /home path is baked into the script" \
+              "$(grep -cE '/home/|/\.config/hypr' "$HYPR_BIN" || true)" "0"
+    teardown_sandbox
+}
+
+test_hypr_read_answers_for_all_three_even_when_none_exists
+test_hypr_read_delivers_the_bytes_unchanged
+test_hypr_read_reports_a_present_file_as_present
+test_hypr_read_treats_a_non_file_as_absent
+test_hypr_read_treats_an_unreadable_file_as_absent
+test_hypr_read_caps_and_flags_an_oversized_file
+test_hypr_read_changes_nothing
+test_hypr_read_resolves_its_directory_from_the_sandbox
 
 MARKER_BIN="$PWD/../bin/omarchy-autostart-marker"
 

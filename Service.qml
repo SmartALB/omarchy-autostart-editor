@@ -191,6 +191,41 @@ Item {
         var gen = root.generation
         root.lastError = ""
         watchdog.stop()
+
+        // THE CUTOVER, and this service's ONE named place for it. The switch
+        // itself is Model.WRITE_PATH_ENABLED -- see the block comment above it
+        // in Model.js for why the old half is disconnected rather than deleted
+        // and where the plugin's effect comes from in the meantime.
+        //
+        // While it is off, this service applies NOTHING: no `hyprctl eval`, no
+        // start-marker claim, no launch. Everything below this point is that
+        // apply path and is unreachable on purpose; it is kept because the
+        // writer is built from it.
+        //
+        // NOT LAUNCHING IS THE POINT, not a side effect worth regretting.
+        // ~/.config/hypr/autostart.lua already starts those programs -- that
+        // is the source of truth this plugin now reads. A launch from here as
+        // well would start the user's session TWICE, which is the one failure
+        // bin/omarchy-autostart-marker exists to say is worse than any other.
+        //
+        // The generation bump above already retired any run in flight, so the
+        // four Processes' own queued signals are rejected by their ctx.gen
+        // check rather than resuming a sequence nothing is going to finish.
+        if (!Model.WRITE_PATH_ENABLED) {
+            readProc.running = false
+            evalProc.running = false
+            markerProc.running = false
+            launchProc.running = false
+            // Both queues released, for the same reason the watchdog releases
+            // them: a busy flag no terminal signal will ever clear is a
+            // session-long silent latch.
+            root.readBusy = false
+            root.pendingLoad = null
+            root.evalBusy = false
+            root.pendingChunkRun = null
+            return
+        }
+
         watchdog.start()
 
         if (root.readBusy) {

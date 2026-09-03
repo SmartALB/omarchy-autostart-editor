@@ -1304,6 +1304,14 @@ fi
 #       idiom checks 6 and 9b already use for values that wrap. `.reasonText`
 #       itself is excluded by the boundary so the call does not count as its
 #       own subject.
+#
+#       TWO wording functions are accepted, not one, and the second is not a
+#       loophole: Model.hyprReasonText carries the same guarantee for the
+#       Hyprland reader's own codes -- it lives in the same testable file, and
+#       test/harness.qml proves every code in Model.hyprReasons() has wording
+#       there, exactly as it does for reasonText and envelopeText. Adding a
+#       THIRD name here without that pair of tests behind it would be the
+#       loophole; this is the same claim about a second set of codes.
 reason_pat='\.reason([^A-Za-z0-9_]|$)'
 raw_reasons=""
 mapfile -t panel_lines <<<"$stripped_panel"
@@ -1314,13 +1322,13 @@ for ((i = 0; i < ${#panel_lines[@]}; i++)); do
 $window"
   (( i + 1 < ${#panel_lines[@]} )) && window="$window
 ${panel_lines[$((i + 1))]}"
-  grep -qF 'Model.reasonText(' <<<"$window" \
+  grep -qE 'Model\.(reasonText|hyprReasonText)\(' <<<"$window" \
     || raw_reasons="$raw_reasons
 Panel.qml:$((i + 1)): ${panel_lines[$i]}"
 done
 raw_reasons="$(sed '/^$/d' <<<"$raw_reasons")"
-[[ -z "$raw_reasons" ]] && ok "Panel: every reason code is worded through Model.reasonText" \
-                       || bad "Panel: every reason code is worded through Model.reasonText" "$raw_reasons"
+[[ -z "$raw_reasons" ]] && ok "Panel: every reason code is worded through Model.js" \
+                       || bad "Panel: every reason code is worded through Model.js" "$raw_reasons"
 
 # 23 -- an envelope error is never shown to the user raw either, for the same
 #       reason and by the same rule as check 22. `explain()` lived in this file
@@ -1655,6 +1663,109 @@ elif grep -qE '(^|[^A-Za-z0-9_.])99([^A-Za-z0-9_]|$)' <<<"$ws_opts"; then
       "a bare 99 is still in workspaceOptions(), so the bound exists twice: $ws_opts"
 else
   ok "Panel.qml: workspaceOptions takes its bound from Model, not a literal"
+fi
+
+# The body of one JavaScript function, from its `function` line to the line
+# that closes it, by BRACE DEPTH rather than by "the next line that is only a
+# closing brace". The latter idiom is used by two older checks in this file and
+# it truncates at the first inner block -- apply()'s own `if (...) { ... }`
+# closes on its own line at the same indentation as the function does, so a
+# check reading past it would have been silently reading half a function.
+fn_body() {
+  awk -v f="$1" '
+    !inb && $0 ~ ("function[[:space:]]+" f "[[:space:]]*\\(") { inb = 1 }
+    inb {
+      print
+      opens = gsub(/\{/, "{")
+      closes = gsub(/\}/, "}")
+      depth += opens - closes
+      if (started && depth <= 0) exit
+      if (opens > 0) started = 1
+    }'
+}
+
+# 27 -- THE CUTOVER IS ONE SWITCH, AND EVERY WRITE ROUTE IS BEHIND IT.
+#
+#       While the writer does not exist, the plugin must apply nothing. That
+#       is not a property of a hidden button: a hidden control is not a closed
+#       route, and this project has already shipped one gate that read as
+#       armed and was inert (`Process.NormalExit` was `undefined`, so the
+#       marker's claim/refuse decision never ran at all). So the check is on
+#       the ROUTES, not on the visibility.
+#
+#       Four things, and each of them is one way this could rot:
+#         (a) Model.js actually says the switch is off. A cutover documented
+#             in prose and left `true` in code is the worst of the outcomes,
+#             because every other check here would still pass.
+#         (b) Panel.qml reads it exactly once, into root.offersEditing. More
+#             than once means two switches, which is the shape this whole
+#             change of direction exists to remove.
+#         (c) each of Panel.qml's three dispatching entry points -- apply,
+#             applyRules, launchMissing -- returns early on it. Named
+#             individually so that adding a fourth without a gate fails here
+#             rather than passing quietly.
+#         (d) Service.qml's load() consults it BEFORE it arms the watchdog and
+#             dispatches a read: gating further down would leave the apply
+#             sequence half-entered, which is exactly the state its own
+#             generation discipline is written to avoid.
+switch_name='Model\.WRITE_PATH_ENABLED'
+
+if grep -qE '^var WRITE_PATH_ENABLED = false;$' Model.js; then
+  ok "cutover: Model.js has the switch, and it is off"
+else
+  bad "cutover: Model.js has the switch, and it is off" \
+      "no line 'var WRITE_PATH_ENABLED = false;' in Model.js -- the switch is missing, renamed, or turned on"
+fi
+
+panel_reads="$(grep -cE "$switch_name" <<<"$stripped_panel" || true)"
+if [[ "$panel_reads" == "1" ]]; then
+  ok "cutover: Panel.qml reads the switch exactly once"
+else
+  bad "cutover: Panel.qml reads the switch exactly once" \
+      "found $panel_reads reads of $switch_name in Panel.qml -- expected the single one in root.offersEditing"
+fi
+
+if grep -qE '^[[:space:]]*readonly property bool offersEditing:[[:space:]]*'"$switch_name"'[[:space:]]*$' <<<"$stripped_panel"; then
+  ok "cutover: Panel.qml's one read is the offersEditing property"
+else
+  bad "cutover: Panel.qml's one read is the offersEditing property" \
+      "no 'readonly property bool offersEditing: $switch_name' line in Panel.qml"
+fi
+
+ungated=""
+for fn in apply applyRules launchMissing; do
+  body="$(fn_body "$fn" <<<"$stripped_panel")"
+  if [[ -z "$body" ]]; then
+    ungated="$ungated $fn(not-found)"
+  elif ! grep -qE 'if[[:space:]]*\(![[:space:]]*root\.offersEditing[[:space:]]*\)[[:space:]]*return' <<<"$body"; then
+    ungated="$ungated $fn"
+  fi
+done
+if [[ -z "$ungated" ]]; then
+  ok "cutover: Panel.qml's apply, applyRules and launchMissing all refuse"
+else
+  bad "cutover: Panel.qml's apply, applyRules and launchMissing all refuse" \
+      "no 'if (!root.offersEditing) return' in:$ungated"
+fi
+
+# Service.qml's load(): the switch has to come before watchdog.start() and
+# before dispatchRead(). Line numbers within the function body, so a gate
+# moved below either of them fails.
+load_body="$(fn_body load <<<"$stripped_service")"
+gate_line="$(grep -nE "$switch_name" <<<"$load_body" | head -1 | cut -d: -f1)"
+arm_line="$(grep -nF 'watchdog.start()' <<<"$load_body" | head -1 | cut -d: -f1)"
+dispatch_line="$(grep -nE 'dispatchRead\(' <<<"$load_body" | head -1 | cut -d: -f1)"
+if [[ -z "$load_body" ]]; then
+  bad "cutover: Service.qml consults the switch before it arms or dispatches" \
+      "load() was not found at all, so this check would have been vacuous"
+elif [[ -z "$gate_line" || -z "$arm_line" || -z "$dispatch_line" ]]; then
+  bad "cutover: Service.qml consults the switch before it arms or dispatches" \
+      "load() is missing one of the three: switch=${gate_line:-none} watchdog.start=${arm_line:-none} dispatchRead=${dispatch_line:-none}"
+elif (( gate_line < arm_line && gate_line < dispatch_line )); then
+  ok "cutover: Service.qml consults the switch before it arms or dispatches"
+else
+  bad "cutover: Service.qml consults the switch before it arms or dispatches" \
+      "in load(): switch at $gate_line, watchdog.start at $arm_line, dispatchRead at $dispatch_line"
 fi
 
 printf '\nqml structure: total=%d failed=%d\n' "$run" "$failed"

@@ -987,7 +987,7 @@ QtObject {
                   unwordedAmong(Model.envelopeCodes(),
                                 function(c) { return Model.envelopeText(c, ""); }), "");
             check("envelopeText: the list it checks is not empty",
-                  Model.envelopeCodes().length, 8);
+                  Model.envelopeCodes().length, 9);
 
             // THE EMPTY ENVELOPE. Empty stdout is what a missing script, a
             // timeout kill and a non-zero exit outside the script's own two
@@ -1027,6 +1027,442 @@ QtObject {
                   Model.shellQuote("a; rm -rf /"), "'a; rm -rf /'");
             check("shellQuote: a dollar sign is inert inside quotes",
                   Model.shellQuote("$HOME"), "'$HOME'");
+
+
+            // =================================================================
+            // THE READER FOR THE USER'S HYPRLAND LUA FILES
+            // =================================================================
+            //
+            // THE FIXTURES ARE THE USER'S OWN THREE FILES, VERBATIM, byte for
+            // byte as they stood on 2026-09-03 -- generated from
+            // ~/.config/hypr/*.lua rather than retyped, because a fixture that
+            // is merely LIKE the real forms proves the parser handles the
+            // fixture. German section comments, the factual notes, the blank
+            // lines and the trailing newline are all part of them: the line
+            // numbers this reader reports are only correct if every one of
+            // those lines is counted.
+            //
+            // Each is an array of LINES joined with "\n", so the round-trip
+            // assertion below can compare `raw` against the very array element
+            // the line number indexes into.
+            var AUTOSTART_LINES = [
+                    "-- Autostart. Portiert aus autostart.conf.",
+                    "",
+                    "-- Dienstliche Kommunikation",
+                    "o.launch_on_start(\"notes-app\")",
+                    "o.launch_on_start(\"nimbus --app=https://mail.example.com/mail/\")",
+                    "",
+                    "-- Private Kommunikation",
+                    "o.exec_on_start(o.launch_webapp_sole(\"Chat\", \"https://chat.example.org/\"))",
+                    "o.launch_on_start(\"Chatterbox\")",
+                    "",
+                    "-- Browser",
+                    "o.launch_on_start(\"nimbus\")",
+                    "",
+                    "-- Schluesselverwaltung",
+                    "o.launch_on_start(\"keyring-gui\")",
+                    "",
+                    "-- Modelbox (am 28.08.2026 nach dem Upgrade neu installiert).",
+                    "-- Hinweis: modelbox.service startet den Server ohnehin headless",
+                    "-- (--run-as-service); diese Zeile oeffnet zusaetzlich das GUI-Fenster,",
+                    "-- so wie es vor dem Upgrade in autostart.conf stand.",
+                    "o.launch_on_start(\"modelbox\")",
+                    ""
+            ];
+            var WINDOWRULES_LINES = [
+                    "-- Fenster -> Workspace / Layout. Portiert aus workspaces.conf.",
+                    "-- Lua-Syntax: o.window(\"<class-regex>\", { workspace = \"N\", ... })",
+                    "",
+                    "-- Workspace 1 \u2013 Playwright E2E Testing",
+                    "o.window(\"^(Playwright-E2E-Test)$\", { workspace = \"1\", float = true, maximize = true })",
+                    "",
+                    "-- Workspace 2 \u2013 Dienstliche Kommunikation",
+                    "o.window(\"(nimbus-mail.example.com__mail_-Default)\", { workspace = \"2\" })",
+                    "o.window(\"(notes-app)\", { workspace = \"2\" })",
+                    "",
+                    "-- Workspace 6 \u2013 Entwicklung",
+                    "o.window(\"(cursor)\", { workspace = \"6\", maximize = true })",
+                    "",
+                    "-- Workspace 7 \u2013 Passwoerter / Schluessel",
+                    "o.window(\"(org.gnome.keyring-gui.Application)\", { workspace = \"7\" })",
+                    "o.window(\"(org.vaultkey.Vaultkey)\", { workspace = \"7\" })",
+                    "",
+                    "-- Workspace 8 \u2013 KI-Anwendungen",
+                    "-- Klasse ist \"LM-Studio\" (Bindestrich), nicht \"Modelbox\" -- beides abgedeckt.",
+                    "o.window(\"LM[- ]?Studio\", { workspace = \"8\" })",
+                    "o.window(\"(nimbus-chatgpt\\\\.com__-Default)\", { workspace = \"8\" })",
+                    "",
+                    "-- Workspace 9 \u2013 Private Kommunikation",
+                    "o.window(\"(signal)\", { workspace = \"9\" })",
+                    "o.window(\"(Chat)\", { workspace = \"9\" })",
+                    "o.window(\"^(nimbus-web\\\\.chat\\\\.com__-Default)$\", { workspace = \"9\" })",
+                    "o.window(\"^(chrome-web\\\\.chat\\\\.com__-Default)$\", { workspace = \"9\" })",
+                    "o.window(\"^(chrome-chat\\\\.com__-Default)$\", { workspace = \"9\" })",
+                    "",
+                    "-- Chatterbox Desktop -- deckt alle moeglichen Class-Namen ab.",
+                    "o.window(\"ChatterboxDesktop|chatterbox-desktop|org\\\\.chatterbox\\\\.desktop\", { workspace = \"9\" })",
+                    ""
+            ];
+            var WORKSPACES_LINES = [
+                    "-- Workspace -> Monitor.",
+                    "-- Portiert aus dem unteren Teil von monitors.conf.",
+                    "-- Hyprland-Lua-Syntax: hl.workspace_rule({ workspace = \"1\", monitor = \"DP-4\" })",
+                    "",
+                    "hl.workspace_rule({ workspace = \"1\", monitor = \"DP-4\" })",
+                    "hl.workspace_rule({ workspace = \"2\", monitor = \"DP-3\" })",
+                    "hl.workspace_rule({ workspace = \"3\", monitor = \"HDMI-A-1\" })",
+                    "hl.workspace_rule({ workspace = \"4\", monitor = \"DP-4\" })",
+                    "hl.workspace_rule({ workspace = \"5\", monitor = \"DP-4\" })",
+                    "hl.workspace_rule({ workspace = \"6\", monitor = \"HDMI-A-1\" })",
+                    "hl.workspace_rule({ workspace = \"7\", monitor = \"DP-3\" })",
+                    "hl.workspace_rule({ workspace = \"8\", monitor = \"HDMI-A-1\" })",
+                    "hl.workspace_rule({ workspace = \"9\", monitor = \"DP-3\" })",
+                    ""
+            ];
+            var AUTOSTART_TEXT   = AUTOSTART_LINES.join("\n");
+            var WINDOWRULES_TEXT = WINDOWRULES_LINES.join("\n");
+            var WORKSPACES_TEXT  = WORKSPACES_LINES.join("\n");
+
+            // THE ROUND-TRIP PROOF, and it is the assertion the whole later
+            // line surgery rests on: for every entry the reader returns, `raw`
+            // must be EXACTLY the line the input text has at `line`. Without
+            // it every other property here is decoration -- a parser that
+            // reports the right command against the wrong line number would
+            // pass all of them and then, when the writer lands, edit somebody
+            // else's line. This project has already had that exact class of
+            // defect reach a real window.
+            //
+            // Returns the offending line numbers as a string, so the failure
+            // message names them; "" is the pass. One check() per file, not
+            // one per entry, because the harness's assertion-count guard
+            // requires every call site to be countable and a call site inside
+            // a loop is not.
+            function roundTripBreaks(lines, entries) {
+                var broken = [];
+                for (var i = 0; i < entries.length; i++) {
+                    var e = entries[i];
+                    // Both halves matter: an out-of-range line number is as
+                    // fatal to line surgery as a mismatched text, and
+                    // lines[undefined] would compare equal to an undefined raw.
+                    if (typeof e.line !== "number" || e.line < 1 || e.line > lines.length) {
+                        broken.push("line " + e.line + " out of range");
+                    } else if (lines[e.line - 1] !== e.raw) {
+                        broken.push(String(e.line));
+                    }
+                }
+                return broken.join(", ");
+            }
+
+            var autostartEntries   = Model.parseAutostartLua(AUTOSTART_TEXT, "autostart.lua");
+            var windowEntries      = Model.parseWindowRulesLua(WINDOWRULES_TEXT, "windowrules.lua");
+            var workspaceEntries   = Model.parseWorkspacesLua(WORKSPACES_TEXT, "workspaces.lua");
+
+            // FAIL-CLOSED FIRST: a round-trip proof over zero entries proves
+            // nothing at all, which is this project's own blind-test shape. So
+            // the counts are asserted before the proof is trusted.
+            check("hypr: the real autostart.lua yields entries to prove anything about",
+                  autostartEntries.length, 7);
+            check("hypr: the real windowrules.lua yields entries",
+                  windowEntries.length, 14);
+            check("hypr: the real workspaces.lua yields entries",
+                  workspaceEntries.length, 9);
+
+            check("hypr ROUND TRIP: every autostart.lua entry's raw is the line at its number",
+                  roundTripBreaks(AUTOSTART_LINES, autostartEntries), "");
+            check("hypr ROUND TRIP: every windowrules.lua entry's raw is the line at its number",
+                  roundTripBreaks(WINDOWRULES_LINES, windowEntries), "");
+            check("hypr ROUND TRIP: every workspaces.lua entry's raw is the line at its number",
+                  roundTripBreaks(WORKSPACES_LINES, workspaceEntries), "");
+
+            // And the proof can fail. Without this, roundTripBreaks returning
+            // "" for a genuinely broken reader would be indistinguishable from
+            // it returning "" because it never compares anything -- which is
+            // exactly how a green suite lies.
+            check("hypr ROUND TRIP: the proof itself notices a shifted line number",
+                  roundTripBreaks(AUTOSTART_LINES,
+                                  [{ line: 4, raw: AUTOSTART_LINES[4] }]), "4");
+            check("hypr ROUND TRIP: the proof itself notices a line number off the end",
+                  roundTripBreaks(AUTOSTART_LINES,
+                                  [{ line: 9999, raw: "x" }]).indexOf("out of range") >= 0, true);
+
+            // --- the line numbers, against the real comment layout ------------
+            //
+            // autostart.lua has a German comment on line 3 and the first call
+            // on line 4; the last call is on line 21, after a FOUR-LINE note
+            // (17-20) about Modelbox. A parser that does not count comment and
+            // blank lines reports 1 and 12 here, and every entry below the
+            // first comment is then wrong by exactly the number of lines it
+            // skipped.
+            function lineNumbersOf(entries) {
+                var out = [];
+                for (var i = 0; i < entries.length; i++) out.push(entries[i].line);
+                return out.join(",");
+            }
+            check("hypr: autostart.lua line numbers count comments and blanks",
+                  lineNumbersOf(autostartEntries), "4,5,8,9,12,15,21");
+            check("hypr: windowrules.lua line numbers count comments and blanks",
+                  lineNumbersOf(windowEntries), "5,8,9,12,15,16,20,21,24,25,26,27,28,31");
+            check("hypr: workspaces.lua line numbers count comments and blanks",
+                  lineNumbersOf(workspaceEntries), "5,6,7,8,9,10,11,12,13");
+
+            // --- autostart.lua: the recognised forms --------------------------
+            check("hypr autostart: launch_on_start gives the bare command",
+                  autostartEntries[0].command, "notes-app");
+            check("hypr autostart: launch_on_start is the uwsm-app route",
+                  autostartEntries[0].launcher, "uwsm-app");
+            check("hypr autostart: launch_on_start is editable",
+                  autostartEntries[0].editable, true);
+            check("hypr autostart: a command with an = and a URL survives whole",
+                  autostartEntries[1].command,
+                  "nimbus --app=https://mail.example.com/mail/");
+            check("hypr autostart: the entry carries its file name",
+                  autostartEntries[0].file, "autostart.lua");
+            check("hypr autostart: the entry carries the helper it called",
+                  autostartEntries[0].fn, "o.launch_on_start");
+
+            // THE NESTED FORM, and it is the case the brief names by hand:
+            // o.exec_on_start(o.launch_webapp_sole("Chat", "https://chat.example.org/"))
+            // It is line 8 of the user's real file.
+            check("hypr autostart: the nested webapp helper is NOT editable",
+                  autostartEntries[2].editable, false);
+            check("hypr autostart: the nested webapp helper says why",
+                  autostartEntries[2].reason, "nested-call");
+            check("hypr autostart: the nested webapp helper still carries its raw line",
+                  autostartEntries[2].raw,
+                  "o.exec_on_start(o.launch_webapp_sole(\"Chat\", \"https://chat.example.org/\"))");
+            check("hypr autostart: the nested webapp helper invents no command",
+                  autostartEntries[2].command, undefined);
+
+            // helpers.lua:118-120 makes these two lines the same fact, so the
+            // reader must report them identically rather than by their spelling.
+            var equivalent = Model.parseAutostartLua(
+                "o.launch_on_start(\"nimbus\")\no.exec_on_start(o.launch(\"nimbus\"))");
+            check("hypr autostart: both spellings of the same fact give two entries",
+                  equivalent.length, 2);
+            check("hypr autostart: exec_on_start(o.launch(...)) is the uwsm-app route too",
+                  equivalent[1].launcher, "uwsm-app");
+            check("hypr autostart: and the same command",
+                  equivalent[1].command, equivalent[0].command);
+            check("hypr autostart: and it is editable",
+                  equivalent[1].editable, true);
+            check("hypr autostart: a plain exec_on_start string is the shell route",
+                  Model.parseAutostartLua("o.exec_on_start(\"echo hi\")")[0].launcher, "shell");
+
+            // --- windowrules.lua: the recognised forms ------------------------
+            check("hypr window: the class is the decoded regex",
+                  windowEntries[0]["class"], "^(Playwright-E2E-Test)$");
+            check("hypr window: the workspace is a string",
+                  windowEntries[0].workspace, "1");
+            check("hypr window: float is carried",
+                  windowEntries[0].flags.float, true);
+            check("hypr window: maximize is carried",
+                  windowEntries[0].flags.maximize, true);
+            check("hypr window: a rule with only a workspace has no flags set",
+                  Object.keys(windowEntries[2].flags).length, 0);
+            check("hypr window: an alternation class is editable",
+                  windowEntries[6].editable, true);
+            check("hypr window: an alternation class is kept verbatim",
+                  windowEntries[6]["class"], "LM[- ]?Studio");
+            // The escape. In the file this is written "(nimbus-chatgpt\\.com__-Default)";
+            // what Hyprland sees, and what the panel must show, has ONE backslash.
+            check("hypr window: a Lua backslash escape is decoded, not copied",
+                  windowEntries[7]["class"], "(nimbus-chatgpt\\.com__-Default)");
+            check("hypr window: the raw line still has the doubled backslash",
+                  windowEntries[7].raw.indexOf("\\\\.") >= 0, true);
+            check("hypr window: the last rule's three-way alternation is whole",
+                  windowEntries[13]["class"],
+                  "ChatterboxDesktop|chatterbox-desktop|org\\.chatterbox\\.desktop");
+
+            // --- windowrules.lua: the forms deliberately refused --------------
+            check("hypr window: a table match is not editable",
+                  Model.parseWindowRulesLua(
+                      "o.window({ class = \"a\", title = \"b\" }, { workspace = \"2\" })")[0].editable,
+                  false);
+            check("hypr window: a table match says why",
+                  Model.parseWindowRulesLua(
+                      "o.window({ class = \"a\", title = \"b\" }, { workspace = \"2\" })")[0].reason,
+                  "table-match");
+            check("hypr window: an option this reader cannot represent is refused",
+                  Model.parseWindowRulesLua(
+                      "o.window(\".*\", { tag = \"+default-opacity\" })")[0].reason,
+                  "unsupported-option");
+            check("hypr window: a nested table value is refused",
+                  Model.parseWindowRulesLua(
+                      "o.window(\"steam\", { size = { 875, 600 } })")[0].reason,
+                  "unsupported-option");
+            check("hypr window: a rule with no workspace at all is refused",
+                  Model.parseWindowRulesLua("o.window(\"steam\", { float = true })")[0].reason,
+                  "missing-option");
+            check("hypr window: a workspace Hyprland accepts but this panel does not is refused",
+                  Model.parseWindowRulesLua(
+                      "o.window(\"x\", { workspace = \"special silent\" })")[0].reason,
+                  "value-out-of-range");
+            check("hypr window: but it still carries its raw line",
+                  Model.parseWindowRulesLua(
+                      "o.window(\"x\", { workspace = \"special silent\" })")[0].raw,
+                  "o.window(\"x\", { workspace = \"special silent\" })");
+            check("hypr window: a call that does not end on its line is refused",
+                  Model.parseWindowRulesLua("o.window(")[0].reason, "incomplete-call");
+            check("hypr window: a multi-line call's opening line still carries its raw",
+                  Model.parseWindowRulesLua("o.window(")[0].raw, "o.window(");
+            check("hypr window: a trailing comment after the code is refused, not eaten",
+                  Model.parseWindowRulesLua(
+                      "o.window(\"x\", { workspace = \"2\" }) -- keep this note")[0].editable,
+                  false);
+
+            // --- workspaces.lua ------------------------------------------------
+            check("hypr workspace: the workspace number",
+                  workspaceEntries[0].workspace, "1");
+            check("hypr workspace: the monitor name",
+                  workspaceEntries[0].monitor, "DP-4");
+            check("hypr workspace: a two-part monitor name survives",
+                  workspaceEntries[2].monitor, "HDMI-A-1");
+            check("hypr workspace: a rule missing the monitor is refused",
+                  Model.parseWorkspacesLua("hl.workspace_rule({ workspace = \"1\" })")[0].reason,
+                  "missing-option");
+            check("hypr workspace: an unknown key is refused",
+                  Model.parseWorkspacesLua(
+                      "hl.workspace_rule({ workspace = \"1\", monitor = \"DP-4\", default_name = \"x\" })")[0].reason,
+                  "unsupported-option");
+            check("hypr workspace: a monitor name with a quote in it is refused",
+                  Model.parseWorkspacesLua(
+                      "hl.workspace_rule({ workspace = \"1\", monitor = \"a b\" })")[0].reason,
+                  "value-out-of-range");
+
+            // --- a line that calls nothing known is NOT an entry ---------------
+            //
+            // This is the other half of the contract: the reader must not turn
+            // a comment, a blank line or an unrelated statement into an entry
+            // it would then offer to rewrite. Those lines belong to the file.
+            check("hypr: a comment-only file yields no entry",
+                  Model.parseAutostartLua("-- nur ein Kommentar\n-- und noch einer\n").length, 0);
+            check("hypr: an empty file yields no entry",
+                  Model.parseAutostartLua("").length, 0);
+            check("hypr: an absent text yields no entry rather than throwing",
+                  Model.parseAutostartLua(undefined).length, 0);
+            check("hypr: a blank-lines-only file yields no entry",
+                  Model.parseWorkspacesLua("\n\n\n").length, 0);
+            check("hypr: an unrelated statement is not an entry",
+                  Model.parseAutostartLua("require(\"hypr.monitors\")").length, 0);
+            check("hypr: a commented-out call is not an entry",
+                  Model.parseAutostartLua("-- o.launch_on_start(\"nimbus\")").length, 0);
+            check("hypr: windowrules calls are not read out of autostart.lua",
+                  Model.parseAutostartLua("o.window(\"x\", { workspace = \"2\" })").length, 0);
+            check("hypr: an indented call is still an entry",
+                  Model.parseAutostartLua("    o.launch_on_start(\"nimbus\")")[0].editable, true);
+            check("hypr: an indented call keeps its indentation in raw",
+                  Model.parseAutostartLua("    o.launch_on_start(\"nimbus\")")[0].raw,
+                  "    o.launch_on_start(\"nimbus\")");
+
+            // --- parseHyprFiles: the three sections -----------------------------
+            //
+            // Always three, always in file order, and a file the reader did not
+            // find is a section that SAYS so. A missing windowrules.lua that
+            // simply vanished from the list would read as a plugin fault.
+            var envelope = [
+                { name: "autostart.lua",   path: "/h/autostart.lua",   present: true,
+                  mtime: 11, truncated: false, content: AUTOSTART_TEXT },
+                { name: "windowrules.lua", path: "/h/windowrules.lua", present: false,
+                  mtime: 0,  truncated: false, content: "" },
+                { name: "workspaces.lua",  path: "/h/workspaces.lua",  present: true,
+                  mtime: 13, truncated: true,  content: WORKSPACES_TEXT }
+            ];
+            var sections = Model.parseHyprFiles(envelope);
+            check("hypr sections: always three", sections.length, 3);
+            check("hypr sections: in file order",
+                  sections[0].name + "," + sections[1].name + "," + sections[2].name,
+                  "autostart.lua,windowrules.lua,workspaces.lua");
+            check("hypr sections: a missing file is present:false",
+                  sections[1].present, false);
+            check("hypr sections: a missing file has no entries",
+                  sections[1].entries.length, 0);
+            check("hypr sections: a missing file still names its path",
+                  sections[1].path, "/h/windowrules.lua");
+            check("hypr sections: the truncation flag is carried through",
+                  sections[2].truncated, true);
+            check("hypr sections: the mtime is carried through",
+                  sections[0].mtime, 11);
+            check("hypr sections: an entirely absent envelope still gives three sections",
+                  Model.parseHyprFiles(undefined).length, 3);
+            check("hypr sections: and none of them claims to be present",
+                  Model.parseHyprFiles(undefined)[0].present, false);
+            check("hypr sections: an unknown file name in the envelope is ignored",
+                  Model.parseHyprFiles([{ name: "bindings.lua", present: true,
+                                          content: "o.launch_on_start(\"x\")" }]).length, 3);
+            check("hypr sections: the total across sections",
+                  Model.hyprEntryCount(sections), 16);
+            check("hypr sections: and how many of those are editable",
+                  Model.hyprEditableCount(sections), 15);
+
+            // --- the wording ----------------------------------------------------
+            //
+            // The same two-sided guarantee reasonText and envelopeText have:
+            // this half proves every code the parsers can set has plain
+            // wording, and the parser assertions above are what prove the list
+            // is the set they actually set.
+            check("hypr wording: every refusal code has plain wording",
+                  unwordedAmong(Model.hyprReasons(), Model.hyprReasonText), "");
+            check("hypr wording: the list it checks is not empty",
+                  Model.hyprReasons().length, 7);
+            check("hypr wording: an absent code does not print undefined",
+                  Model.hyprReasonText(undefined).indexOf("undefined"), -1);
+            check("hypr wording: an unknown code is named, not shown bare",
+                  Model.hyprReasonText("brand-new").indexOf("brand-new") >= 0, true);
+
+            check("hypr header: it says editing is not possible yet",
+                  Model.hyprHeaderText(sections).indexOf("not possible yet") >= 0, true);
+            check("hypr header: it names the files it read",
+                  Model.hyprHeaderText(sections).indexOf("autostart.lua (7)") >= 0, true);
+            check("hypr header: it names the file it did not find",
+                  Model.hyprHeaderText(sections).indexOf("Not found: windowrules.lua") >= 0, true);
+            check("hypr header: with nothing read at all it says so",
+                  Model.hyprHeaderText(Model.parseHyprFiles(undefined))
+                       .indexOf("No file was read") >= 0, true);
+
+            check("hypr entry text: the line number comes first",
+                  Model.hyprEntryText(autostartEntries[0]), "4: notes-app");
+            check("hypr entry text: a window rule reads as class to workspace",
+                  Model.hyprEntryText(windowEntries[2]),
+                  "9: (notes-app)  \u2192  workspace 2");
+            check("hypr entry text: flags are named",
+                  Model.hyprEntryText(windowEntries[0]).indexOf("[float, maximize]") >= 0, true);
+            check("hypr entry text: a workspace rule reads as workspace to monitor",
+                  Model.hyprEntryText(workspaceEntries[0]),
+                  "5: workspace 1  \u2192  DP-3".replace("DP-3", "DP-4"));
+            check("hypr entry text: a non-editable entry shows its raw line and nothing invented",
+                  Model.hyprEntryText(autostartEntries[2]),
+                  "8: " + autostartEntries[2].raw);
+
+            // --- the Lua string scanner ------------------------------------------
+            check("luaStringAt: a plain string",
+                  Model.luaStringWhole("\"abc\""), "abc");
+            check("luaStringAt: a single-quoted string",
+                  Model.luaStringWhole("'abc'"), "abc");
+            check("luaStringAt: an escaped backslash decodes to one",
+                  Model.luaStringWhole("\"a\\\\b\""), "a\\b");
+            check("luaStringAt: an escaped quote decodes",
+                  Model.luaStringWhole("\"a\\\"b\""), "a\"b");
+            check("luaStringAt: a decimal escape decodes",
+                  Model.luaStringWhole("\"\\65\""), "A");
+            check("luaStringAt: a hex escape decodes",
+                  Model.luaStringWhole("\"\\x41\""), "A");
+            check("luaStringAt: an unterminated string is refused",
+                  Model.luaStringWhole("\"abc"), null);
+            check("luaStringAt: an unknown escape is refused rather than guessed",
+                  Model.luaStringWhole("\"a\\zb\""), null);
+            check("luaStringAt: trailing content after the quote is refused",
+                  Model.luaStringWhole("\"abc\" .. x"), null);
+            check("luaStringAt: something that is not a string at all is refused",
+                  Model.luaStringWhole("abc"), null);
+
+            // --- the cutover, asserted rather than assumed -------------------------
+            //
+            // Panel.qml and Service.qml both read this and nothing here can
+            // execute either of them, so the one thing a test CAN say is that
+            // the switch exists in the namespace and is off. That it is
+            // actually consulted, and where, is test/qml-structure.sh check 27.
+            check("cutover: the write path is off",
+                  Model.WRITE_PATH_ENABLED, false);
 
             console.warn("total=" + total + " failed=" + failed);
             Qt.exit(failed === 0 ? 0 : 1);

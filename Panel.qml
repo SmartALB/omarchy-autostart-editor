@@ -114,7 +114,21 @@ Panel {
         matchProc.running = false
         launchProc.running = false
         appsProc.running = false
+        hyprProc.running = false
     }
+
+    // THE CUTOVER, and this panel's ONE named place for it. The switch is
+    // Model.WRITE_PATH_ENABLED; the reasoning is the block comment above it in
+    // Model.js. While it is off, this panel OFFERS nothing from the old half:
+    // the program list, the [+ Add] picker, the workspace table, the import,
+    // the "launch missing" route, Revert and Apply are all hidden, and apply()
+    // itself refuses. What it shows instead is the read of the user's own
+    // Hyprland files, below.
+    //
+    // A single property read from every one of those places, rather than
+    // Model.WRITE_PATH_ENABLED repeated at each: one place to look, and one
+    // place a structural check can point at.
+    readonly property bool offersEditing: Model.WRITE_PATH_ENABLED
 
     // --- state ------------------------------------------------------------
     // `saved` is what is on disk, `draft` is what the panel shows. Apply moves
@@ -293,9 +307,64 @@ Panel {
         root.commitDraft(next)
     }
 
+    // --- the read of the user's own Hyprland files ------------------------
+    //
+    // The three sections the panel shows, in file order, always all three.
+    // Empty until the first read answers; Model.parseHyprFiles is what turns
+    // the envelope into them, and every entry in them carries its 1-based line
+    // number and the original line text -- the two fields the later line
+    // surgery rests on.
+    property var hyprSections: []
+    property string hyprError: ""
+
+    function readHypr() {
+        root.hyprError = ""
+        hyprProc.command = run.tool("omarchy-autostart-hypr", "read")
+        hyprProc.running = true
+    }
+
+    Process {
+        id: hyprProc
+        stdout: StdioCollector {
+            waitForEnd: true
+            onStreamFinished: {
+                var envelope
+                try { envelope = JSON.parse(String(text || "{}")) }
+                catch (e) {
+                    root.hyprError = "the Hyprland file reader gave an unreadable answer"
+                    return
+                }
+                if (!envelope.ok) {
+                    // Worded, never the bare code -- the same rule the
+                    // configuration envelope follows.
+                    root.hyprError = Model.envelopeText(envelope.error, envelope.detail)
+                    return
+                }
+                root.hyprSections = Model.parseHyprFiles(envelope.files)
+                // The bar tooltip's two numbers, now taken from the source of
+                // truth the panel actually reads: autostart entries are the
+                // programs, window and workspace rules are the placements.
+                // Leaving this unemitted would make the widget report nothing
+                // at all while the panel showed thirty entries.
+                var programs = 0, placements = 0
+                for (var i = 0; i < root.hyprSections.length; i++) {
+                    var section = root.hyprSections[i]
+                    var count = (section.entries || []).length
+                    if (section.name === "autostart.lua") programs += count
+                    else placements += count
+                }
+                root.counted(programs, placements)
+            }
+        }
+    }
+
     // --- load -------------------------------------------------------------
     function reload() {
         root.errorText = ""
+        root.readHypr()
+        // The old half's read too, but only while it is connected. See
+        // root.offersEditing.
+        if (!root.offersEditing) return
         readProc.command = run.tool("omarchy-autostart-config", "read")
         readProc.running = true
     }
@@ -427,6 +496,12 @@ Panel {
     // visible omission with everything else applied.
     function apply() {
         root.errorText = ""
+        // The gate, not merely the hidden button. See root.offersEditing: with
+        // the old half disconnected there is no route by which this may write
+        // a file or reach the compositor, and a hidden control is not a route
+        // that has been closed -- an IPC call, a future keybinding or a
+        // half-finished refactor could all still find this function.
+        if (!root.offersEditing) return
         if (root.blocked.length > 0) {
             // Through Model.reasonText, not spelled out here. This sentence
             // used to be written twice in this file and a third time nowhere
@@ -468,6 +543,10 @@ Panel {
     property int pendingIndex: 0
 
     function applyRules() {
+        // The gate, for the same reason apply() carries one: see
+        // root.offersEditing. Nothing reaches the compositor while the old
+        // half is disconnected.
+        if (!root.offersEditing) return
         var checked = Model.validate(root.draft)
         try {
             root.pendingChunks = Model.buildRuleChunks(checked)
@@ -563,6 +642,11 @@ Panel {
     //     Model.validate accepts an unbalanced quote, since that is a
     //     shell-syntax problem and not a field-shape one.
     function launchMissing() {
+        // The gate, third of three. See root.offersEditing -- and note that
+        // launching from here while ~/.config/hypr/autostart.lua already
+        // starts these programs is exactly the doubled session this plugin's
+        // start marker exists to prevent.
+        if (!root.offersEditing) return
         var programs = Model.validate(root.draft).programs
         var isolated = []
         for (var i = 0; i < programs.length; i++) {
@@ -979,9 +1063,141 @@ Panel {
                         font.bold: true
                     }
 
+                    // --- what was READ from the user's Hyprland files -----------------
+                    //
+                    // Three sections in the order of the files, every entry with its
+                    // 1-based line number, and a non-editable entry visibly marked as
+                    // one. Nothing here is a control: this half writes nothing, and the
+                    // line at the top says so in words rather than leaving the user to
+                    // discover it by clicking.
+                    //
+                    // NO WORDING AND NO DERIVATION IN THIS FILE. The header sentence is
+                    // Model.hyprHeaderText, each entry's line is Model.hyprEntryText, and
+                    // each refusal is Model.hyprReasonText -- all three in the file the
+                    // QML suite can execute, for the same reason reasonText and
+                    // envelopeText live there.
+                    Text {
+                        textFormat: Text.PlainText
+                        width: body.width
+                        text: Model.hyprHeaderText(root.hyprSections)
+                        color: root.fg
+                        opacity: 0.85
+                        font.family: root.fontFam
+                        font.pixelSize: Style.font.caption
+                        wrapMode: Text.WordWrap
+                    }
+
+                    Text {
+                        textFormat: Text.PlainText
+                        width: body.width
+                        visible: root.hyprError !== ""
+                        text: root.hyprError
+                        color: root.warn
+                        font.family: root.fontFam
+                        font.pixelSize: Style.font.caption
+                        wrapMode: Text.WordWrap
+                    }
+
+                    Repeater {
+                        // An int model, the same rule the two editable lists follow: an
+                        // array model makes a Repeater destroy and rebuild every delegate
+                        // on each assignment. Nothing in these rows holds a text cursor
+                        // to lose, but the rule is cheap and the next change to this
+                        // section might.
+                        model: root.hyprSections.length
+
+                        delegate: Column {
+                            id: hyprSection
+                            width: body.width
+                            spacing: Style.spacing.xxs
+
+                            readonly property var section:
+                                root.hyprSections[index]
+                                || ({ name: "", path: "", present: false,
+                                      truncated: false, entries: [] })
+
+                            PanelSectionHeader {
+                                text: String(hyprSection.section.name).toUpperCase()
+                                foreground: root.fg
+                                fontFamily: root.fontFam
+                                elide: Text.ElideRight
+                                width: body.width
+                            }
+
+                            Text {
+                                textFormat: Text.PlainText
+                                width: body.width
+                                visible: !hyprSection.section.present
+                                         || hyprSection.section.truncated
+                                         || (hyprSection.section.entries || []).length === 0
+                                text: !hyprSection.section.present
+                                      ? "Not found: " + String(hyprSection.section.path)
+                                      : hyprSection.section.truncated
+                                        ? "This file is larger than this panel reads; "
+                                          + "what is shown is the beginning of it."
+                                        : "No line in this file is one this panel recognises."
+                                color: hyprSection.section.truncated ? root.warn : root.fg
+                                opacity: 0.8
+                                font.family: root.fontFam
+                                font.pixelSize: Style.font.caption
+                                wrapMode: Text.WordWrap
+                            }
+
+                            Repeater {
+                                model: (hyprSection.section.entries || []).length
+
+                                delegate: Column {
+                                    id: hyprEntryRow
+                                    width: body.width
+                                    spacing: 0
+
+                                    readonly property var entry:
+                                        (hyprSection.section.entries || [])[index]
+                                        || ({ line: 0, raw: "", editable: false, reason: "" })
+
+                                    Text {
+                                        textFormat: Text.PlainText
+                                        width: body.width
+                                        text: Model.hyprEntryText(hyprEntryRow.entry)
+                                        color: root.fg
+                                        opacity: hyprEntryRow.entry.editable ? 1.0 : 0.75
+                                        font.family: root.fontFam
+                                        font.pixelSize: Style.font.body
+                                        wrapMode: Text.WrapAnywhere
+                                    }
+
+                                    // The mark, and the reason in English. A code is
+                                    // never shown raw -- Model.hyprReasonText is the one
+                                    // place these become sentences, and the harness
+                                    // proves every code in Model.hyprReasons() has one.
+                                    Text {
+                                        textFormat: Text.PlainText
+                                        width: body.width
+                                        visible: !hyprEntryRow.entry.editable
+                                        text: "not editable \u2014 "
+                                              + Model.hyprReasonText(hyprEntryRow.entry.reason)
+                                        color: root.warn
+                                        font.family: root.fontFam
+                                        font.pixelSize: Style.font.caption
+                                        wrapMode: Text.WordWrap
+                                    }
+                                }
+                            }
+                        }
+                    }
+
+                    PanelSeparator {
+                        width: body.width
+                        foreground: root.fg
+                    }
+
                     // --- programs -----------------------------------------------------
+                    // Everything from here to the footer is the OLD half, hidden while
+                    // root.offersEditing is false. Hidden, not deleted -- see the
+                    // cutover comment in Model.js.
                     Row {
                         width: body.width
+                        visible: root.offersEditing
                         spacing: Style.spacing.controlGap
 
                         PanelSectionHeader {
@@ -1013,7 +1229,7 @@ Panel {
                     Column {
                         id: appPicker
                         width: body.width
-                        visible: root.addOpen
+                        visible: root.offersEditing && root.addOpen
                         spacing: Style.spacing.xs
 
                         Row {
@@ -1133,8 +1349,11 @@ Panel {
                         // says so on the row itself, which the brief's arrangement could
                         // only say in the footer about a row no longer on screen.
                         //
-                        // An int model, see programRowCount.
-                        model: root.programRowCount
+                        // An int model, see programRowCount. Zero rows while the old
+                        // half is disconnected: a Repeater's own `visible` does not
+                        // reach its delegates -- they are parented to the Repeater's
+                        // PARENT -- so hiding this list means building none of it.
+                        model: root.offersEditing ? root.programRowCount : 0
 
                         delegate: Column {
                             id: programRow
@@ -1498,6 +1717,7 @@ Panel {
                     // --- workspace to monitor -----------------------------------------
                     Row {
                         width: body.width
+                        visible: root.offersEditing
                         spacing: Style.spacing.controlGap
 
                         PanelSectionHeader {
@@ -1523,8 +1743,10 @@ Panel {
 
                     Repeater {
                         // The DRAFT rows, not the validated ones: a row the allowlist
-                        // refuses has to stay on screen to be corrected.
-                        model: root.workspaceRowCount
+                        // refuses has to stay on screen to be corrected. Zero of them
+                        // while the old half is disconnected, for the same reason as the
+                        // program list above.
+                        model: root.offersEditing ? root.workspaceRowCount : 0
 
                         delegate: Row {
                             id: workspaceRow
@@ -1568,6 +1790,7 @@ Panel {
 
                     PanelSeparator {
                         width: body.width
+                        visible: root.offersEditing
                         foreground: root.fg
                     }
 
@@ -1584,6 +1807,7 @@ Panel {
                     // away.
                     Row {
                         width: body.width
+                        visible: root.offersEditing
                         spacing: Style.spacing.controlGap
 
                         Text {
@@ -1615,7 +1839,7 @@ Panel {
                     Text {
                         textFormat: Text.PlainText
                         width: body.width
-                        visible: root.missing.length > 0
+                        visible: root.offersEditing && root.missing.length > 0
                         text: "A program that never appears is usually a misspelled command "
                             + "or a class pattern that matches nothing. Open the row and check both."
                         color: root.fg
@@ -1627,7 +1851,7 @@ Panel {
 
                     Button {
                         text: "Import current session"
-                        visible: Model.isEmptyConfig(root.draft)
+                        visible: root.offersEditing && Model.isEmptyConfig(root.draft)
                         foreground: root.fg
                         fontFamily: root.fontFam
                         bordered: true
@@ -1643,7 +1867,7 @@ Panel {
                     Text {
                         textFormat: Text.PlainText
                         width: body.width
-                        visible: root.errorText !== ""
+                        visible: root.offersEditing && root.errorText !== ""
                         text: root.errorText
                         color: root.warn
                         font.family: root.fontFam
@@ -1656,7 +1880,7 @@ Panel {
                     Column {
                         width: body.width
                         spacing: Style.spacing.xxs
-                        visible: root.rejected.length > 0
+                        visible: root.offersEditing && root.rejected.length > 0
 
                         Text {
                             textFormat: Text.PlainText
@@ -1688,7 +1912,7 @@ Panel {
                     Column {
                         width: body.width
                         spacing: Style.spacing.xxs
-                        visible: root.blocked.length > 0
+                        visible: root.offersEditing && root.blocked.length > 0
 
                         Text {
                             textFormat: Text.PlainText
@@ -1715,6 +1939,7 @@ Panel {
 
                     Row {
                         width: body.width
+                        visible: root.offersEditing
                         spacing: Style.spacing.controlGap
 
                         Text {

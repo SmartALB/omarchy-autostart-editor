@@ -1,0 +1,148 @@
+#!/usr/bin/env bash
+# Delivers the three Hyprland Lua files RAW, as one JSON envelope.
+#
+# It reads. It does not parse, and it does not write -- there is no write
+# subcommand here, no staged file beside a destination, no `mv` onto anything
+# of the user's. The parser lives in Model.js, where test/harness.qml can
+# reach it in the same engine that runs the plugin; a parser in awk would be
+# a parser no suite of this project can test.
+#
+# The three files belong to the USER, are hand-maintained, and carry his own
+# German section comments and factual notes. Nothing here may alter one byte
+# of them. The content is passed through verbatim so that a later writer can
+# do line surgery against exactly the bytes the reader saw.
+#
+# A missing file is not an error: it is an entry with present:false. Anything
+# else would make an absent windowrules.lua look like a broken plugin.
+set -uo pipefail
+
+HYPR_DIR="${XDG_CONFIG_HOME:-$HOME/.config}/hypr"
+MAX_BYTES_PER_FILE=65536   # 64 KiB -- ample for 31 lines
+FILES=(autostart.lua windowrules.lua workspaces.lua)
+
+# One cleanup for the whole script, installed before the first temporary file
+# exists. The trap body must never name a function-local variable: the trap
+# runs at exit, when that local is out of scope, and under `set -u` the
+# expansion is fatal -- so the trap removes nothing and a temporary file
+# leaks on every single run. (bin/omarchy-autostart-config learned this the
+# hard way in task 4; the lesson is copied deliberately, not rediscovered.)
+#
+# Three scratch paths, because the loop below runs three times and the
+# truncation step needs a second one: everything the script creates lives
+# under $TMPDIR, never beside a file of the user's.
+TMPFILE=""      # one file's raw bytes
+CUTFILE=""      # the same, cut back to exactly the cap
+LISTFILE=""     # one JSON object per file, slurped at the end
+cleanup() {
+    [[ -n "${TMPFILE:-}" ]]  && rm -f -- "$TMPFILE"
+    [[ -n "${CUTFILE:-}" ]]  && rm -f -- "$CUTFILE"
+    [[ -n "${LISTFILE:-}" ]] && rm -f -- "$LISTFILE"
+    return 0
+}
+trap cleanup EXIT
+
+# Every outcome leaves through one of these two, so a caller parses one
+# shape. Even jq itself failing must still produce exactly one JSON object on
+# stdout and exit 0 -- otherwise a caller sees nothing at all and cannot tell
+# why.
+ok() {
+    jq -nc "$@" || printf '{"ok":false,"error":"internal","detail":"could not build the answer"}\n'
+    exit 0
+}
+err() {
+    jq -nc --arg e "$1" --arg d "${2:-}" '{ok:false,error:$e,detail:$d}' \
+        || printf '{"ok":false,"error":"internal","detail":"could not build the error answer"}\n'
+    exit 0
+}
+
+# Read at most MAX+1 bytes and report whether the extra byte arrived. Checking
+# the size first and reading afterwards would be a different program: the file
+# can change between the two.
+#
+# Unlike the configuration reader, an oversized file here is NOT refused -- it
+# is delivered truncated with the flag set, because the user's own
+# configuration must still be SHOWN even when it has grown past what this
+# panel expects. Model.js carries the flag through to the panel, and no writer
+# may ever do line surgery on a truncated read.
+TRUNCATED=false
+read_bounded() {
+    local src="$1" dst="$2" size
+    head -c $((MAX_BYTES_PER_FILE + 1)) "$src" > "$dst" 2>/dev/null \
+        || err "unreadable" "could not read $src"
+    size="$(wc -c < "$dst")"
+    if (( size > MAX_BYTES_PER_FILE )); then
+        TRUNCATED=true
+        # Keep exactly MAX bytes, never MAX+1: the extra byte was read to
+        # DETECT the overrun, and handing it on would put a byte in the
+        # content that the cap says is not there.
+        CUTFILE="$(mktemp)" || err "internal" "could not create a temporary file"
+        head -c "$MAX_BYTES_PER_FILE" "$dst" > "$CUTFILE" 2>/dev/null \
+            || err "unreadable" "could not truncate the copy of $src"
+        mv -f "$CUTFILE" "$dst" || err "internal" "could not replace the scratch copy"
+        CUTFILE=""
+    fi
+}
+
+cmd_read() {
+    local name path mtime present
+
+    LISTFILE="$(mktemp)" || err "internal" "could not create a temporary file"
+    [[ -n "$LISTFILE" && -f "$LISTFILE" ]] || err "internal" "could not create a temporary file"
+    : > "$LISTFILE"
+
+    for name in "${FILES[@]}"; do
+        path="$HYPR_DIR/$name"
+        present=false
+        mtime=0
+        TRUNCATED=false
+
+        TMPFILE="$(mktemp)" || err "internal" "could not create a temporary file"
+        [[ -n "$TMPFILE" && -f "$TMPFILE" ]] || err "internal" "could not create a temporary file"
+        : > "$TMPFILE"
+
+        # -f, not -e: a directory or a socket at that path is not a file this
+        # reader can deliver, and reporting it as absent is the honest answer
+        # -- there is nothing to show and nothing a later writer could edit.
+        if [[ -f "$path" && -r "$path" ]]; then
+            # The mtime is captured BEFORE the content, so a caller can never
+            # be handed content newer than the stamp it was told about. A file
+            # that vanishes here produces the absent entry, not an error
+            # envelope: it simply is not there any more.
+            if mtime="$(stat -c %Y "$path" 2>/dev/null)" && [[ "$mtime" =~ ^[0-9]+$ ]]; then
+                read_bounded "$path" "$TMPFILE"
+                present=true
+            else
+                mtime=0
+            fi
+        fi
+
+        # --rawfile, so the bytes cross into JSON as one string with no shell
+        # word splitting, no `$(...)` stripping of trailing newlines, and no
+        # interpretation of a backslash. That matters here more than anywhere
+        # else in this plugin: windowrules.lua is full of "\\." and a mangled
+        # backslash would silently change the class pattern the panel shows.
+        jq -nc --arg n "$name" --arg p "$path" \
+               --argjson m "$mtime" --argjson pr "$present" --argjson t "$TRUNCATED" \
+               --rawfile c "$TMPFILE" \
+               '{name:$n, path:$p, present:$pr, mtime:$m, truncated:$t, content:$c}' \
+            >> "$LISTFILE" \
+            || err "internal" "could not describe $name"
+
+        # Removed here rather than left to the trap: the loop runs three
+        # times and only the last path would otherwise be cleaned up.
+        rm -f -- "$TMPFILE"
+        TMPFILE=""
+    done
+
+    # The order in the array is the order of FILES, which is the order the
+    # panel shows its three sections in. Model.js re-establishes that order
+    # from the names anyway (parseHyprFiles walks HYPR_FILE_NAMES, not this
+    # array), so a future reordering here cannot silently reshuffle the panel.
+    ok --arg dir "$HYPR_DIR" --slurpfile f "$LISTFILE" \
+       '{ok:true, dir:$dir, files:$f}'
+}
+
+case "${1:-}" in
+    read) shift; cmd_read "$@" ;;
+    *)    echo "usage: ${0##*/} read" >&2; exit 2 ;;
+esac

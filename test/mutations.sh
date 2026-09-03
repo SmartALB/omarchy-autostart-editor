@@ -268,6 +268,65 @@ else
       's|^## What it does$|![The Autostart Layout panel](preview.png)\n\n## What it does|'
 fi
 
+# --- the reader for the user's Hyprland Lua files ---------------------------
+#
+# THE FOUNDATION PROBE IS THE FIRST ONE. Every other property of this reader
+# is decoration if `line` and `raw` do not agree with the input, because the
+# writer that comes next does line surgery on somebody's hand-maintained
+# configuration. A reader that reports the right command against the wrong
+# line number passes every readable assertion and then edits the wrong line --
+# and this project has already had that class of defect reach a real window.
+
+probe "hypr: the line number is 1-based" "$QML_SUITE" Model.js \
+  's/n + 1, raw,/n, raw,/g'
+
+probe "hypr: raw is the line untouched, indentation included" "$QML_SUITE" Model.js \
+  's|raw: raw, fn: name|raw: String(raw).replace(/^ +/, ""), fn: name|'
+
+probe "hypr: comment and blank lines are counted like any other" "$QML_SUITE" Model.js \
+  's|: text).split("\\n");|: text).split("\\n").filter(function(l) { return l !== ""; });|'
+
+probe "hypr: a form it cannot take apart is reported, not dropped" "$QML_SUITE" Model.js \
+  's|^        entry.reason = /.*nested-call.*$|        continue;|'
+
+probe "hypr: an option it cannot represent makes the line non-editable" "$QML_SUITE" Model.js \
+  's|if (unsupported) {|if (false) {|g'
+
+probe "hypr: a refusal code cannot reach the panel unworded" "$QML_SUITE" Model.js \
+  's|^    "incomplete-call"        // the call does not end on this line$|    "incomplete-call",       // the call does not end on this line\n    "no-wording-for-this"|'
+
+probe "hypr script: the file bytes cross into JSON verbatim" "$SHELL_SUITE" bin/omarchy-autostart-hypr \
+  's|--rawfile c "\$TMPFILE"|--arg c "$(cat "$TMPFILE")"|'
+
+probe "hypr script: the truncation flag" "$SHELL_SUITE" bin/omarchy-autostart-hypr \
+  's|^    if (( size > MAX_BYTES_PER_FILE )); then$|    if false; then|'
+
+probe "hypr script: the cut is to exactly the cap, not the detection byte" "$SHELL_SUITE" bin/omarchy-autostart-hypr \
+  's|head -c "\$MAX_BYTES_PER_FILE" "\$dst"|head -c $((MAX_BYTES_PER_FILE + 1)) "$dst"|'
+
+probe "hypr script: only a readable plain file counts as present" "$SHELL_SUITE" bin/omarchy-autostart-hypr \
+  's|if \[\[ -f "\$path" \&\& -r "\$path" \]\]; then|if [[ -e "$path" ]]; then|'
+
+# --- the cutover ------------------------------------------------------------
+#
+# A cutover that is documented in prose and left armed in code is the worst of
+# the available outcomes: every other check in this repository would still
+# pass while the plugin went on applying a second source of truth at login.
+# So the switch and each of the three routes behind it are probed one at a
+# time.
+
+probe "cutover: the switch is actually off" "$STRUCT_SUITE" Model.js \
+  's|^var WRITE_PATH_ENABLED = false;$|var WRITE_PATH_ENABLED = true;|'
+
+probe "cutover: apply() refuses" "$STRUCT_SUITE" Panel.qml \
+  '/^    function apply() {$/,/^        if (!root.offersEditing) return$/{/^        if (!root.offersEditing) return$/d}'
+
+probe "cutover: the panel has one switch, not two" "$STRUCT_SUITE" Panel.qml \
+  's|^    readonly property bool offersEditing: Model.WRITE_PATH_ENABLED$|    readonly property bool offersEditing: Model.WRITE_PATH_ENABLED \&\& Model.WRITE_PATH_ENABLED|'
+
+probe "cutover: the service consults it in load()" "$STRUCT_SUITE" Service.qml \
+  's|^        if (!Model.WRITE_PATH_ENABLED) {$|        if (false) {|'
+
 # --- the guards themselves --------------------------------------------------
 #
 # Two probes of the two mechanisms that exist because an assertion which does

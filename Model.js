@@ -325,9 +325,14 @@ function firstFreeWorkspace(rows) {
 // wording, and test/run-tests.sh requires THIS LIST to be exactly the codes
 // grepped out of the script. Neither half alone would notice a code added to
 // the script, and neither would notice wording quietly dropped.
+// The codes the bin/ helpers can answer with, across BOTH of them:
+// bin/omarchy-autostart-config and bin/omarchy-autostart-hypr. A shell
+// assertion in test/run-tests.sh derives this list from the two scripts and
+// fails if one turns up without wording, so this array is not allowed to be a
+// hand-maintained mirror of them for long.
 function envelopeCodes() {
     return ["bad-schema", "insecure-permissions", "internal", "not-a-file",
-            "not-json", "stale", "too-large", "write-failed"];
+            "not-json", "stale", "too-large", "unreadable", "write-failed"];
 }
 
 // Plain wording for the envelope the bin/ helpers answer with. Every code
@@ -372,6 +377,13 @@ function envelopeText(code, detail) {
         return "The configuration could not be written, so nothing was saved." + extra;
     if (code === "internal")
         return "The configuration helper could not build its answer." + extra;
+    // bin/omarchy-autostart-hypr's own code. A file that exists but cannot be
+    // read is NOT this -- that one is reported as absent, per file, so the
+    // other two are still shown. This is the case where the read itself
+    // failed partway through, which invalidates the whole envelope.
+    if (code === "unreadable")
+        return "One of your Hyprland configuration files could not be read,"
+             + " so none of them is shown." + extra;
     // Named rather than shown bare, the same rule as reasonText's fallback.
     return "The configuration helper reported an unknown problem: " + String(code) + "." + extra;
 }
@@ -830,4 +842,584 @@ function missingIds(model, matches) {
 // inert; the only thing to handle is the quote itself.
 function shellQuote(s) {
     return "'" + String(s).replace(/'/g, "'\\''") + "'";
+}
+
+// ==========================================================================
+// THE CUTOVER
+// ==========================================================================
+//
+// ONE place, named once, read everywhere. The plugin's old half -- the JSON
+// configuration under ~/.config/omarchy/autostart-layout.json and the
+// `hyprctl eval` route that applied it at runtime -- is DISCONNECTED here,
+// not deleted.
+//
+// Why disconnected and not deleted: the writer does not exist yet, and that
+// code is the reference the writer is built from (the chunking, the byte
+// encoding, the generation discipline, the start marker). Deleting it now
+// would mean writing it twice.
+//
+// Why disconnected at all: two sources of truth for the same fact -- which
+// program goes on which workspace -- is precisely what this change of
+// direction exists to end. From here on the truth is the user's own
+// ~/.config/hypr/*.lua, which Hyprland already applies at login by itself.
+//
+// WHERE THE PLUGIN'S EFFECT COMES FROM IN THE MEANTIME: from Hyprland, not
+// from this plugin. hyprland.lua already requires hypr.autostart,
+// hypr.workspaces and hypr.windowrules, so every rule in those files keeps
+// working exactly as before, untouched. What the plugin does until the
+// writer lands is show that configuration truthfully.
+//
+// Both readers of this flag -- Panel.qml (offers nothing) and Service.qml
+// (applies nothing) -- consult THIS constant. Do not add a second switch.
+var WRITE_PATH_ENABLED = false;
+
+// ==========================================================================
+// THE READER FOR THE USER'S HYPRLAND LUA FILES
+// ==========================================================================
+//
+// Three hand-maintained files, with German section comments and factual
+// notes in them. This reader NEVER writes. What it must guarantee is the
+// foundation the later line surgery rests on:
+//
+//   * every entry carries `line` (1-based) and `raw` (the line verbatim),
+//   * a line that calls a known helper in a form this code cannot take
+//     apart is returned as an entry with editable:false and a filled `raw`
+//     -- never guessed at, never silently dropped,
+//   * a line that calls no known helper is not an entry at all. It stays
+//     part of the file and is the writer's business, not the reader's.
+//
+// Parsing is LINE BY LINE. No regular expression here ever sees more than
+// one line, and none of them nests a quantifier inside a quantifier: the
+// input is a file this plugin does not own, and a parser that can be made
+// to run for minutes over 31 lines is a defect, not a curiosity.
+//
+// The helpers are defined in /usr/share/omarchy/default/hypr/helpers.lua:
+//   o.launch(c)            = "uwsm-app -- " .. c
+//   o.exec_on_start(c)     runs c at hyprland.start
+//   o.launch_on_start(c)   = o.exec_on_start(o.launch(c))
+// which is why `o.launch_on_start("nimbus")` and
+// `o.exec_on_start(o.launch("nimbus"))` are the SAME fact and are reported
+// identically, with `launcher: "uwsm-app"`.
+
+var HYPR_FILE_NAMES = ["autostart.lua", "windowrules.lua", "workspaces.lua"];
+
+// A file this reader looks at is small and hand-written. The cap is here so
+// that a pathological input costs a bounded amount of work rather than
+// however much it feels like: the bin/ script already caps the bytes, this
+// caps the lines it is worth turning into entries.
+var MAX_HYPR_LINES = 2000;
+
+// The window-rule options this reader can represent, and therefore the only
+// ones a later writer may rewrite. Everything else -- opacity, size, tag,
+// center, tile, idle_inhibit, suppress_event and the rest of Hyprland's
+// vocabulary, all of which occur in Omarchy's own default configuration --
+// makes the line non-editable. That is the honest answer: a rewrite that
+// dropped an option it did not understand would silently change the user's
+// desktop.
+var WINDOW_FLAG_KEYS = ["float", "maximize", "fullscreen"];
+
+function isWindowFlagKey(key) {
+    for (var i = 0; i < WINDOW_FLAG_KEYS.length; i++) {
+        if (WINDOW_FLAG_KEYS[i] === key) return true;
+    }
+    return false;
+}
+
+// Why an entry could not be taken apart. Codes, never shown raw -- see
+// hyprReasonText, and the same two-sided guarantee the envelope codes have:
+// this list is what the parsers can set, and the harness proves every one of
+// them has wording.
+var HYPR_REASONS = [
+    "nested-call",           // o.exec_on_start(o.launch_webapp_sole(...))
+    "not-a-string",          // an argument that is not a plain Lua string
+    "table-match",           // o.window({ class = ..., title = ... }, ...)
+    "unsupported-option",    // a rules key this reader cannot represent
+    "missing-option",        // no workspace / no monitor to show
+    "value-out-of-range",    // a workspace or monitor outside the allowlist
+    "incomplete-call"        // the call does not end on this line
+];
+
+function hyprReasons() { return HYPR_REASONS.slice(); }
+
+function hyprReasonText(code) {
+    // THE EMPTY REASON, and it is the same defect envelopeText was fixed for:
+    // falling through to the named-code fallback with nothing to name prints
+    // the literal word "undefined" at the user. An entry can only reach the
+    // panel with editable:false and a reason set, so this is a belt -- but it
+    // is the belt whose absence was, once, the whole visible error message.
+    if (code === undefined || code === null || String(code) === "") {
+        return "This line cannot be represented by this panel, and no reason "
+             + "was recorded for it.";
+    }
+    switch (code) {
+    case "nested-call":
+        return "This line wraps another helper call, which cannot be taken "
+             + "apart into a command. It is shown exactly as it stands.";
+    case "not-a-string":
+        return "An argument on this line is not a plain quoted string, so it "
+             + "cannot be read as a value.";
+    case "table-match":
+        return "This rule matches on a table of properties (class and title, "
+             + "for instance) rather than on a single class pattern.";
+    case "unsupported-option":
+        return "This rule sets an option this panel cannot represent, so it "
+             + "is left exactly as it is.";
+    case "missing-option":
+        return "This rule does not say which workspace or monitor it means.";
+    case "value-out-of-range":
+        return "A workspace number or monitor name on this line lies outside "
+             + "what this panel accepts.";
+    case "incomplete-call":
+        return "This call does not end on its own line; only whole one-line "
+             + "calls can be read.";
+    }
+    return "This line cannot be represented by this panel: " + String(code) + ".";
+}
+
+// --- Lua string literals --------------------------------------------------
+//
+// Decoded, not copied. `"(nimbus-chatgpt\\.com__-Default)"` in the file is
+// the characters `(nimbus-chatgpt\.com__-Default)` in the compositor, and
+// that is what the panel has to show and what CLASS_RE has to judge. The
+// verbatim form is preserved anyway -- it is in `raw`.
+//
+// A character loop, not a regular expression. An escape-aware quoted-string
+// regex is the classic place a nested quantifier goes quadratic, and this
+// input is a file this plugin does not own.
+//
+// Returns { value: <decoded>, next: <index after the closing quote> } or
+// null. Null means "this reader does not understand it", which upstream
+// becomes editable:false -- never a guess.
+var LUA_SIMPLE_ESCAPES = {
+    "a": "\u0007", "b": "\b", "f": "\f", "n": "\n", "r": "\r",
+    "t": "\t", "v": "\u000b", "\\": "\\", "\"": "\"", "'": "'"
+};
+
+function luaStringAt(line, start) {
+    var quote = line.charAt(start);
+    if (quote !== "\"" && quote !== "'") return null;
+    var out = "";
+    var i = start + 1;
+    while (i < line.length) {
+        var c = line.charAt(i);
+        if (c === quote) return { value: out, next: i + 1 };
+        if (c !== "\\") { out += c; i += 1; continue; }
+        // An escape. A backslash as the last character on the line is an
+        // unterminated literal or Lua's line continuation -- neither is
+        // something this reader claims to understand.
+        if (i + 1 >= line.length) return null;
+        var e = line.charAt(i + 1);
+        if (LUA_SIMPLE_ESCAPES.hasOwnProperty(e)) {
+            out += LUA_SIMPLE_ESCAPES[e];
+            i += 2;
+            continue;
+        }
+        if (e === "x") {
+            var hex = line.substr(i + 2, 2);
+            if (!/^[0-9A-Fa-f][0-9A-Fa-f]$/.test(hex)) return null;
+            out += String.fromCharCode(parseInt(hex, 16));
+            i += 4;
+            continue;
+        }
+        if (e >= "0" && e <= "9") {
+            // Up to three decimal digits, Lua's \ddd.
+            var digits = "";
+            var j = i + 1;
+            while (j < line.length && digits.length < 3
+                   && line.charAt(j) >= "0" && line.charAt(j) <= "9") {
+                digits += line.charAt(j);
+                j += 1;
+            }
+            var code = parseInt(digits, 10);
+            if (code > 255) return null;
+            out += String.fromCharCode(code);
+            i = j;
+            continue;
+        }
+        // \z (skip whitespace), or anything Lua itself would reject.
+        return null;
+    }
+    // Ran off the end of the line without a closing quote.
+    return null;
+}
+
+// The whole of `text` as one Lua string, or null.
+function luaStringWhole(text) {
+    var s = String(text);
+    var parsed = luaStringAt(s, 0);
+    if (!parsed) return null;
+    if (parsed.next !== s.length) return null;
+    return parsed.value;
+}
+
+// --- flat Lua tables ------------------------------------------------------
+//
+// `{ workspace = "1", float = true, maximize = true }` and nothing cleverer.
+// A nested table (`size = { 875, 600 }`), a positional element, a function
+// call, an identifier as a value: all null, all editable:false upstream. The
+// point is not to parse Lua; it is to know exactly when this reader does NOT
+// understand a line.
+//
+// Returns an array of { key, value, type } in file order, or null.
+function luaFlatTable(text) {
+    var s = String(text);
+    if (s.charAt(0) !== "{" || s.charAt(s.length - 1) !== "}") return null;
+    var body = s.substring(1, s.length - 1);
+    var out = [];
+    var i = 0;
+    while (i < body.length) {
+        while (i < body.length && (body.charAt(i) === " " || body.charAt(i) === "\t")) i += 1;
+        if (i >= body.length) break;
+        // The key. Anchored and bounded, no nested quantifier.
+        var keyMatch = /^[A-Za-z_][A-Za-z0-9_]{0,63}/.exec(body.substring(i));
+        if (!keyMatch) return null;
+        var key = keyMatch[0];
+        i += key.length;
+        while (i < body.length && (body.charAt(i) === " " || body.charAt(i) === "\t")) i += 1;
+        if (body.charAt(i) !== "=") return null;
+        i += 1;
+        while (i < body.length && (body.charAt(i) === " " || body.charAt(i) === "\t")) i += 1;
+        var c = body.charAt(i);
+        if (c === "\"" || c === "'") {
+            var str = luaStringAt(body, i);
+            if (!str) return null;
+            out.push({ key: key, value: str.value, type: "string" });
+            i = str.next;
+        } else {
+            var word = /^(true|false|[0-9]{1,10})/.exec(body.substring(i));
+            if (!word) return null;
+            if (word[0] === "true" || word[0] === "false") {
+                out.push({ key: key, value: word[0] === "true", type: "boolean" });
+            } else {
+                out.push({ key: key, value: parseInt(word[0], 10), type: "number" });
+            }
+            i += word[0].length;
+        }
+        while (i < body.length && (body.charAt(i) === " " || body.charAt(i) === "\t")) i += 1;
+        if (i >= body.length) break;
+        if (body.charAt(i) !== ",") return null;
+        i += 1;
+    }
+    return out;
+}
+
+// --- the shape every line goes through ------------------------------------
+//
+// A recognised helper call must be the WHOLE statement on its line: the
+// opening parenthesis right after the name, the matching close at the end,
+// and nothing after it but whitespace and at most one semicolon. Anything
+// else -- a call continued on the next line, a trailing `-- note` after the
+// code -- becomes an entry with editable:false rather than a rewrite that
+// would eat the note.
+//
+// Returns { name, args, reason } or null. Null means the line calls nothing
+// this reader knows, and a line like that is not an entry at all.
+function hyprCallOnLine(line, names) {
+    var s = String(line);
+    var lead = /^[ \t]*/.exec(s)[0];
+    var body = s.substring(lead.length);
+    var name = null;
+    for (var i = 0; i < names.length; i++) {
+        var candidate = names[i];
+        if (body.substring(0, candidate.length) !== candidate) continue;
+        if (!/^[ \t]*\(/.test(body.substring(candidate.length))) continue;
+        name = candidate;
+        break;
+    }
+    if (name === null) return null;
+
+    var afterName = body.substring(name.length);
+    var inner = afterName.substring(afterName.indexOf("(") + 1);
+
+    // Strip the trailing `)` plus an optional `;` and whitespace. Parentheses
+    // are not balance-counted: what matters is that the statement ENDS here,
+    // and a call that does not is reported as incomplete rather than
+    // reconstructed. The `.*` is greedy and matches within one line only, so
+    // the last `)` on the line is the one taken.
+    var tail = /^(.*)\)[ \t]*;?[ \t]*$/.exec(inner);
+    if (!tail) return { name: name, args: null, reason: "incomplete-call" };
+    return { name: name, args: tail[1].replace(/^[ \t]+/, "").replace(/[ \t]+$/, ""),
+             reason: null };
+}
+
+function hyprEntry(file, lineNumber, raw, name, kind) {
+    return { file: file, line: lineNumber, raw: raw, fn: name, kind: kind,
+             editable: false, reason: null };
+}
+
+// Line splitting for all three parsers. `raw` is the element of THIS array
+// at index line-1, which is the round-trip guarantee the writer rests on --
+// comment lines and blank lines are counted like every other line, because a
+// parser that skipped them would shift every entry below by however many it
+// skipped.
+function hyprLines(text) {
+    return String(text === undefined || text === null ? "" : text).split("\n");
+}
+
+// --- autostart.lua --------------------------------------------------------
+//
+// Recognised, and reported as the SAME fact:
+//   o.launch_on_start("notes-app")
+//   o.exec_on_start(o.launch("notes-app"))     -- helpers.lua:118-120
+// both give launcher "uwsm-app" and command "notes-app".
+//
+// Recognised as its own form:
+//   o.exec_on_start("some-command")                  -- launcher "shell"
+//
+// Deliberately NOT editable, and this is the case the brief names:
+//   o.exec_on_start(o.launch_webapp_sole("Chat", "https://chat.example.org/"))
+// A nested two-argument helper whose result is a shell line built inside
+// Lua. Showing it and refusing to rewrite it is the whole point.
+var AUTOSTART_CALLS = ["o.launch_on_start", "o.exec_on_start"];
+
+function parseAutostartLua(text, fileName) {
+    var name = fileName || "autostart.lua";
+    var lines = hyprLines(text);
+    var entries = [];
+    var limit = Math.min(lines.length, MAX_HYPR_LINES);
+    for (var n = 0; n < limit; n++) {
+        var raw = lines[n];
+        var call = hyprCallOnLine(raw, AUTOSTART_CALLS);
+        if (!call) continue;
+        var entry = hyprEntry(name, n + 1, raw, call.name, "autostart");
+        if (call.reason) { entry.reason = call.reason; entries.push(entry); continue; }
+
+        var direct = luaStringWhole(call.args);
+        if (direct !== null) {
+            entry.editable = true;
+            entry.command = direct;
+            entry.launcher = (call.name === "o.launch_on_start") ? "uwsm-app" : "shell";
+            entries.push(entry);
+            continue;
+        }
+        // The one nested form helpers.lua makes exactly equivalent.
+        var wrapped = /^o\.launch[ \t]*\((.*)\)$/.exec(call.args);
+        if (call.name === "o.exec_on_start" && wrapped) {
+            var inner = luaStringWhole(wrapped[1].replace(/^[ \t]+/, "").replace(/[ \t]+$/, ""));
+            if (inner !== null) {
+                entry.editable = true;
+                entry.command = inner;
+                entry.launcher = "uwsm-app";
+                entries.push(entry);
+                continue;
+            }
+        }
+        entry.reason = /^o\.[A-Za-z_]/.test(call.args) ? "nested-call" : "not-a-string";
+        entries.push(entry);
+    }
+    return entries;
+}
+
+// --- windowrules.lua ------------------------------------------------------
+//
+// Recognised:
+//   o.window("(notes-app)", { workspace = "2" })
+//   o.window("^(Playwright-E2E-Test)$", { workspace = "1", float = true, maximize = true })
+//
+// Deliberately NOT editable:
+//   o.window({ class = "...", title = "..." }, { ... })     table-match
+//   o.window(".*", { tag = "+default-opacity" })            unsupported-option
+//   o.window({ title = ".*is sharing.*" }, { workspace = "special silent" })
+function parseWindowRulesLua(text, fileName) {
+    var name = fileName || "windowrules.lua";
+    var lines = hyprLines(text);
+    var entries = [];
+    var limit = Math.min(lines.length, MAX_HYPR_LINES);
+    for (var n = 0; n < limit; n++) {
+        var raw = lines[n];
+        var call = hyprCallOnLine(raw, ["o.window"]);
+        if (!call) continue;
+        var entry = hyprEntry(name, n + 1, raw, call.name, "window");
+        if (call.reason) { entry.reason = call.reason; entries.push(entry); continue; }
+
+        var args = call.args;
+        if (args.charAt(0) === "{") { entry.reason = "table-match"; entries.push(entry); continue; }
+        var first = luaStringAt(args, 0);
+        if (!first) { entry.reason = "not-a-string"; entries.push(entry); continue; }
+        var after = args.substring(first.next).replace(/^[ \t]+/, "");
+        if (after.charAt(0) !== ",") { entry.reason = "not-a-string"; entries.push(entry); continue; }
+        var rulesText = after.substring(1).replace(/^[ \t]+/, "").replace(/[ \t]+$/, "");
+        var pairs = luaFlatTable(rulesText);
+        if (!pairs) { entry.reason = "unsupported-option"; entries.push(entry); continue; }
+
+        entry["class"] = first.value;
+        var workspace = null, flags = {}, unsupported = false;
+        for (var p = 0; p < pairs.length; p++) {
+            var key = pairs[p].key;
+            if (key === "workspace" && pairs[p].type === "string") {
+                workspace = pairs[p].value;
+            } else if (isWindowFlagKey(key) && pairs[p].type === "boolean") {
+                flags[key] = pairs[p].value;
+            } else {
+                unsupported = true;
+            }
+        }
+        if (unsupported) { entry.reason = "unsupported-option"; entries.push(entry); continue; }
+        if (workspace === null) { entry.reason = "missing-option"; entries.push(entry); continue; }
+        // The same allowlists the rest of this file judges by. A workspace
+        // Hyprland accepts but this panel does not represent ("special
+        // silent") is shown and left alone rather than quietly narrowed.
+        if (!WORKSPACE_RE.test(workspace) || !CLASS_RE.test(first.value)) {
+            entry.reason = "value-out-of-range";
+            entries.push(entry);
+            continue;
+        }
+        entry.editable = true;
+        entry.workspace = workspace;
+        entry.flags = flags;
+        entries.push(entry);
+    }
+    return entries;
+}
+
+// --- workspaces.lua -------------------------------------------------------
+//
+// Recognised:
+//   hl.workspace_rule({ workspace = "1", monitor = "DP-4" })
+function parseWorkspacesLua(text, fileName) {
+    var name = fileName || "workspaces.lua";
+    var lines = hyprLines(text);
+    var entries = [];
+    var limit = Math.min(lines.length, MAX_HYPR_LINES);
+    for (var n = 0; n < limit; n++) {
+        var raw = lines[n];
+        var call = hyprCallOnLine(raw, ["hl.workspace_rule"]);
+        if (!call) continue;
+        var entry = hyprEntry(name, n + 1, raw, call.name, "workspace");
+        if (call.reason) { entry.reason = call.reason; entries.push(entry); continue; }
+
+        var pairs = luaFlatTable(call.args);
+        if (!pairs) { entry.reason = "not-a-string"; entries.push(entry); continue; }
+        var workspace = null, monitor = null, unsupported = false;
+        for (var p = 0; p < pairs.length; p++) {
+            var key = pairs[p].key;
+            if (key === "workspace" && pairs[p].type === "string") workspace = pairs[p].value;
+            else if (key === "monitor" && pairs[p].type === "string") monitor = pairs[p].value;
+            else unsupported = true;
+        }
+        if (unsupported) { entry.reason = "unsupported-option"; entries.push(entry); continue; }
+        if (workspace === null || monitor === null) {
+            entry.reason = "missing-option";
+            entries.push(entry);
+            continue;
+        }
+        if (!WORKSPACE_RE.test(workspace) || !MONITOR_RE.test(monitor)) {
+            entry.reason = "value-out-of-range";
+            entries.push(entry);
+            continue;
+        }
+        entry.editable = true;
+        entry.workspace = workspace;
+        entry.monitor = monitor;
+        entries.push(entry);
+    }
+    return entries;
+}
+
+function hyprParserFor(fileName) {
+    if (fileName === "autostart.lua")   return parseAutostartLua;
+    if (fileName === "windowrules.lua") return parseWindowRulesLua;
+    if (fileName === "workspaces.lua")  return parseWorkspacesLua;
+    return null;
+}
+
+// The three sections, always in file order and always all three -- a file
+// the reader did not find is a section that SAYS so, not a section that is
+// missing. Takes the `files` array of the bin/omarchy-autostart-hypr
+// envelope; it does no I/O of its own.
+function parseHyprFiles(files) {
+    var given = files || [];
+    var byName = {};
+    for (var i = 0; i < given.length; i++) {
+        if (given[i] && given[i].name) byName[String(given[i].name)] = given[i];
+    }
+    var sections = [];
+    for (var n = 0; n < HYPR_FILE_NAMES.length; n++) {
+        var fileName = HYPR_FILE_NAMES[n];
+        var f = byName[fileName] || {};
+        var present = f.present === true;
+        var parse = hyprParserFor(fileName);
+        sections.push({
+            name: fileName,
+            path: String(f.path || ""),
+            present: present,
+            truncated: f.truncated === true,
+            mtime: Number(f.mtime || 0),
+            lineCount: present ? hyprLines(f.content).length : 0,
+            entries: present ? parse(String(f.content || ""), fileName) : []
+        });
+    }
+    return sections;
+}
+
+// --- what the panel says about the read -----------------------------------
+//
+// Wording lives here, like every other decision in this project, because
+// this is the file a suite can reach.
+function hyprEntryCount(sections) {
+    var total = 0;
+    for (var i = 0; i < (sections || []).length; i++) {
+        total += (sections[i].entries || []).length;
+    }
+    return total;
+}
+
+function hyprEditableCount(sections) {
+    var total = 0;
+    for (var i = 0; i < (sections || []).length; i++) {
+        var entries = sections[i].entries || [];
+        for (var j = 0; j < entries.length; j++) if (entries[j].editable) total += 1;
+    }
+    return total;
+}
+
+// The one line in the head of the panel. It says two things and no more:
+// that editing is not possible yet, and which files were actually read.
+function hyprHeaderText(sections) {
+    var list = sections || [];
+    var read = [], absent = [];
+    for (var i = 0; i < list.length; i++) {
+        if (list[i].present) {
+            read.push(list[i].name + " (" + (list[i].entries || []).length + ")");
+        } else {
+            absent.push(list[i].name);
+        }
+    }
+    var text = "Read only -- editing your Hyprland files is not possible yet. ";
+    text += (read.length === 0) ? "No file was read."
+                                : "Read: " + read.join(", ") + ".";
+    if (absent.length > 0) text += " Not found: " + absent.join(", ") + ".";
+    return text;
+}
+
+// One entry as one line of text. The line number comes first because it is
+// the thing that makes the entry findable in the user's own editor. A
+// non-editable entry is shown by its RAW line and nothing else -- there is
+// no reading of it to offer, and inventing one is the failure this whole
+// task exists to avoid.
+function hyprEntryText(entry) {
+    var e = entry || {};
+    // `prefix`, deliberately not the obvious short word for the front of a
+    // line: test/qml-structure.sh check 1 scans this file for PATH-resolved
+    // tool names on a word boundary, and one of the tools it names is the
+    // one that word would collide with. A local variable is free to be
+    // called something else; a structural check that has to be loosened for
+    // a variable name is not.
+    var prefix = String(e.line || 0) + ": ";
+    if (!e.editable) return prefix + String(e.raw === undefined ? "" : e.raw);
+    if (e.kind === "autostart") {
+        return prefix + String(e.command) + (e.launcher === "uwsm-app" ? "" : "  (shell)");
+    }
+    if (e.kind === "window") {
+        var flags = [], f = e.flags || {};
+        for (var k = 0; k < WINDOW_FLAG_KEYS.length; k++) {
+            if (f[WINDOW_FLAG_KEYS[k]] === true) flags.push(WINDOW_FLAG_KEYS[k]);
+        }
+        return prefix + String(e["class"]) + "  \u2192  workspace " + String(e.workspace)
+             + (flags.length > 0 ? "  [" + flags.join(", ") + "]" : "");
+    }
+    if (e.kind === "workspace") {
+        return prefix + "workspace " + String(e.workspace) + "  \u2192  " + String(e.monitor);
+    }
+    return prefix + String(e.raw === undefined ? "" : e.raw);
 }

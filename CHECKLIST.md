@@ -200,6 +200,84 @@ reloads the shell after any change under the plugin directory and takes running
 
 ---
 
+## Part D -- the read of your own Hyprland files (this release)
+
+Everything in parts A to C was written for the half that is now
+**disconnected** (see `WRITE_PATH_ENABLED` in `Model.js` and the *Status*
+section of the README). It applies nothing, so most of those questions cannot
+be answered any more and none of them can go wrong. The questions below are
+the ones this release actually raises, and every one of them needs a live
+shell.
+
+### D1. Does the panel show all three files, with the right line numbers?
+
+Open the panel. Three sections, in this order: `AUTOSTART.LUA`,
+`WINDOWRULES.LUA`, `WORKSPACES.LUA`. Take any entry and compare its number
+against your own editor:
+
+```bash
+nl -ba ~/.config/hypr/windowrules.lua
+```
+
+The number the panel shows must be the line that call is on. **This is the one
+claim the write half will rest on**, and while the automated round-trip proof
+in `test/harness.qml` checks it against the file contents, only your eyes can
+check it against the panel.
+
+### D2. Is the nested Chat line shown, marked, and not rewritten?
+
+`~/.config/hypr/autostart.lua` line 8 is
+`o.exec_on_start(o.launch_webapp_sole("Chat", "https://chat.example.org/"))`.
+The panel must show that line **verbatim**, marked *not editable*, with a
+sentence saying why. If it shows a command instead, the reader has guessed --
+report it, because a guess here becomes a wrong rewrite later.
+
+### D3. Does the header say editing is not possible?
+
+One line near the top, before the three sections, saying it is read only and
+naming the files it read with their entry counts. If a file is missing it must
+be named as not found rather than silently absent.
+
+### D4. Is the old half really gone from the panel?
+
+No **PROGRAMS** section, no **WORKSPACE -> MONITOR** table, no `[+ Add]`, no
+**Import current session**, no **Launch missing**, no **Revert** and no
+**Apply**. If any of them is still on screen, the cutover is half done.
+
+### D5. Does the service apply nothing at login?
+
+The real test of the cutover, and the only one that needs a fresh session. Log
+out and back in, then confirm that your desktop came up **exactly** as
+`~/.config/hypr/*.lua` says -- because that is now the only thing arranging it.
+In particular:
+
+```bash
+hyprctl -j clients | jq -r '.[] | "\(.class)\t\(.workspace.name)"' | sort
+```
+
+Nothing should be on a workspace that only the old JSON configuration ever
+named. If you used an earlier version, four rules existed **only** there and
+are now gone unless you port them by hand into your own files:
+
+| what | where the old JSON put it | in your `*.lua`? |
+|---|---|---|
+| `Termpane` | workspace 4 | no |
+| `ai.elementlabs.modelbox` | workspace 10 | no -- `windowrules.lua` sends `LM[- ]?Studio` to 8 |
+| `nimbus-browser` | workspace 9 | no |
+| workspace 10 | monitor `DP-3` | no -- `workspaces.lua` stops at 9 |
+
+Decide for each one whether you want it. If you do, add the line to
+`windowrules.lua` or `workspaces.lua` yourself -- the plugin cannot, and that
+is the point of this release.
+
+### D6. Is the session single, and did nothing start twice?
+
+The service no longer launches anything, so `autostart.lua` is the only thing
+starting your programs. Confirm you have **one** of each after a fresh login,
+and one after an `omarchy-restart-shell` as well.
+
+---
+
 ## Part C -- open questions carried from the build
 
 Each item says what to do and what a failure looks like.
