@@ -76,13 +76,28 @@ trap 'restore_now; exit 130' INT
 trap 'restore_now; exit 143' TERM
 trap 'restore_now; exit 129' HUP
 
-run=0; failed=0
+run=0; failed=0; skipped=0
+
+# RUN A SUBSET, DELIBERATELY AND VISIBLY. A full run is 108 probes at roughly a
+# minute each, because every probe runs a whole suite twice; verifying the
+# probes added by one task should not cost an hour and a half.
+#
+# PROBE_ONLY is an extended regular expression matched against the probe NAME.
+# Unset means every probe, which is the only thing a release run may do. A
+# filtered run prints how many it skipped and says in as many words that it
+# proves nothing about them -- a subset that reports itself as a full pass is
+# exactly the blind shape this whole file exists to refuse.
+PROBE_ONLY="${PROBE_ONLY:-}"
 
 fail() { failed=$((failed + 1)); printf 'FAIL %s\n       %s\n' "$1" "$2"; }
 
 # probe NAME SUITE FILE SED-EXPRESSION
 probe() {
     local name="$1" suite="$2" file="$3" expr="$4"
+    if [[ -n "$PROBE_ONLY" ]] && ! grep -qE -- "$PROBE_ONLY" <<<"$name"; then
+        skipped=$((skipped + 1))
+        return
+    fi
     run=$((run + 1))
     local backup="$WORK/${file//\//_}"
 
@@ -474,6 +489,96 @@ probe "panel: the change editor hands focus back before it hides the field" "$ST
 probe "panel: the change editor is closed in exactly one place" "$STRUCT_SUITE" Panel.qml \
   '/^    function reload() {$/,/^    }$/{s|root.autostartCloseEditor()|root.autostartEditLine = -1|}'
 
+# --- FROM A RUNNING PROGRAM TO AN AUTOSTART COMMAND -------------------------
+#
+# Every assurance this task added, handed the input it was written to catch.
+# The ranking probe is the one that matters most: without it his Webmail
+# window offered YouTube Music first, and the suite said nothing.
+
+probe "candidates: the host in the window class is what orders the suggestions" "$QML_SUITE" Model.js \
+  's|if (host !== "" && command.indexOf(host) >= 0) hosted.push(row);|if (false) hosted.push(row);|'
+
+probe "candidates: the browser name in front of the host is not part of the host" "$QML_SUITE" Model.js \
+  's|    if (lastDash >= 0) token = token.substring(lastDash + 1);|    if (false) token = token.substring(lastDash + 1);|'
+
+probe "candidates: the volatile path prefixes" "$QML_SUITE" Model.js \
+  's|        if (first.indexOf(UNSTABLE_PREFIXES\[i\]) === 0) return true;|        if (false) return true;|'
+
+probe "candidates: a .mount_ segment anywhere in the path" "$QML_SUITE" Model.js \
+  's|    return /(\^\|\[\\/ \\t\])\\.mount_/.test(text);|    return false;|'
+
+probe "candidates: the .desktop matched on the window class ranks first" "$QML_SUITE" Model.js \
+  's|            byClass.push({ command: command, source: "desktop-class", name: name });|            other.push({ command: command, source: "desktop-class", name: name });|'
+
+probe "candidates: the .desktop matched on the running program is offered at all" "$QML_SUITE" Model.js \
+  's|        if (program !== "" && commandProgram(command) === program) {|        if (false) {|'
+
+probe "candidates: the running command line is offered last" "$QML_SUITE" Model.js \
+  's|        ordered.push({ command: running, source: "running", name: "" });|        true;|'
+
+probe "candidates: one command is offered once" "$QML_SUITE" Model.js \
+  's|        if (seen\[candidate.command\]) continue;|        if (false) continue;|'
+
+probe "candidates: an exact duplicate is told apart from the same program" "$QML_SUITE" Model.js \
+  's|    if (exact) out.push("already-present");|    if (false) out.push("already-present");|'
+
+probe "candidates: the list is capped" "$QML_SUITE" Model.js \
+  's|out.length < MAX_CANDIDATES|out.length < 999|'
+
+probe "candidates: a warning is not suppressed by another warning" "$QML_SUITE" Model.js \
+  's|    if (commandIsUnstablePath(command)) out.push("unstable-path");|    if (out.length > 0 \&\& commandIsUnstablePath(command)) out.push("unstable-path");|'
+
+probe "candidates: the two reasons for an empty list are told apart" "$QML_SUITE" Model.js \
+  's|    return windowProgram(window) === "" ? "no-command-line" : "command-too-long";|    return "no-command-line";|'
+
+probe "candidates: the program field of a window wins over its command line" "$QML_SUITE" Model.js \
+  's|    return named !== "" ? commandProgram(named) : commandProgram(source.command);|    return commandProgram(source.command);|'
+
+# --- the window helper reading /proc ----------------------------------------
+
+probe "windows: a command line past the cap is empty, not truncated" "$SHELL_SUITE" bin/omarchy-autostart-windows \
+  's|then "" else $c end|then $c else $c end|'
+
+probe "windows: the program survives as a basename, not a whole path" "$SHELL_SUITE" bin/omarchy-autostart-windows \
+  's|        def basename: split("/") \| last // "";|        def basename: .;|'
+
+probe "windows: the control characters in a command line are squashed" "$SHELL_SUITE" bin/omarchy-autostart-windows \
+  '/^        def clean:/s|"\[\[:cntrl:\]\]"|"[[:cntrl:]]zz"|'
+
+probe "windows: a tab in a command line cannot shift a field" "$SHELL_SUITE" bin/omarchy-autostart-windows \
+  "s|tr '..0..n..t..r'|tr '\\\\\\\\0\\\\\\\\n\\\\\\\\r'|"
+
+# "#" as the delimiter, not "|": the line under mutation is a jq pipeline and
+# contains the character sed would otherwise read as the end of the pattern.
+probe "windows: the pid does not leave the script" "$SHELL_SUITE" bin/omarchy-autostart-windows \
+  's#| map({ address, class, title, workspace, monitor,#| map({ address, class, title, workspace, monitor, pid,#'
+
+# --- the panel's picker -----------------------------------------------------
+
+probe "panel: the suggestions come from Model.js, not from the panel" "$STRUCT_SUITE" Panel.qml \
+  's|Model.autostartCandidatesForWindow(|Model.importFromSession(|'
+
+probe "panel: opening the running-programs list reads the applications too" "$STRUCT_SUITE" Panel.qml \
+  '/^    function autostartFromWindowToggle() {$/,/^    }$/{s|        root.startAppsRead()||}'
+
+probe "panel: picking a suggestion writes nothing" "$STRUCT_SUITE" Panel.qml \
+  '/^    function autostartUseCandidate(command) {$/,/^    }$/{s|root.autostartNewCommand = String(command \|\| "")|root.autostartWrite(root.autostartOperation("add", undefined, command))|}'
+
+probe "panel: every warning a suggestion carries is shown" "$STRUCT_SUITE" Panel.qml \
+  's|model: autostartCandidate.modelData.warnings \|\| \[\]|model: []|'
+
+probe "panel: a window with no suggestion shows its reason" "$STRUCT_SUITE" Panel.qml \
+  's|Model.candidateReasonText(|String(|'
+
+probe "panel: every suggestion row names where it came from" "$STRUCT_SUITE" Panel.qml \
+  's|Model.candidateSourceText(|String(|'
+
+probe "panel: the window row is not addressed by a bare index" "$STRUCT_SUITE" Panel.qml \
+  's|onClicked: root.autostartWindowUnfold(autostartWindowEntry.windowIndex)|onClicked: root.autostartWindowUnfold(index)|'
+
+probe "panel: the outer index is captured under a name of its own" "$STRUCT_SUITE" Panel.qml \
+  's|readonly property int windowIndex: index|readonly property int windowIndex: 0|'
+
 # --- the guards themselves --------------------------------------------------
 #
 # Two probes of the two mechanisms that exist because an assertion which does
@@ -491,4 +596,13 @@ probe "guard: a test function that is defined but never invoked" "$SHELL_SUITE" 
   '/^test_marker_release_removes_the_marker_file$/d'
 
 printf '\nmutation probes: total=%d failed=%d\n' "$run" "$failed"
+if (( skipped > 0 )); then
+    printf 'THIS WAS A FILTERED RUN: %d probe(s) were skipped by PROBE_ONLY=%s.\n' \
+           "$skipped" "$PROBE_ONLY"
+    printf 'It proves nothing about those %d, and it is not a release run.\n' "$skipped"
+fi
+if (( run == 0 )); then
+    printf 'and it ran NOTHING -- the filter matched no probe name at all.\n'
+    exit 1
+fi
 (( failed == 0 ))
