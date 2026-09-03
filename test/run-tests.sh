@@ -812,6 +812,19 @@ our_backups() {
     printf '%s\n' "${out[@]}" | sort
 }
 backup_count()  { our_backups | grep -c . || true; }
+
+# ONE WRITE AT A STAMP WE CHOOSE. The dated names need to differ, and the
+# obvious way to make them differ is to sleep a second between writes -- which
+# is what this did first, and it cost about seventeen seconds per run of this
+# suite. mutations.sh runs the suite once per shell probe, so that was minutes
+# of sleeping for nothing. The stamp seam makes the same writes distinct and
+# deterministic at no cost, which is a second reason for it to exist.
+write_at_stamp() {
+    local stamp="$1" content="$2"
+    printf '%s\n' "$content" \
+        | OMARCHY_AUTOSTART_STAMP="$stamp" "$WRITE_BIN" write \
+            --expect-mtime "$(autostart_mtime)"
+}
 newest_backup() { our_backups | tail -1; }
 oldest_backup() { our_backups | head -1; }
 
@@ -883,8 +896,11 @@ test_write_publishes_a_good_candidate() {
 test_write_backs_the_old_content_up() {
     setup_sandbox
     write_autostart_fixture
+    # BOTH stamps pinned, and the order matters: these backups are compared by
+    # NAME order, so a first write left on the clock would sort AFTER a second
+    # write given an explicit low stamp and "newest" would name the wrong one.
     local answer
-    answer="$(write_good_candidate | "$WRITE_BIN" write --expect-mtime "$(autostart_mtime)")"
+    answer="$(write_at_stamp "20260903-000001" "$(write_good_candidate)")"
     assert_eq "write: a backup exists" \
               "$([[ -f "$(newest_backup)" ]] && echo yes || echo no)" "yes"
     assert_eq "write: and it holds the content that was replaced" \
@@ -909,8 +925,7 @@ test_write_backs_the_old_content_up() {
     # made the 2026-09-03 incident hard to reason about. Each write now takes
     # its own dated copy and BOTH states survive.
     cp -p "$(autostart_path)" "$SANDBOX/second-before.lua"
-    sleep 1
-    printf '%s\n' 'o.launch_on_start("x")' | "$WRITE_BIN" write --expect-mtime "$(autostart_mtime)" >/dev/null
+    write_at_stamp "20260903-000002" 'o.launch_on_start("x")' >/dev/null
     assert_eq "write: a second write leaves TWO backups, not one" \
               "$(backup_count)" "2"
     assert_eq "write: the newest holds the state before the second write" \
@@ -935,9 +950,7 @@ test_write_keeps_only_the_newest_backups() {
     write_autostart_fixture
     local i
     for i in 1 2 3 4 5 6 7 8 9; do
-        printf '%s\n' "o.launch_on_start(\"p$i\")" \
-            | "$WRITE_BIN" write --expect-mtime "$(autostart_mtime)" >/dev/null
-        sleep 1.05
+        write_at_stamp "20260903-00000$i" "o.launch_on_start(\"p$i\")" >/dev/null
     done
     assert_eq "write: the number of backups is capped" "$(backup_count)" "5"
     # The five that survive are the five most recent. Each backup holds the
@@ -1139,9 +1152,7 @@ test_writing_never_touches_a_backup_that_is_not_ours() {
     printf 'omarchy\n' > "$(hypr_dir)/autostart.lua.pre-apply.20260828-144312.bak"
     local i
     for i in 1 2 3 4 5 6 7; do
-        printf '%s\n' "o.launch_on_start(\"q$i\")" \
-            | "$WRITE_BIN" write --expect-mtime "$(autostart_mtime)" >/dev/null
-        sleep 1.05
+        write_at_stamp "20260903-00000$i" "o.launch_on_start(\"q$i\")" >/dev/null
     done
     assert_eq "write: seven writes past the cap left five of ours" "$(backup_count)" "5"
     assert_eq "write: the legacy autostart.lua.bak is byte for byte what it was" \
