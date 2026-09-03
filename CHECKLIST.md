@@ -148,6 +148,19 @@ step (`autostart.lua.bak`), and this walkthrough writes more than once.
    the first click it must say only `Autostart Editor`: the count is unknown
    at that point, not zero.
 2. A click opens the panel; a second click closes it. `Escape` closes it too.
+   **And the build is in the bottom right of the panel**, quiet and
+   right-aligned, reading `v` and the version -- `v1.0.0` for this release.
+   Check it against the manifest on THAT machine:
+
+   ```bash
+   jq -r .version ~/.config/omarchy/plugins/smartalb.autostart/manifest.json
+   ```
+
+   The two must agree. This line exists so you can tell two machines apart at
+   a glance, so a number that is stale or absent defeats its whole purpose --
+   an empty footer means the panel is not the build you think it is. The
+   number is not written in `Panel.qml`; it comes from `Model.VERSION`, which
+   a shell assertion pins to the manifest in both directions.
 3. Every entry of your file is listed, each with its line number. Compare
    against your own editor:
 

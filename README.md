@@ -56,6 +56,12 @@ removed: for those, edit the file by hand. That is a real limitation and it is
 named on screen rather than hidden. A line that calls none of those helpers is
 not an entry at all; it belongs to your file.
 
+The build is in the bottom right of the panel -- `v1.0.0` for this release --
+so two machines running different builds can be told apart at a glance. It is
+not written into the panel: it comes from one constant that a test pins to
+`manifest.json` in both directions, so the number shown is the number the
+build actually is.
+
 Nothing here needs elevated rights. There is no system-wide tier, no elevation
 helper, no package installation and no rule file of any kind. Everything the
 plugin does, it does as you, in your own configuration directory.

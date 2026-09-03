@@ -1022,6 +1022,37 @@ else
   fi
 fi
 
+# 14d -- THE VERSION IN THE FOOTER IS NOT SPELLED IN THE PANEL.
+#
+#        The footer shows the build so a user testing two machines can tell
+#        which one is in front of them, which makes "the number shown is the
+#        number this build is" the whole requirement. A literal written here
+#        would be a second source of truth, and the shell suite's binding
+#        (Model.VERSION == manifest.json's version) would go on passing while
+#        the panel named a different build.
+#
+#        Three claims: no version-shaped literal anywhere in Panel.qml, the
+#        footer reaches the version through Model, and Model.js declares it
+#        exactly once. Comment-stripped, so the paragraph above the footer
+#        that explains all this cannot satisfy any of them.
+version_lit="$(grep -nE '"[0-9]+\.[0-9]+\.[0-9]+"' <<<"$stripped_panel" || true)"
+[[ -z "$version_lit" ]] && ok "version: Panel.qml spells no version literal" \
+                        || bad "version: Panel.qml spells no version literal" \
+                               "a version-shaped literal is in the code of Panel.qml, which makes it a second source of truth: $version_lit"
+if grep -qE '(^|[^A-Za-z0-9_.])Model\.versionText\(' <<<"$stripped_panel"; then
+  ok "version: the footer takes the version from Model.versionText()"
+else
+  bad "version: the footer takes the version from Model.versionText()" \
+      "no Model.versionText( call in the code of Panel.qml -- the footer either shows nothing or names a build of its own"
+fi
+version_decls="$(grep -cE '^var VERSION[[:space:]]*=' <<<"$stripped_model" || true)"
+if [[ "$version_decls" == "1" ]]; then
+  ok "version: Model.js declares VERSION exactly once"
+else
+  bad "version: Model.js declares VERSION exactly once" \
+      "found $version_decls declarations of 'var VERSION =' in the code of Model.js -- the shell suite pins the first, the panel reads the last"
+fi
+
 # 15 -- and what it must NOT declare.
 #
 #       THE MECHANISM, MEASURED, because the first version of this comment got

@@ -261,6 +261,32 @@ probe "name: the manifest's two names must agree with each other" "$STRUCT_SUITE
 probe "name: and the shell suite still pins the name itself" "$SHELL_SUITE" manifest.json \
   's|"name": "Autostart Editor"|"name": "Autostart Somethingelse"|'
 
+# --- the version in the panel footer ---------------------------------------
+#
+# The footer exists so a user testing two machines can tell which build is in
+# front of them, which makes a stale number worse than no number. Model.VERSION
+# and manifest.json's `version` are two copies of one fact, so each side is
+# bumped on its own here -- the equality must refuse either -- and a version
+# literal is planted in Panel.qml, which must refuse a second source of truth.
+
+probe "version: Model.VERSION bumped alone must be refused" "$SHELL_SUITE" Model.js \
+  's|^var VERSION        = "1.0.0";$|var VERSION        = "1.0.1";|'
+
+probe "version: the manifest bumped alone must be refused" "$SHELL_SUITE" manifest.json \
+  's|"version": "1.0.0"|"version": "1.0.1"|'
+
+probe "version: a version literal in Panel.qml is a second source of truth" "$STRUCT_SUITE" Panel.qml \
+  's|text: Model.versionText()|text: "1.0.0"|'
+
+probe "version: the footer must reach the version through Model" "$SHELL_SUITE" Panel.qml \
+  's|text: Model.versionText()|text: "1.0.0"|'
+
+probe "version: the v prefix is what makes it read as a version" "$QML_SUITE" Model.js \
+  's|return v === "" ? "" : "v" + v;|return v;|'
+
+probe "version: an empty version must not render as a bare v" "$QML_SUITE" Model.js \
+  's|return v === "" ? "" : "v" + v;|return "v" + v;|'
+
 probe "readme: a privileged verb in prose" "$SHELL_SUITE" README.md \
   's/^## Tests$/## Tests\n\nIf a test fails, re-run it with sudo.\n/'
 

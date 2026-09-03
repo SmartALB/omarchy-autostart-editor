@@ -1216,6 +1216,34 @@ Panel {
                         }
                     }
 
+                    // THE BUILD, bottom right, quiet. A user testing this on a
+                    // second machine needs to see at a glance which build is in
+                    // front of them, and that is the only thing this line is for.
+                    //
+                    // THE NUMBER IS NOT SPELLED HERE. It comes from
+                    // Model.versionText(), and a structural check forbids a
+                    // version-shaped literal anywhere in this file: a number
+                    // written here would be a second source of truth, and the
+                    // one thing this indicator must not do is name a build it
+                    // is not. A shell assertion binds Model.VERSION to
+                    // manifest.json's `version` in both directions.
+                    //
+                    // The LAST child of `body` and full-width with the text
+                    // pushed right, rather than a positioned overlay: it adds
+                    // one caption line below the list and moves nothing beside
+                    // it. `visible` follows the text, so an empty version
+                    // occupies no space at all instead of leaving a stray "v".
+                    Text {
+                        textFormat: Text.PlainText
+                        width: body.width
+                        horizontalAlignment: Text.AlignRight
+                        visible: text !== ""
+                        text: Model.versionText()
+                        color: root.fg
+                        opacity: 0.5
+                        font.family: root.fontFam
+                        font.pixelSize: Style.font.caption
+                    }
                 }
             }
         }

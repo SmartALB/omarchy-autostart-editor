@@ -21,6 +21,43 @@
 // hand-maintained by its owner, and string.char(98,114,97,118,101) in it
 // would be safe and useless.
 
+// THE BUILD, SHOWN IN THE PANEL so a user looking at two machines can tell
+// which one is in front of them. That is the whole purpose, and it makes
+// "the number shown is the number this build actually is" the requirement --
+// a stale literal would defeat it entirely.
+//
+// WHY A LITERAL HERE AND NOT A READ OF manifest.json AT RUNTIME. Reading the
+// installed manifest would make drift impossible by construction, and it was
+// the first choice until two things ruled it out:
+//
+//   * the reading code would live in Panel.qml, which imports Quickshell.Io
+//     and which NO suite in this project can execute. A read that silently
+//     fails -- a path that does not resolve, JSON that does not parse, a
+//     `loaded` signal that never fires -- shows an empty footer, on the very
+//     machine where nothing is watching. This project has three recorded
+//     defects of exactly that shape, all in code no suite could run: the
+//     start marker that never claimed, `Process.NormalExit` evaluating to
+//     undefined, and a two-argument handler on a one-argument signal.
+//   * no plugin shipped with this platform reads its own manifest at runtime
+//     (checked across /usr/share/omarchy/shell/plugins), so there is no
+//     precedent to follow and `FileView` is exported in the installed type
+//     information only as `FileViewInternal`.
+//
+// So the number is a literal in the ONE file every suite here can execute,
+// and drift is refused where drift actually happens -- at release, in the
+// repository: a shell assertion requires this to equal manifest.json's
+// `version` exactly, in both directions, and three mutation probes bump each
+// side on its own. Panel.qml spells no version at all; a structural check
+// forbids a version-shaped literal there, so this cannot become the second
+// source of truth it was written to avoid.
+//
+// AND BINDING THE REPOSITORY BINDS THE ARTIFACT, which is only true since
+// `install` was fixed to replace the plugin directory rather than copy into
+// it: the installed manifest.json and the installed Model.js are now provably
+// from one source tree, asserted file-for-file by
+// test_install_removes_what_the_plugin_no_longer_ships.
+var VERSION        = "1.0.0";
+
 var MAX_NAME       = 100;
 var MAX_COMMAND    = 500;
 
@@ -93,6 +130,18 @@ function envelopeText(code, detail) {
     // Named rather than shown bare -- the same rule every other wording
     // function in this file follows.
     return "The helper reported an unknown problem: " + String(code) + "." + extra;
+}
+
+// The build, as the panel's footer shows it. A "v" prefix and nothing else:
+// this is a footnote, and a sentence around it would make it a heading.
+//
+// The empty case returns "" rather than a bare "v", and the footer binds its
+// visibility on that -- showing "v" with no number would be worse than
+// showing nothing, because the one thing this indicator must never do is
+// look like it answered.
+function versionText() {
+    var v = String(VERSION === undefined || VERSION === null ? "" : VERSION);
+    return v === "" ? "" : "v" + v;
 }
 
 // Remove the field codes of the desktop entry specification. %% is an escaped

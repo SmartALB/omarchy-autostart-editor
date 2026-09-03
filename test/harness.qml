@@ -151,6 +151,37 @@ QtObject {
             check("envelopeText: the writer's no-lua-compiler names the package to install",
                   Model.envelopeText("no-lua-compiler", "").indexOf("lua51") >= 0, true);
 
+            // --- versionText ---------------------------------------------------
+            //
+            // The panel's footer. The shell suite pins Model.VERSION to
+            // manifest.json's `version`; these pin the RENDERING of it, which
+            // is the half no grep over the manifest can see.
+            check("versionText: it is the version with a v in front",
+                  Model.versionText(), "v" + Model.VERSION);
+            check("versionText: and the version itself is reachable and non-empty",
+                  Model.VERSION.length > 0, true);
+            check("versionText: it names the whole version, not a truncation",
+                  Model.versionText().indexOf(Model.VERSION) >= 0, true);
+            // INDEPENDENT OF THE IMPLEMENTATION, and that is the point: the
+            // three assertions above all derive their expectation from
+            // Model.VERSION, so they hold the RELATIONSHIP and would accept a
+            // malformed version travelling intact to the footer. This one
+            // judges the rendered string on its own.
+            check("versionText: it reads as a version and not as arbitrary text",
+                  /^v[0-9]+\.[0-9]+\.[0-9]+$/.test(Model.versionText()), true);
+            // The empty case, which the footer's `visible` binding depends on:
+            // a bare "v" would look like an answer where there is none.
+            check("versionText: nothing to show is shown as nothing, not as a bare v",
+                  (function() {
+                      var saved = Model.VERSION;
+                      Model.VERSION = "";
+                      var got = Model.versionText();
+                      Model.VERSION = saved;
+                      return got;
+                  })(), "");
+            check("versionText: and restoring it put the real version back",
+                  Model.versionText(), "v" + Model.VERSION);
+
             // --- shellQuote ----------------------------------------------------
             check("shellQuote: plain path",      Model.shellQuote("/a/b"), "'/a/b'");
             check("shellQuote: a space",         Model.shellQuote("a b"), "'a b'");

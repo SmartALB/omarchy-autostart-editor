@@ -1251,6 +1251,53 @@ test_manifest_is_sound() {
               "$(jq -r '.barWidget.allowMultiple' "$m")" "false"
 }
 
+# THE DISPLAYED BUILD MUST BE THE BUILD, and this is the assertion that makes
+# the panel's footer trustworthy.
+#
+# The panel shows Model.versionText(), which is "v" + Model.VERSION. The
+# manifest carries `version` independently, and the platform requires it
+# (PluginRegistry.validateManifest lists it among the required keys). Two
+# copies of one fact, so they are pinned to each other by EXACT EQUALITY in
+# both directions -- not a substring, not a prefix.
+#
+# WHY THIS IS THE BINDING RATHER THAN A RUNTIME READ: reading manifest.json
+# from Panel.qml would make drift impossible, but the reading code would live
+# in the one file no suite here can execute, and a read that silently fails
+# shows an empty footer on the machine where nobody is watching. See the
+# comment on VERSION in Model.js for the full argument. Drift is therefore
+# refused HERE, at release, in the repository -- and since `install` replaces
+# the plugin directory rather than copying into it, the installed
+# manifest.json and the installed Model.js are provably from one source tree,
+# which is what makes a repository-bound assertion bind the artifact too.
+#
+# FAIL-CLOSED ON BOTH EXTRACTIONS: an empty value on either side would make
+# the equality vacuously true if the other were empty too, and "" == "" is
+# exactly the green-over-nothing shape this project keeps a record of.
+test_the_displayed_version_is_the_manifest_version() {
+    local root="$PWD/.." m="$PWD/../manifest.json"
+    local from_model from_manifest
+    from_model="$(sed -n 's/^var VERSION *= *"\([^"]*\)";$/\1/p' "$root/Model.js")"
+    from_manifest="$(jq -r '.version // ""' "$m")"
+
+    assert_eq "version: Model.js declares a version at all" \
+              "$([[ -n "$from_model" ]] && echo yes || echo no)" "yes"
+    assert_eq "version: the manifest declares one at all" \
+              "$([[ -n "$from_manifest" ]] && echo yes || echo no)" "yes"
+    assert_eq "version: Model.VERSION is exactly the manifest's version" \
+              "$from_model" "$from_manifest"
+    # Exactly one declaration, so a second `var VERSION` further down cannot
+    # be the one the panel actually reads while this test pins the first.
+    assert_eq "version: Model.js declares it exactly once" \
+              "$(grep -cE '^var VERSION *=' "$root/Model.js")" "1"
+    # And the panel spells no version of its own. The structural suite owns
+    # this claim too; it is repeated here because this is the test that would
+    # be read by someone bumping a release.
+    assert_eq "version: Panel.qml spells no version literal of its own" \
+              "$(grep -cE '"[0-9]+\.[0-9]+\.[0-9]+"' "$root/Panel.qml" || true)" "0"
+}
+
+test_the_displayed_version_is_the_manifest_version
+
 test_repository_has_what_validation_looks_for() {
     local root="$PWD/.."
     for f in README.md LICENSE CHECKLIST.md manifest.json; do
