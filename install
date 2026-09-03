@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# Installs Autostart Layout into ~/.config/omarchy/plugins/.
+# Installs Autostart Editor into ~/.config/omarchy/plugins/.
 #
 # Nothing privileged happens here and there is no system-wide tier -- no
 # option, no flag, no code path. This plugin needs no root, no elevation

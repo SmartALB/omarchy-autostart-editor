@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# Removes Autostart Layout.
+# Removes Autostart Editor.
 #
 # It removes the plugin and nothing else. There is no configuration of its own
 # to keep or delete: the only file it ever wrote is ~/.config/hypr/autostart.lua,

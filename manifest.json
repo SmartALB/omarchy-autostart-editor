@@ -1,7 +1,7 @@
 {
   "schemaVersion": 1,
   "id": "smartalb.autostart",
-  "name": "Autostart Layout",
+  "name": "Autostart Editor",
   "version": "1.0.0",
   "author": "SmartALB",
   "license": "MIT",
@@ -11,7 +11,7 @@
     "barWidget": "BarWidget.qml"
   },
   "barWidget": {
-    "displayName": "Autostart Layout",
+    "displayName": "Autostart Editor",
     "description": "Show, add, change and remove the entries in your autostart.lua",
     "category": "System",
     "allowMultiple": false,

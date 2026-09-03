@@ -1,4 +1,4 @@
-# Autostart Layout
+# Autostart Editor
 
 An Omarchy bar widget for Hyprland: an editor for the one Hyprland file that
 decides which programs your session starts.
@@ -127,8 +127,8 @@ right now into a line that starts it next time.
 ## Install
 
 ```bash
-git clone https://github.com/SmartALB/omarchy-autostart-layout.git
-cd omarchy-autostart-layout
+git clone https://github.com/SmartALB/omarchy-autostart-editor.git
+cd omarchy-autostart-editor
 ./install
 omarchy-restart-shell
 ```

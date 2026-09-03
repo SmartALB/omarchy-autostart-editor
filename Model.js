@@ -1,4 +1,4 @@
-// Autostart Layout -- all decision logic, plain JavaScript, no QML API.
+// Autostart Editor -- all decision logic, plain JavaScript, no QML API.
 // Kept free of QML imports so it can run headless in test/harness.qml.
 //
 // This plugin edits ONE file: ~/.config/hypr/autostart.lua. It reads that

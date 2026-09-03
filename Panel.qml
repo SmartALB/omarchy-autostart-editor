@@ -631,7 +631,7 @@ Panel {
 
                     Text {
                         textFormat: Text.PlainText
-                        text: "Autostart Layout"
+                        text: "Autostart Editor"
                         color: root.fg
                         font.family: root.fontFam
                         font.pixelSize: Style.font.title

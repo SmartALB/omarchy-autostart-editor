@@ -961,13 +961,65 @@ else
 fi
 
 # A signal nobody emits is a signal the bar widget waits on forever: its
-# tooltip would stay at the honest-but-permanent "Autostart Layout".
+# tooltip would stay at the honest-but-permanent "Autostart Editor".
 if grep -qE '(^|[^A-Za-z0-9_.])(root\.)?counted[[:space:]]*\(' \
      <<<"$(grep -v 'signal[[:space:]]\+counted' <<<"$stripped_panel")"; then
   ok "Panel: counted is actually emitted, not only declared"
 else
   bad "Panel: counted is actually emitted, not only declared" \
       "no call to counted(...) anywhere outside its own signal declaration -- the bar widget's counts would never arrive"
+fi
+
+# 14c -- THE DISPLAY NAME IS ONE STRING, AND IT LIVES IN FOUR PLACES.
+#
+#        manifest.json's `name`, manifest.json's `barWidget.displayName`,
+#        BarWidget.qml's tooltip and Panel.qml's panel header are four
+#        independent literals of the same fact, and until this check nothing
+#        bound any of them to any other -- the shell suite pinned
+#        `manifest: name` alone.
+#
+#        THE RENAME IS WHAT EXPOSED THAT. "Autostart Layout" became
+#        "Autostart Editor" in all four, and a suite that held only the first
+#        would have gone green with a bar tooltip and a panel header still
+#        naming a design that no longer exists. Nothing about that is
+#        hypothetical: the same shape, in the same file pair, is how
+#        BarWidget.qml was left connecting a two-argument handler to a
+#        one-argument signal earlier in this same removal.
+#
+#        The manifest is the source, because it is what `omarchy plugin list`
+#        and the marketplace show. The two QML files must each carry that
+#        exact string as a literal, read comment-stripped like everything else
+#        here, so a comment quoting the name cannot stand in for the code that
+#        displays it.
+#
+#        FAIL-CLOSED on reading the manifest at all: an empty or absent name
+#        would make the two containment checks below vacuously true, since
+#        every file contains the empty string.
+manifest_name="$(jq -r '.name // ""' manifest.json 2>/dev/null || true)"
+manifest_display="$(jq -r '.barWidget.displayName // ""' manifest.json 2>/dev/null || true)"
+if [[ -z "$manifest_name" ]]; then
+  bad "display name: the manifest names the plugin at all" \
+      "manifest.json has no non-empty .name -- every check below it would be about the empty string"
+else
+  ok "display name: the manifest names the plugin at all"
+  if [[ "$manifest_display" == "$manifest_name" ]]; then
+    ok "display name: manifest .name and .barWidget.displayName are the same string"
+  else
+    bad "display name: manifest .name and .barWidget.displayName are the same string" \
+        "name='$manifest_name' displayName='$manifest_display' -- the plugin list and the bar would show different names"
+  fi
+  if grep -qF "\"$manifest_name\"" <<<"$stripped_barwidget"; then
+    ok "display name: BarWidget.qml's tooltip carries the manifest's name"
+  else
+    bad "display name: BarWidget.qml's tooltip carries the manifest's name" \
+        "the literal \"$manifest_name\" is not in the code of BarWidget.qml -- the bar would name something the manifest does not"
+  fi
+  if grep -qF "\"$manifest_name\"" <<<"$stripped_panel"; then
+    ok "display name: Panel.qml's header carries the manifest's name"
+  else
+    bad "display name: Panel.qml's header carries the manifest's name" \
+        "the literal \"$manifest_name\" is not in the code of Panel.qml -- the panel would name something the manifest does not"
+  fi
 fi
 
 # 15 -- and what it must NOT declare.

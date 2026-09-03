@@ -241,6 +241,26 @@ probe "install: only a directory the installer made may be removed" "$SHELL_SUIT
 probe "uninstall: a target that does not resolve to the plugin directory is refused" "$SHELL_SUITE" uninstall \
   's|^    if \[\[ -z "$ID" \|\| "${target_real##\*/}" != "$ID" \|\| "${target_real%/\*}" != "$plugins_real" \]\]; then$|    if false; then|'
 
+# --- the display name is one string ----------------------------------------
+#
+# It lives in four literals -- manifest.json's name, its displayName,
+# BarWidget.qml's tooltip and Panel.qml's header -- and until the rename to
+# "Autostart Editor" nothing bound any of them to any other. Each place is
+# probed on its own, so a rename that reaches three of the four fails here
+# rather than shipping a bar that names a design which no longer exists.
+
+probe "name: the bar tooltip must carry the manifest's name" "$STRUCT_SUITE" BarWidget.qml \
+  's|Autostart Editor|Autostart Somethingelse|g'
+
+probe "name: the panel header must carry the manifest's name" "$STRUCT_SUITE" Panel.qml \
+  's|text: "Autostart Editor"|text: "Autostart Somethingelse"|'
+
+probe "name: the manifest's two names must agree with each other" "$STRUCT_SUITE" manifest.json \
+  's|"displayName": "Autostart Editor"|"displayName": "Autostart Somethingelse"|'
+
+probe "name: and the shell suite still pins the name itself" "$SHELL_SUITE" manifest.json \
+  's|"name": "Autostart Editor"|"name": "Autostart Somethingelse"|'
+
 probe "readme: a privileged verb in prose" "$SHELL_SUITE" README.md \
   's/^## Tests$/## Tests\n\nIf a test fails, re-run it with sudo.\n/'
 
@@ -266,7 +286,7 @@ if [[ -f preview.png ]]; then
       's|^!\[.*\](preview\.png)$||'
 else
     probe "readme: no image reference while preview.png does not exist" "$SHELL_SUITE" README.md \
-      's|^## What it does$|![The Autostart Layout panel](preview.png)\n\n## What it does|'
+      's|^## What it is$|![The Autostart Editor panel](preview.png)\n\n## What it is|'
 fi
 
 # --- the reader for the user's Hyprland Lua files ---------------------------

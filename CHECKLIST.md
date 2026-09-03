@@ -48,7 +48,7 @@ allowed to load the plugin into a running session.
    two-line summary and above `## What it is`:
 
    ```markdown
-   ![The Autostart Layout panel](preview.png)
+   ![The Autostart Editor panel](preview.png)
    ```
 
    The README deliberately ships **without** that line, because a reference to
@@ -145,7 +145,7 @@ step (`autostart.lua.bak`), and this walkthrough writes more than once.
 
 1. The widget is visible in the bar, and its tooltip names the number of
    entries your `autostart.lua` actually has -- count them yourself. Before
-   the first click it must say only `Autostart Layout`: the count is unknown
+   the first click it must say only `Autostart Editor`: the count is unknown
    at that point, not zero.
 2. A click opens the panel; a second click closes it. `Escape` closes it too.
 3. Every entry of your file is listed, each with its line number. Compare

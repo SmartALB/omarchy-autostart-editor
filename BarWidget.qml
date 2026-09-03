@@ -62,9 +62,9 @@ BarWidget {
 
     readonly property string tooltip:
         root.countsKnown
-            ? "Autostart Layout \u2014 " + root.programCount
+            ? "Autostart Editor \u2014 " + root.programCount
               + (root.programCount === 1 ? " program" : " programs")
-            : "Autostart Layout"
+            : "Autostart Editor"
 
     readonly property bool opened: panelLoader.item ? panelLoader.item.opened : false
     readonly property bool popoutSwitchClosing:
