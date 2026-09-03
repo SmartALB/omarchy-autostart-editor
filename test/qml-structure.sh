@@ -2,7 +2,7 @@
 # WHAT THIS SCRIPT IS, AND WHAT IT IS NOT
 #
 # It is a smoke detector for the files no test can execute: Quickshell.Io
-# does not exist outside the Quickshell runtime, so Runners.qml, Service.qml,
+# does not exist outside the Quickshell runtime, so Runners.qml,
 # BarWidget.qml and Panel.qml have no runnable suite at all. These checks
 # catch an honest mistake -- a limit dropped during a refactor, a Process
 # added without a teardown line, an absolute path turned into a bare name.
@@ -15,12 +15,13 @@
 # Verifying that a call resolves to the vetted helper, or that a value is
 # reachable, needs a parser, and this is not one.
 #
-# What IS guaranteed lives elsewhere: every value that reaches Lua is
-# covered by behavioural tests in test/harness.qml, verified by stripping
-# each of the eleven luaBytes() call sites in turn and watching each one
-# turn an assertion red. Everything about actual runtime behaviour is
-# covered only by the manual checklist in the final task -- and that is
-# where it has to stay honest.
+# What IS guaranteed lives elsewhere: every byte this plugin writes into the
+# user's autostart.lua is covered by behavioural tests in test/harness.qml --
+# byte-exact expected file contents for every operation, plus the assertion
+# that old and new differ in exactly one line -- and by the `luac5.1 -p` gate
+# in bin/omarchy-autostart-hypr-write, which test/run-tests.sh exercises for
+# real. Everything about actual runtime behaviour is covered only by the
+# manual checklist -- and that is where it has to stay honest.
 set -uo pipefail
 SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
 cd "$SCRIPT_DIR/.."
@@ -181,12 +182,12 @@ grep -A2 'function runnerErr' <<<"$stripped_runners" | grep -q '2> >(' \
 # 4b -- neither collecting helper terminates its command group with a
 #       semicolon directly against the closing brace, in any spacing --
 #       "; }", ";}", ";  }" and so on. The autostart's command field is a
-#       shell command line by design (Model.js: launchCommand) and may
-#       legitimately end in "&", ";", or a trailing #comment, and
+#       shell command line by design and may legitimately end in "&", ";",
+#       or a trailing #comment, and
 #       `bash -n` confirms "{ foo & ;}" fails the same way "{ foo & ; }"
 #       does: a semicolon immediately before "}" is a syntax error
 #       regardless of the whitespace around it. Termination must be a
-#       newline instead, the same fix launchCommand already uses. A literal
+#       newline instead. A literal
 #       "; }" substring search misses the no-space variant, so this matches
 #       a semicolon followed by any amount of whitespace (including none)
 #       and then the brace.
@@ -423,39 +424,40 @@ hits="$(grep_stripped_all 'hl\.(window_rule|workspace_rule)' || true)"
 [[ -z "$hits" ]] && ok "no rule construction in any qml file" \
                  || bad "no rule construction in any qml file" "$hits"
 
-# 7b -- cheap first line ONLY: every apparent rule-construction site in
-#       Model.js at least mentions luaBytes somewhere in a small window
-#       around it. This is NOT the guarantee that the SPECIFIC dynamic value
-#       on that construction was encoded -- a grep cannot tell
-#       "luaBytes(key)", already present twice on windowRuleStatement's
-#       opener line, from "luaBytes(placement.value)" having been quietly
-#       dropped elsewhere on the same statement. That happened in review and
-#       this check did not catch it: it stayed green with placement.value
-#       leaking un-encoded, because luaBytes( was still present for the
-#       OTHER two fields on the line.
+# 7b -- AND MODEL.JS BUILDS NO RULE EITHER, which is the half check 7a could
+#       not see: qml_files() lists only ./*.qml, and Model.js is the file that
+#       used to build every rule chunk in this plugin.
 #
-#       The real, per-value guarantee is a set of behavioural tests in the
-#       real engine, in test/harness.qml: "chunks/reconcile: no configured
-#       value appears literally in the payload" build a chunk with
-#       distinctive class/monitor/address values and assert none survive as
-#       readable text, and "chunks/reconcile: nothing numeric survives
-#       outside string.char()" additionally cover the workspace field, which
-#       cannot be given a distinctive value (WORKSPACE_RE permits only
-#       digits) by asking a stronger question instead: strip every
-#       string.char(...) group and require no digit to remain anywhere.
-#       Trust those four, not this one, for the encoding property.
+#       THIS REPLACES A CHECK THAT WENT VACUOUS. What stood here required
+#       every apparent rule-construction site in Model.js to mention
+#       luaBytes() somewhere near it. There are no such sites left, so the
+#       loop had nothing to iterate and the check passed over an empty set --
+#       the blind-test shape this file exists to refuse. Its subject was the
+#       byte-encoding of the values that crossed into a generated `eval`
+#       payload, and the four behavioural assertions in test/harness.qml it
+#       deferred to for the real per-value guarantee went with buildRuleChunks.
+#
+#       An absence over a real file is what is checkable now, and it is worth
+#       checking: it is what stops the removed half growing back one line at a
+#       time in the file no runtime is needed to reach.
 stripped_model="$(strip_comments Model.js)"
-hits=""
-while IFS= read -r m; do
-  [[ -z "$m" ]] && continue
-  lineno="${m%%:*}"
-  window="$(sed -n "${lineno},$((lineno + 2))p" <<<"$stripped_model")"
-  grep -q 'luaBytes(' <<<"$window" || hits="$hits
-$m"
-done < <(grep -nE 'hl\.(window_rule|workspace_rule|dsp\.[a-z_.]+)\(\{' <<<"$stripped_model" || true)
-hits="$(sed '/^$/d' <<<"$hits")"
-[[ -z "$hits" ]] && ok "every apparent rule-building site in Model.js at least mentions luaBytes (coarse; see harness.qml for the real per-value guarantee)" \
-                 || bad "every apparent rule-building site in Model.js at least mentions luaBytes (coarse; see harness.qml for the real per-value guarantee)" "$hits"
+rule_hits="$(grep -nE 'hl\.(window_rule|workspace_rule|dsp\.)' <<<"$stripped_model" || true)"
+[[ -z "$rule_hits" ]] && ok "Model.js builds no Hyprland rule and no dispatch either" \
+                      || bad "Model.js builds no Hyprland rule and no dispatch either" "$rule_hits"
+
+# 7c -- and no qml file hands anything to `hyprctl eval` or `hyprctl dispatch`.
+#       Check 1 already forbids a PATH-resolved "hyprctl"; this forbids the two
+#       verbs by name, in either quote style, wherever they are spelled. The one
+#       hyprctl left in this plugin is `hyprctl -j clients` INSIDE
+#       bin/omarchy-autostart-windows, which this pattern does not reach and
+#       which the running-programs picker needs.
+verb_hits="$(grep_stripped_all '["'"'"'](eval|dispatch)["'"'"']' || true)"
+model_verbs="$(grep -nE '["'"'"'](eval|dispatch)["'"'"']' <<<"$stripped_model" \
+               | sed 's#^#Model.js:#' || true)"
+verb_hits="$(sed '/^$/d' <<<"$verb_hits
+$model_verbs")"
+[[ -z "$verb_hits" ]] && ok "no qml file and not Model.js names an eval or dispatch verb" \
+                      || bad "no qml file and not Model.js names an eval or dispatch verb" "$verb_hits"
 
 # 8 -- the watchdog Timer's own kill must retire the run it just killed, not
 #      merely stop the four Processes. Round 1's watchdog stopped them
@@ -589,9 +591,8 @@ done
 #      test/run-tests.sh can see it: Quickshell.Io cannot be loaded outside
 #      the runtime, so this is exactly the class of defect this file's
 #      header says a structural check can catch that no behavioural test
-#      can. Comment-stripped, so a comment naming the old mistake (as this
-#      file's own history now does, and as Service.qml's own comment
-#      explaining the fix does) is not itself a hit.
+#      can. Comment-stripped, so a comment naming the old mistake -- as this
+#      file's own history does -- is not itself a hit.
 hits="$(grep_stripped_all 'Process\.[A-Z][A-Za-z0-9_]*' || true)"
 [[ -z "$hits" ]] && ok "no bare Process.<CapitalisedName> enum reference in any qml file" \
                  || bad "no bare Process.<CapitalisedName> enum reference in any qml file" "$hits"

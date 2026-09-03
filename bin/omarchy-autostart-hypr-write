@@ -61,7 +61,8 @@ err() {
 # what a file that runs at login needs.
 #
 # Resolved by RUNNING the candidate binary, not by a PATH lookup and not by
-# taking `-x` as proof -- the same shape test/lua-syntax.sh uses. A wrapper
+# taking `-x` as proof -- the same shape the Qt6 resolution in
+# test/run-qml-tests.sh uses. A wrapper
 # earlier in PATH would otherwise be trusted without ever being asked whether
 # it is a Lua compiler.
 #

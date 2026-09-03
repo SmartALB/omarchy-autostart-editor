@@ -184,7 +184,7 @@ probe "manifest: a panel kind would move the plugin off the bar" "$SHELL_SUITE" 
 # `omarchy plugin validate` only checks kind -> entryPoint, so the platform
 # validator passes it too. Only the pair check refuses it.
 probe "manifest: an entry point with no kind to load it" "$SHELL_SUITE" manifest.json \
-  's|"barWidget": "BarWidget.qml",|"barWidget": "BarWidget.qml",\n    "overlay": "Panel.qml",|'
+  's|"barWidget": "BarWidget.qml"|"barWidget": "BarWidget.qml",\n    "overlay": "Panel.qml"|'
 
 # The opposite direction: the kind gone while its entry point stays. This is
 # the exact inconsistent pair that would ship a plugin whose autostart never
@@ -201,7 +201,8 @@ probe "manifest: a kind removed while its entry point stays" "$SHELL_SUITE" mani
 # while `omarchy plugin validate` still exited 0. Both halves consistent with
 # each other, and neither consistent with the repository.
 probe "manifest: the service kind and entry point cannot come back together" "$SHELL_SUITE" manifest.json \
-  's|"kinds": \["bar-widget"\],|"kinds": ["bar-widget", "service"],|; s|"barWidget": "BarWidget.qml"|"barWidget": "BarWidget.qml",\n    "service": "Service.qml"|''
+  's|"kinds": \["bar-widget"\],|"kinds": ["bar-widget", "service"],|
+   s|"barWidget": "BarWidget.qml"|"barWidget": "BarWidget.qml",\n    "service": "Service.qml"|'
 
 probe "readme: a privileged verb in prose" "$SHELL_SUITE" README.md \
   's/^## Tests$/## Tests\n\nIf a test fails, re-run it with sudo.\n/'
@@ -494,7 +495,7 @@ probe "windows: the pid does not leave the script" "$SHELL_SUITE" bin/omarchy-au
 # --- the panel's picker -----------------------------------------------------
 
 probe "panel: the suggestions come from Model.js, not from the panel" "$STRUCT_SUITE" Panel.qml \
-  's|Model.autostartCandidatesForWindow(|Model.importFromSession(|'
+  's|Model.autostartCandidatesForWindow(|Model.somethingElseEntirely(|'
 
 probe "panel: opening the running-programs list reads the applications too" "$STRUCT_SUITE" Panel.qml \
   '/^    function autostartFromWindowToggle() {$/,/^    }$/{s|        root.startAppsRead()||}'

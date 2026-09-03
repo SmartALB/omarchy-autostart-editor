@@ -33,26 +33,26 @@ var MAX_COMMAND    = 500;
 // code added to a script, and neither would notice wording quietly dropped.
 //
 // THREE OF THESE WERE UNWORDED UNTIL THE REMOVAL EXPOSED IT: the shell
-// assertion read bin/omarchy-autostart-config and bin/omarchy-autostart-hypr,
-// and never the writer -- so does-not-compile, is-a-symlink and
-// no-lua-compiler reached the user through envelopeText's unknown-code
-// fallback. Losing the config script is what made the writer the second
-// emitter and put them in front of the assertion.
+// assertion read the deleted bin/omarchy-autostart-config and
+// bin/omarchy-autostart-hypr, and never the writer -- so does-not-compile,
+// is-a-symlink and no-lua-compiler reached the user through envelopeText's
+// unknown-code fallback. Losing the config script is what made the writer the
+// second emitter and put them in front of the assertion.
 function envelopeCodes() {
     return ["does-not-compile", "insecure-permissions", "internal",
             "is-a-symlink", "no-lua-compiler", "not-a-file", "stale",
             "too-large", "unreadable", "write-failed"];
 }
 
-// Plain wording for the envelope the bin/ helpers answer with. Every code
-// bin/omarchy-autostart-config can emit has a sentence here; a shell
-// assertion in test/run-tests.sh derives the code list FROM THAT SCRIPT and
-// fails if one turns up without wording, so a code added there cannot reach
-// the user as a bare identifier.
+// Plain wording for the envelope the bin/ helpers answer with. Every code the
+// reader and the writer can emit has a sentence here; a shell assertion in
+// test/run-tests.sh derives the code list FROM BOTH SCRIPTS and fails if one
+// turns up without wording, so a code added there cannot reach the user as a
+// bare identifier.
 //
-// This lived in Panel.qml one round after reasonText was moved out of it, for
-// exactly the reason reasonText was moved: wording in QML is wording no suite
-// in this project can execute.
+// This lived in Panel.qml, and was moved for the reason every other wording
+// function in this file was moved: wording in QML is wording no suite in this
+// project can execute.
 //
 // THE EMPTY CASE IS EXPLICIT, and it is not hypothetical. Empty stdout is what
 // a missing script, a timeout kill, and any non-zero exit taken outside the

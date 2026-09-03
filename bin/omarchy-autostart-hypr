@@ -32,8 +32,9 @@ FILES=(autostart.lua)
 # exists. The trap body must never name a function-local variable: the trap
 # runs at exit, when that local is out of scope, and under `set -u` the
 # expansion is fatal -- so the trap removes nothing and a temporary file
-# leaks on every single run. (bin/omarchy-autostart-config learned this the
-# hard way in task 4; the lesson is copied deliberately, not rediscovered.)
+# leaks on every single run. (The deleted bin/omarchy-autostart-config learned
+# this the hard way in task 4; the lesson is copied deliberately, not
+# rediscovered.)
 #
 # Two scratch paths, because the loop below runs per file and the
 # truncation step needs a second one: everything the script creates lives
