@@ -142,29 +142,19 @@ SHELL_SUITE=./test/run-tests.sh
 QML_SUITE=./test/run-qml-tests.sh
 STRUCT_SUITE=./test/qml-structure.sh
 SHAPE_SUITE=./test/runners-shape.sh
-LUA_SUITE=./test/lua-syntax.sh
 
 # A probe can only mean anything if the suite is green to begin with. Checked
 # once per suite up front, by name, rather than inferred from the first probe.
-for pair in "$SHELL_SUITE" "$QML_SUITE" "$STRUCT_SUITE" "$SHAPE_SUITE" "$LUA_SUITE"; do
+for pair in "$SHELL_SUITE" "$QML_SUITE" "$STRUCT_SUITE" "$SHAPE_SUITE"; do
     if ! "$pair" >/dev/null 2>&1; then
         printf 'FAIL baseline -- %s is already red before any mutation; nothing below can be trusted\n' "$pair"
         printf '\nmutation probes: total=0 failed=1\n'
         exit 1
     fi
 done
-echo "baseline: all five suites are green"
+echo "baseline: all four suites are green"
 
 # --- the bin/ scripts -------------------------------------------------------
-
-probe "config: the read size cap" "$SHELL_SUITE" bin/omarchy-autostart-config \
-  's/^    if (( size > MAX_BYTES )); then/    if false; then/'
-
-probe "config: the permission refusal" "$SHELL_SUITE" bin/omarchy-autostart-config \
-  's/^    if (( 8#$mode & 8#22 )); then/    if false; then/'
-
-probe "config: the staleness check" "$SHELL_SUITE" bin/omarchy-autostart-config \
-  's/^    \[\[ "$current" == "$expect_mtime" \]\]/    [[ true ]]/'
 
 probe "apps: the file count cap" "$SHELL_SUITE" bin/omarchy-autostart-apps \
   's/^            (( count >= MAX_FILES )) && break 2/            :/'
@@ -183,68 +173,10 @@ probe "runners: the producer's own exit status" "$SHAPE_SUITE" Runners.qml \
 probe "barwidget: the glyph stays a \\u escape" "$STRUCT_SUITE" BarWidget.qml \
   's/"\\uf135"/""/'
 
-# --- the launch route -------------------------------------------------------
-#
-# THE DEFECT THESE EXIST FOR, measured by the final review: swapping
-# `run.launcher(` for `run.runner(` at either launch site left ALL FIVE suites
-# green and killed the user's programs 120 s after login. Each direction is
-# probed separately and on BOTH files, because the wrapper is duplicated
-# verbatim and nothing else binds the copies to each other.
-
-probe "launch: Service.qml must use launcher, not the plain runner" "$STRUCT_SUITE" Service.qml \
-  's/run\.launcher(/run.runner(/'
-
-probe "launch: Panel.qml must use launcher, not the plain runner" "$STRUCT_SUITE" Panel.qml \
-  's/run\.launcher(/run.runner(/'
-
-probe "launch: entries must be detached with setsid -f" "$STRUCT_SUITE" Service.qml \
-  's/run\.binSetsid + " -f " + //'
-
-probe "launch: entries must be gated by a bash -n parse check" "$STRUCT_SUITE" Service.qml \
-  's/run\.binBash + " -n -c "/run.binBash + " -c "/'
-
-probe "launch: launcher() must pass --foreground to timeout" "$STRUCT_SUITE" Runners.qml \
-  's/"--foreground", //'
-
-# --- the two appliers, and the one duplicated bound ------------------------
-
-probe "apply: the panel must require hyprctl's ok, not just a zero exit" "$STRUCT_SUITE" Panel.qml \
-  's/!== "ok"/!== "OK"/'
-
-probe "panel: the workspace bound must come from Model" "$STRUCT_SUITE" Panel.qml \
-  's/i <= Model\.MAX_WORKSPACES/i <= 99/'
-
-# --- Model.js ---------------------------------------------------------------
-
-probe "model: values reach Lua as bytes" "$QML_SUITE" Model.js \
-  's/luaBytes(program\["class"\])/String(program["class"])/'
-
-# DEVIATION FROM THE PLAN'S SKETCH: it mutated
-#   if (placement.monitor !== undefined && placement.workspace !== undefined)
-# which is not in Model.js and never was. The either-or rule is two separate
-# guards, one per placement kind (Model.js:61 and :65) -- a single combined
-# condition could not express it, because "workspace plus a monitor field" and
-# "monitor plus a workspace field" are different inputs. A sed that matched
-# nothing would have printed no probe at all.
-probe "model: placement is either-or" "$QML_SUITE" Model.js \
-  's/^        if (placement.monitor !== undefined) return "placement-invalid";$/        if (false) return "placement-invalid";/'
-
-probe "model: the program cap" "$QML_SUITE" Model.js \
-  's/^        if (out.programs.length >= MAX_PROGRAMS) {/        if (false) {/'
-
-probe "model: the window address shape" "$QML_SUITE" Model.js \
-  's|^        if (!ADDRESS_RE.test(hits\[i\].address)) {|        if (false) {|'
-
-probe "model: an imported program stays switched off" "$QML_SUITE" Model.js \
-  's/^            enabled: false,$/            enabled: true,/'
-
-probe "model: the generated Lua compiles" "$LUA_SUITE" Model.js \
-  's/^    "end"$/    "ende"/'
-
 # --- the submission set -----------------------------------------------------
 
 probe "manifest: a panel kind would move the plugin off the bar" "$SHELL_SUITE" manifest.json \
-  's/"kinds": \["bar-widget", "service"\]/"kinds": ["bar-widget", "panel", "service"]/'
+  's/"kinds": \["bar-widget"\]/"kinds": ["bar-widget", "panel"]/'
 
 # An entry point whose kind is not declared. This is the direction NOTHING
 # else caught: it is not `panel`, so the "no panel key" assertion passes; the
@@ -256,15 +188,31 @@ probe "manifest: an entry point with no kind to load it" "$SHELL_SUITE" manifest
 
 # The opposite direction: the kind gone while its entry point stays. This is
 # the exact inconsistent pair that would ship a plugin whose autostart never
-# runs, and it is what fix round 1 was raised about.
+# runs, and it is what fix round 1 was raised about. Probed the other way
+# round now that "service" is gone from both halves -- the entry point is
+# re-added alone, which is the same inconsistent pair reached from the side
+# this removal could actually have left behind.
 probe "manifest: a kind removed while its entry point stays" "$SHELL_SUITE" manifest.json \
-  's/"kinds": \["bar-widget", "service"\]/"kinds": ["bar-widget"]/'
+  's|"barWidget": "BarWidget.qml"|"barWidget": "BarWidget.qml",\n    "service": "Service.qml"|'
+
+# AND THE KIND WITHOUT THE FILE. Re-declaring "service" alongside an
+# entryPoints.service that names a Service.qml which is not on disk is exactly
+# the state that once meant the plugin's whole purpose was silently absent
+# while `omarchy plugin validate` still exited 0. Both halves consistent with
+# each other, and neither consistent with the repository.
+probe "manifest: the service kind and entry point cannot come back together" "$SHELL_SUITE" manifest.json \
+  's|"kinds": \["bar-widget"\],|"kinds": ["bar-widget", "service"],|; s|"barWidget": "BarWidget.qml"|"barWidget": "BarWidget.qml",\n    "service": "Service.qml"|''
 
 probe "readme: a privileged verb in prose" "$SHELL_SUITE" README.md \
   's/^## Tests$/## Tests\n\nIf a test fails, re-run it with sudo.\n/'
 
-probe "uninstall: the configuration is the user's data" "$SHELL_SUITE" uninstall \
-  's|^if \[\[ -d "$MARKER_DIR" \]\]; then|rm -f -- "$CONFIG"\nif [[ -d "$MARKER_DIR" ]]; then|'
+# THE PROPERTY TURNED AROUND. There is no configuration of this plugin's own
+# left to keep -- the JSON file went with the removed half -- so what uninstall
+# must now be held to is that it removes the plugin AND TOUCHES NOTHING ELSE.
+# The one file this plugin ever wrote is the user's own autostart.lua, and this
+# probe makes uninstall delete it.
+probe "uninstall: the user's own autostart.lua is not removed with the plugin" "$SHELL_SUITE" uninstall \
+  's|^cat <<NOTE$|rm -f -- "${XDG_CONFIG_HOME:-$HOME/.config}/hypr/autostart.lua"\ncat <<NOTE|'
 
 probe "checklist: the preview obligation cannot just vanish" "$SHELL_SUITE" CHECKLIST.md \
   's/preview\.png/preview-image/g'
@@ -304,9 +252,6 @@ probe "hypr: comment and blank lines are counted like any other" "$QML_SUITE" Mo
 probe "hypr: a form it cannot take apart is reported, not dropped" "$QML_SUITE" Model.js \
   's|^        entry.reason = /.*nested-call.*$|        continue;|'
 
-probe "hypr: an option it cannot represent makes the line non-editable" "$QML_SUITE" Model.js \
-  's|if (unsupported) {|if (false) {|g'
-
 probe "hypr: a refusal code cannot reach the panel unworded" "$QML_SUITE" Model.js \
   's|^    "incomplete-call"        // the call does not end on this line$|    "incomplete-call",       // the call does not end on this line\n    "no-wording-for-this"|'
 
@@ -321,26 +266,6 @@ probe "hypr script: the cut is to exactly the cap, not the detection byte" "$SHE
 
 probe "hypr script: only a readable plain file counts as present" "$SHELL_SUITE" bin/omarchy-autostart-hypr \
   's|if \[\[ -f "\$path" \&\& -r "\$path" \]\]; then|if [[ -e "$path" ]]; then|'
-
-# --- the cutover ------------------------------------------------------------
-#
-# A cutover that is documented in prose and left armed in code is the worst of
-# the available outcomes: every other check in this repository would still
-# pass while the plugin went on applying a second source of truth at login.
-# So the switch and each of the three routes behind it are probed one at a
-# time.
-
-probe "cutover: the switch is actually off" "$STRUCT_SUITE" Model.js \
-  's|^var WRITE_PATH_ENABLED = false;$|var WRITE_PATH_ENABLED = true;|'
-
-probe "cutover: apply() refuses" "$STRUCT_SUITE" Panel.qml \
-  '/^    function apply() {$/,/^        if (!root.offersEditing) return$/{/^        if (!root.offersEditing) return$/d}'
-
-probe "cutover: the panel has one switch, not two" "$STRUCT_SUITE" Panel.qml \
-  's|^    readonly property bool offersEditing: Model.WRITE_PATH_ENABLED$|    readonly property bool offersEditing: Model.WRITE_PATH_ENABLED \&\& Model.WRITE_PATH_ENABLED|'
-
-probe "cutover: the service consults it in load()" "$STRUCT_SUITE" Service.qml \
-  's|^        if (!Model.WRITE_PATH_ENABLED) {$|        if (false) {|'
 
 # --- WRITING autostart.lua --------------------------------------------------
 #
@@ -465,8 +390,11 @@ probe "writer: the staged file gets the original's permissions" "$SHELL_SUITE" b
   's|chmod --reference="$TARGET" "$STAGEFILE"|true|'
 
 # --- the panel's one route to the file --------------------------------------
+# The substituted name is a script that does not exist, which is the point:
+# any second route to disk is a route the writer's own guards -- the freshness
+# check, the backup, the luac gate -- do not stand in front of.
 probe "panel: the write goes through the writer script, not a second route" "$STRUCT_SUITE" Panel.qml \
-  's|omarchy-autostart-hypr-write|omarchy-autostart-config|'
+  's|omarchy-autostart-hypr-write|omarchy-autostart-somewhere-else|'
 
 probe "panel: the new content is shell-quoted" "$STRUCT_SUITE" Panel.qml \
   's|Model.shellQuote(result.text)|result.text|'
@@ -477,8 +405,18 @@ probe "panel: a refused operation never arms the Process" "$STRUCT_SUITE" Panel.
 probe "panel: the row controls are gated on the entry being editable" "$STRUCT_SUITE" Panel.qml \
   's|hyprEntryRow.entry.editable === true|true|'
 
-probe "panel: the two counts are derived in Model.js, not in the panel" "$STRUCT_SUITE" Panel.qml \
+probe "panel: the count is derived in Model.js, not in the panel" "$STRUCT_SUITE" Panel.qml \
   's|Model.hyprProgramCount(root.hyprSections)|0|'
+
+# AND BarWidget's handler must match the signal's arity. A second parameter on
+# a one-argument signal is not an error in QML -- it simply arrives undefined,
+# and the tooltip reads "3 programs, undefined placements" with nothing failing
+# anywhere. That is the shape this removal actually left behind once.
+probe "barwidget: the counted handler takes exactly the signal's one argument" "$STRUCT_SUITE" BarWidget.qml \
+  's|counted.connect(function(programs) {|counted.connect(function(programs, placements) {|'
+
+probe "panel: the counted signal carries exactly one number" "$STRUCT_SUITE" Panel.qml \
+  's|signal counted(int programs)|signal counted(int programs, int placements)|'
 
 # The change editor's focus hand-off. Without it a hidden TextField stays the
 # window's activeFocusItem and Escape is swallowed for the rest of the open

@@ -1,49 +1,73 @@
 # Autostart Layout
 
-An Omarchy bar widget for Hyprland: a reader -- and, later, a writer -- for the
-Hyprland configuration files you already keep by hand.
+An Omarchy bar widget for Hyprland: an editor for the one Hyprland file that
+decides which programs your session starts.
 
-## Status: it reads all three, and writes `autostart.lua`.
+## What it is
 
-This plugin used to keep a list of its own, in
-`~/.config/omarchy/autostart-layout.json`, and apply it at login through
-`hyprctl eval`. That was two sources of truth for one fact -- which program
-starts, and where its window goes -- and the one that mattered was always the
-Hyprland configuration.
+One file, one panel:
 
-So the direction changed. The single source of truth is now your own
+```
+~/.config/hypr/autostart.lua
+```
 
-- `~/.config/hypr/autostart.lua`,
-- `~/.config/hypr/windowrules.lua`,
-- `~/.config/hypr/workspaces.lua`,
+This plugin shows what is in that file, and adds, changes and removes entries
+in it. That is all it is. There is no configuration of its own, nothing is
+applied to the running compositor, nothing is started and nothing is reloaded
+-- your entries take effect at your next login, exactly as they did before
+this plugin existed, because starting them was never this plugin's doing. It
+is Hyprland's.
 
-which Hyprland already reads and applies at login by itself. This release reads
-all three and shows them, and it writes exactly one of them: `autostart.lua`.
-`windowrules.lua` and `workspaces.lua` are read only. It applies nothing of its
-own -- no `hyprctl eval`, no `hyprctl reload`, nothing started and nothing
-killed -- so your autostart and your window placement keep working exactly as
-they did, because they were never this plugin's doing in the first place: they
-are Hyprland's.
+An earlier version kept a list of its own in
+`~/.config/omarchy/autostart-layout.json` and applied it at login through
+`hyprctl eval`, with window rules, a workspace-to-monitor table, a placement
+model, a launch route and a start marker. That was a second source of truth
+for a fact Hyprland already owned, and it is gone -- code, tests and all. If
+you used it, the JSON file is still on disk and nothing reads it; delete it
+when you like.
+
+## What it does
+
+Opens a panel behind a bar button and shows every entry of your
+`autostart.lua`, each with its **1-based line number** so you can find it in
+your own editor. `o.launch_on_start` and `o.exec_on_start` are read, and
+`o.exec_on_start(o.launch(...))` is shown identically to
+`o.launch_on_start(...)`, because
+`/usr/share/omarchy/default/hypr/helpers.lua` defines them to be the same
+thing.
+
+From the panel you can:
+
+- **add** a command -- typed by hand, picked from your installed applications,
+  or picked **from a program that is running right now**: the panel lists your
+  open windows and, for each, the command lines it can offer, ranked, with
+  where each one came from and a warning for anything that will not survive a
+  restart. Picking one **fills the field**; it does not write. The line that
+  goes into a file which runs at every login is one you have read first.
+- **change** one entry -- exactly the line you picked, no other.
+- **remove** one entry -- exactly the line you picked, no other.
+
+A line that calls one of those helpers in a form the reader cannot take apart
+-- a nested helper such as
+`o.exec_on_start(o.launch_webapp_sole("Chat", "..."))` -- is shown **as it
+stands**, marked *not editable*, with the reason in plain words. It is never
+guessed at and never silently left out, and it can be neither changed nor
+removed: for those, edit the file by hand. That is a real limitation and it is
+named on screen rather than hidden. A line that calls none of those helpers is
+not an entry at all; it belongs to your file.
+
+Nothing here needs elevated rights. There is no system-wide tier, no elevation
+helper, no package installation and no rule file of any kind. Everything the
+plugin does, it does as you, in your own configuration directory.
 
 ### What writing `autostart.lua` means, precisely
 
-It is **line surgery**, and only three operations exist:
-
-- **add** -- one line, appended as the last line, in the style the file already
-  uses: `o.launch_on_start("<your command>")`. Nothing is sorted into a
-  "matching" comment section, because guessing which of your section comments a
-  program belongs under is exactly the surprise this design avoids.
-- **change** -- exactly the line you picked, no other.
-- **remove** -- exactly the line you picked, no other.
-
-Your comments, your blank lines and every form the reader cannot represent stay
-byte for byte as you wrote them. In particular, **a line the panel cannot
-represent can be neither changed nor removed.** It is shown as it stands, marked
-as such, with the note that the file has to be edited by hand for it. That is a
-real limitation and it is named rather than hidden: in a file with a nested
-helper call like
-`o.exec_on_start(o.launch_webapp_sole("Chat", "https://chat.example.org/"))`,
-that entry is visible and untouchable.
+It is **line surgery**. Your comments, your blank lines and every form the
+reader cannot represent stay byte for byte as you wrote them; **add** appends
+one line as the last line, in the style the file already uses, and is not
+sorted into a "matching" comment section, because guessing which of your
+section comments a program belongs under is exactly the surprise this design
+avoids.
 
 Four things stand between a change and your next login:
 
@@ -65,52 +89,40 @@ Four things stand between a change and your next login:
 A change takes effect **at your next login.** The plugin starts nothing and
 reloads nothing.
 
-The old JSON half is still in the source, disconnected at one named place
-(`WRITE_PATH_ENABLED` in `Model.js`), because the writer is built from it. It
-is not read, not applied, and not offered in the panel.
-
-## What it does
-
-Opens a panel behind a bar button and shows, in the order of the files:
-
-1. **`autostart.lua`** -- the programs your session starts. `o.launch_on_start`
-   and `o.exec_on_start` are read; `o.exec_on_start(o.launch(...))` is shown
-   identically to `o.launch_on_start(...)`, because
-   `/usr/share/omarchy/default/hypr/helpers.lua` defines them to be the same
-   thing.
-2. **`windowrules.lua`** -- which window class goes to which workspace, with
-   `float`, `maximize` and `fullscreen` if they are set.
-3. **`workspaces.lua`** -- which workspace is pinned to which monitor.
-
-Every entry is shown with its **1-based line number**, so you can find it in
-your own editor. A line that calls one of those helpers in a form the reader
-cannot take apart -- a nested helper such as
-`o.exec_on_start(o.launch_webapp_sole("Chat", "..."))`, a rule matching on
-a table of properties, an option the panel has no representation for -- is
-shown **as it stands**, marked *not editable*, with the reason in plain words.
-It is never guessed at and never silently left out. A line that calls none of
-those helpers is not an entry at all; it belongs to your file.
-
-Nothing here needs elevated rights. There is no `--system` tier, no elevation
-helper, no package installation, and no rule file of any kind. Everything the
-plugin does, it does as you, in your own configuration directory -- and at the
-moment, all it does is read.
-
 ### What it needs
 
-- Hyprland with Omarchy's Quickshell-based shell (this is a `bar-widget` plus
-  `service` plugin, schema version 1).
-- `hyprctl`, `jq`, `bash`, `grep`, `timeout`, `setsid`, `mktemp` -- all of
-  them part of a stock Omarchy install. Nothing is fetched at runtime and the
-  plugin makes no network connection at all.
+- Hyprland with Omarchy's Quickshell-based shell (this is a `bar-widget`
+  plugin, schema version 1).
+- `hyprctl`, `jq`, `bash`, `timeout`, `luac5.1` -- all of them part of a
+  stock Omarchy install (`luac5.1` ships with `lua51`). `hyprctl` is used for
+  exactly one thing, `hyprctl -j clients`, which reads the list of open
+  windows for the picker. Nothing is fetched at runtime and the plugin makes
+  no network connection at all.
 
 ### When something else is a better fit
 
-Your editor. `~/.config/hypr/*.lua` is three small hand-written files, and
-until the write half lands there is nothing this panel can do to them that
-`nvim` cannot do faster. What it offers today is the overview: all three files
-side by side, with the forms it will later be able to edit marked apart from
-the forms it will always leave alone.
+Your editor. `autostart.lua` is a small hand-written file and `nvim` can do
+anything to it that this panel can, faster. What the panel offers is the
+overview and the picker: your entries with their line numbers, the forms it
+will not touch marked apart, and a way to turn a program you are looking at
+right now into a line that starts it next time.
+
+## Known limits
+
+- A line the reader cannot take apart can be neither changed nor removed. It
+  is shown as it stands, with the reason.
+- A command may be at most 500 characters, and must be writable as a readable
+  Lua string literal.
+- The panel edits `autostart.lua` and nothing else. It is not a window-rule
+  editor and it does not pin workspaces to monitors -- for those, edit
+  `windowrules.lua` and `workspaces.lua` by hand. It does not read them
+  either.
+- The panel cannot tell you whether an entry actually starts. Hyprland starts
+  them at login, detached, and a misspelled command, a missing binary and a
+  program that exits immediately all look the same from here.
+- A file larger than 64 KiB is shown as far as it was read, marked as cut
+  short, and is not writable: line surgery against a partial read would target
+  line numbers the file does not have.
 
 ## Install
 
@@ -133,12 +145,10 @@ add the id to a bar section in `~/.config/omarchy/shell.json`:
 { "bar": { "layout": { "right": [ { "id": "smartalb.autostart" } ] } } }
 ```
 
-**This step is not optional, and skipping it fails quietly.** That one entry is
-what enables *both* halves of the plugin: the bar widget you click, and the
-background part that applies your list at login. Until the id is referenced
-from `shell.json`, Omarchy treats the plugin as disabled -- nothing appears in
-the bar and nothing starts at login, with no error anywhere. One entry is
-enough; do not add a second one under a top-level `plugins[]` array.
+**This step is not optional, and skipping it fails quietly.** Until the id is
+referenced from `shell.json`, Omarchy treats the plugin as disabled -- nothing
+appears in the bar, with no error anywhere. One entry is enough; do not add a
+second one under a top-level `plugins[]` array.
 
 To check it took, after the restart:
 
@@ -146,7 +156,7 @@ To check it took, after the restart:
 omarchy plugin list | grep smartalb.autostart
 ```
 
-The row should read `enabled` and list both `bar-widget` and `service`.
+The row should read `enabled` and list `bar-widget`.
 
 ### Removal
 
@@ -154,125 +164,34 @@ The row should read `enabled` and list both `bar-widget` and `service`.
 ./uninstall
 ```
 
-It removes the plugin directory and the session start marker. Remove the
-widget from your bar in `shell.json` yourself afterwards, then run
-`omarchy-restart-shell`. Your configuration file is deliberately **kept**, so
-a reinstall finds your list again; the uninstaller prints its path so you can
-delete it on purpose.
-
-## How placement works
-
-> **This section describes the disconnected half.** It is kept because the
-> write half will be built from it. Today the plugin sets no rule at all --
-> your `windowrules.lua` does, and this plugin only reads it. See *Status*
-> above.
-
-In Hyprland a workspace lives on exactly one monitor. That is why a program's
-placement is an **either-or** and not two fields: pinning a program to
-workspace 3 *and* to `DP-2` would be a contradiction the moment workspace 3
-sits on `DP-4`, and the panel refuses that combination rather than silently
-picking one.
-
-> If you want a program on a particular screen and do not care about the
-> workspace number, choose monitor. If you think in workspaces, choose
-> workspace and pin the workspace to a monitor in the table below.
-
-The panel shows the resulting monitor greyed out next to a workspace choice,
-so you can see which screen a workspace choice actually implies.
+It removes the plugin directory and nothing else. Remove the widget from your
+bar in `shell.json` yourself afterwards, then run `omarchy-restart-shell`.
+Your autostart entries are in your own `autostart.lua` and keep working
+without the plugin; the last backup it took, if any, is beside it as
+`autostart.lua.bak`.
 
 ## Where your data lives
 
-> Your Hyprland configuration lives where it always did:
-> `~/.config/hypr/autostart.lua`, `windowrules.lua` and `workspaces.lua`.
-> The plugin opens them **read-only** and writes nothing anywhere. The
-> file described below still exists if you used an earlier version, but
-> nothing reads it any more.
-
-One file:
+Your Hyprland configuration lives where it always did, and this plugin has one
+file in it:
 
 ```
-~/.config/omarchy/autostart-layout.json      (mode 0600)
+~/.config/hypr/autostart.lua        read, and written one line at a time
+~/.config/hypr/autostart.lua.bak    the previous content, one step back
 ```
 
 That file holds **command lines that are run as you when your session
-starts**. It is the same trust level as `~/.config/hypr/autostart.lua`, and it
-is worth reading with that in mind before you paste a command into it.
+starts**, which is worth remembering before pasting a command into it -- from
+this panel or from anywhere else.
 
 Two consequences, both deliberate:
 
-- The plugin writes that file with mode `0600` and **applies nothing at all**
-  if it ever becomes writable by anyone else. It then says so in the panel and
-  tells you the exact command to put the mode back. A file another account can
-  edit is a file another account can use to run programs as you.
+- The plugin **refuses to write** `autostart.lua` if it can be written by
+  someone else, if it is a symlink, or if it changed on disk since the panel
+  read it. It says which of those it was, in plain words, and changes nothing.
 - The plugin touches no other configuration. It does not write to
-  `hyprland.conf`, to any `.lua` under `~/.config/hypr/`, or to your
-  `shell.json`; it never overwrites configuration you did not change in its
-  own panel, and the panel changes nothing until you press **Apply**.
-
-## How it applies
-
-> **This section describes the disconnected half.** Today the plugin applies
-> nothing: no `hyprctl eval`, no start-marker claim, no launch. Hyprland
-> applies your three Lua files at login on its own, as it always did. See
-> *Status* above.
-
-No Hyprland configuration file is edited. The rules are set at runtime in the
-running compositor -- window rules for the programs, workspace rules for the
-table -- and they live only there.
-
-Two things follow from that:
-
-- A manual `hyprctl reload` drops them, because a reload rebuilds the
-  compositor's rule set from the configuration files, which never contained
-  them. The background part of the plugin notices the reload and sets the
-  **rules** again, so a window opened after that lands where you configured
-  it. It does **not** re-run the workspace-to-monitor moves: a workspace that
-  is already open stays on whichever monitor the reload left it on until you
-  open the panel and press **Apply**, which does perform the moves. So the gap
-  is short for the rules and, for the current layout, lasts until the next
-  Apply.
-- Nothing is left behind when you remove the plugin. Log out, or run
-  `hyprctl reload`, and the rules are gone.
-
-**What the plugin cannot tell you:** whether a program you configured actually
-started. Programs are launched detached from the shell, and a misspelled
-command, a missing binary and a program that exits immediately all look the
-same from here -- no output, no failing status. The one honest report the
-plugin can give is the other way round: it counts the enabled programs for
-which **no window ever matched**, says so under the list, and offers *Launch
-missing*. If a row is listed there, the usual cause is a misspelled command or
-a window-class pattern that matches nothing; open the row and check both.
-
-## Known limits
-
-The limit that matters right now: **the plugin cannot change anything.** It
-reads your three Hyprland files and shows them; the write half does not exist
-yet. The limits below belong to the disconnected half and are kept for the
-same reason its code is.
-
-- Workspaces 1 to 99 only. Named workspaces are not supported.
-- **At login the table sets rules, and a rule only fires when a workspace is
-  created.** Workspace 1 already exists before the shell starts, so pinning
-  workspace 1 to a particular monitor is honoured for workspaces created after
-  login, not for the one you are already looking at. The panel's **Apply**
-  button does move workspaces that are already open -- the background part
-  that runs at login deliberately does not, because moving workspaces around
-  under you while your session is still coming up is worse than not moving
-  them. If your layout matters on the workspace you land in, open the panel
-  once and press **Apply**, or put the programs you care about on workspaces
-  you open later.
-- Placement is workspace or monitor. There are no `float`, `size`, `maximize`
-  or `fullscreen` rules -- this is not a general window-rule editor.
-- Placement matches on window class, so several windows of the same class go
-  to the same place. One rule per class, not per window.
-- An application whose window class is not known until it has run once needs
-  **From window** pressed once: start it, then pick its window from the list
-  and the class is filled in for you.
-- An imported window whose class matches no installed application arrives with
-  an empty command on purpose. The plugin does not guess a command from a
-  window class; fill it in and the row starts working.
-- At most 200 programs, a 100-character name and a 500-character command per
-  row.
+  `hyprland.conf`, to any other `.lua` under `~/.config/hypr/`, or to your
+  `shell.json`, and it writes nothing at all until you ask it to.
 
 ## Development
 
@@ -305,20 +224,12 @@ settle -- every claim that needs a running Hyprland session to confirm.
 ./test/run-qml-tests.sh    # Model.js, headless, in the Qt6 engine
 ./test/qml-structure.sh    # structural checks over the QML files
 ./test/runners-shape.sh    # runnerOut/runnerErr, run through a real bash
-./test/lua-syntax.sh       # the Lua chunks compile
 ./test/mutations.sh        # every test above, checked against its own mutation
 ```
 
 `mutations.sh` is the one worth explaining: it breaks a guarded property on
 purpose, one at a time, and fails if the suite stays green. A test that
 survives the removal of the thing it tests was never testing it.
-
-`test/probe-hyprland-api.sh` is **not** part of any suite and is not run by
-any of the above. It is the measurement that established how Hyprland's Lua
-API behaves, and it acts on the live desktop: it creates and removes real
-windows and workspace rules. It snapshots before and after, verifies the
-restore and aborts on the first unexpected event, but do not run it in a
-session you care about.
 
 ## License
 

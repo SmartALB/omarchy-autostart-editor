@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# Delivers the three Hyprland Lua files RAW, as one JSON envelope.
+# Delivers the user's autostart.lua RAW, as one JSON envelope.
 #
 # It reads. It does not parse, and it does not write -- there is no write
 # subcommand here, no staged file beside a destination, no `mv` onto anything
@@ -7,18 +7,26 @@
 # reach it in the same engine that runs the plugin; a parser in awk would be
 # a parser no suite of this project can test.
 #
-# The three files belong to the USER, are hand-maintained, and carry his own
-# German section comments and factual notes. Nothing here may alter one byte
-# of them. The content is passed through verbatim so that a later writer can
-# do line surgery against exactly the bytes the reader saw.
+# The file belongs to the USER, is hand-maintained, and carries his own German
+# section comments and factual notes. Nothing here may alter one byte of it.
+# The content is passed through verbatim so that the writer can do line surgery
+# against exactly the bytes the reader saw.
 #
 # A missing file is not an error: it is an entry with present:false. Anything
-# else would make an absent windowrules.lua look like a broken plugin.
+# else would make an absent autostart.lua look like a broken plugin.
+#
+# IT READ THREE FILES AND READS ONE. windowrules.lua and workspaces.lua were
+# delivered here too, for the listings that are gone; nothing shows them any
+# more, and a reader that goes on opening two of the user's files to have their
+# contents discarded is work nobody can account for later. FILES stays an ARRAY
+# and cmd_read stays a LOOP for the same reason Model.js keeps a list: the
+# envelope shape, and the "a file that is absent SAYS so" guarantee, are
+# per-name and do not change because there is one name.
 set -uo pipefail
 
 HYPR_DIR="${XDG_CONFIG_HOME:-$HOME/.config}/hypr"
 MAX_BYTES_PER_FILE=65536   # 64 KiB -- ample for 31 lines
-FILES=(autostart.lua windowrules.lua workspaces.lua)
+FILES=(autostart.lua)
 
 # One cleanup for the whole script, installed before the first temporary file
 # exists. The trap body must never name a function-local variable: the trap
@@ -27,7 +35,7 @@ FILES=(autostart.lua windowrules.lua workspaces.lua)
 # leaks on every single run. (bin/omarchy-autostart-config learned this the
 # hard way in task 4; the lesson is copied deliberately, not rediscovered.)
 #
-# Three scratch paths, because the loop below runs three times and the
+# Two scratch paths, because the loop below runs per file and the
 # truncation step needs a second one: everything the script creates lives
 # under $TMPDIR, never beside a file of the user's.
 TMPFILE=""      # one file's raw bytes
@@ -119,8 +127,9 @@ cmd_read() {
         # --rawfile, so the bytes cross into JSON as one string with no shell
         # word splitting, no `$(...)` stripping of trailing newlines, and no
         # interpretation of a backslash. That matters here more than anywhere
-        # else in this plugin: windowrules.lua is full of "\\." and a mangled
-        # backslash would silently change the class pattern the panel shows.
+        # else in this plugin: a Lua string literal may carry "\\." and a
+        # mangled backslash would silently change the command the panel shows
+        # -- and, through the writer, the command that runs at login.
         jq -nc --arg n "$name" --arg p "$path" \
                --argjson m "$mtime" --argjson pr "$present" --argjson t "$TRUNCATED" \
                --rawfile c "$TMPFILE" \
@@ -128,14 +137,13 @@ cmd_read() {
             >> "$LISTFILE" \
             || err "internal" "could not describe $name"
 
-        # Removed here rather than left to the trap: the loop runs three
-        # times and only the last path would otherwise be cleaned up.
+        # Removed here rather than left to the trap: the loop runs once per
+        # file and only the last path would otherwise be cleaned up.
         rm -f -- "$TMPFILE"
         TMPFILE=""
     done
 
-    # The order in the array is the order of FILES, which is the order the
-    # panel shows its three sections in. Model.js re-establishes that order
+    # The order in the array is the order of FILES. Model.js re-establishes it
     # from the names anyway (parseHyprFiles walks HYPR_FILE_NAMES, not this
     # array), so a future reordering here cannot silently reshuffle the panel.
     ok --arg dir "$HYPR_DIR" --slurpfile f "$LISTFILE" \

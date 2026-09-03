@@ -111,14 +111,15 @@ hits="$(sed '/^$/d' <<<"$hits")"
 [[ -z "$hits" ]] && ok "no PATH-resolved interpreter in any qml file or Model.js" \
                  || bad "no PATH-resolved interpreter in any qml file or Model.js" "$hits"
 
-# 2 -- the four binaries this fixed list names are each named absolutely, in
-#      either quote style. Runners.qml declares SIX tool paths; the remaining
-#      two (binMktemp, binRm) are covered by construction in check 2b below,
-#      which requires every declared bin<Something> to be an absolute
-#      literal. So nothing here is unguarded -- the list is a floor, not the
-#      whole set, and it used to say "three" while checking four.
+# 2 -- the two binaries this fixed list names are each named absolutely, in
+#      either quote style. Runners.qml declared SIX tool paths and declares
+#      TWO now: hyprctl and setsid went with the apply and launch routes,
+#      mktemp and rm with the match file the placement model handed over.
+#      Check 2b below is the standing answer that needs no list at all -- it
+#      requires every declared bin<Something> to be an absolute literal -- so
+#      this list is a floor, not the whole set.
 stripped_runners="$(strip_comments Runners.qml)"
-for expected in /usr/bin/timeout /usr/bin/bash /usr/bin/hyprctl /usr/bin/setsid; do
+for expected in /usr/bin/timeout /usr/bin/bash; do
   bin_pat="[\"']${expected}[\"']"
   grep -qE "$bin_pat" <<<"$stripped_runners" \
     && ok "Runners.qml names $expected absolutely" \
@@ -316,7 +317,7 @@ $f:$((i + 1)): ${line}"
         hits_5b="$hits_5b
 $f:$((i + 1)): ${line} (no Runners { id: ... } declaration found in this file)"
       else
-        helper_anchor_pat="^${runners_id}[[:space:]]*\.[[:space:]]*(runner|runnerOut|runnerErr|hypr|tool|launcher)\("
+        helper_anchor_pat="^${runners_id}[[:space:]]*\.[[:space:]]*(runner|runnerOut|runnerErr|tool)\("
         if [[ ! "$candidate" =~ $helper_anchor_pat ]]; then
           hits_5b="$hits_5b
 $f:$((i + 1)): ${line}"
@@ -594,72 +595,6 @@ done
 hits="$(grep_stripped_all 'Process\.[A-Z][A-Za-z0-9_]*' || true)"
 [[ -z "$hits" ]] && ok "no bare Process.<CapitalisedName> enum reference in any qml file" \
                  || bad "no bare Process.<CapitalisedName> enum reference in any qml file" "$hits"
-
-# 9b -- the value the exitStatus comparison ACTUALLY READS must be 0 --
-#       followed through the reference, not asserted about a declaration in
-#       isolation. Check 9 above only forbids the old `Process.NormalExit`
-#       spelling. The first version of this check then asserted that a
-#       property NAMED normalExit was declared 0, which is half the
-#       property: it stayed green for a comparison reading a DIFFERENT
-#       property while a still-correct `normalExit: 0` sat declared
-#       elsewhere in the file. That recreates round 3's defect exactly --
-#       `exitStatus !== <something that is not 0>` rejects every NORMAL
-#       exit, sessionStartOwed never comes down, launchAll() is never
-#       reached, and the autostart silently never runs in any session, with
-#       every shell/QML/structural assertion green. It also needs no
-#       contrived decoy: an ordinary rename produces it.
-#
-#       So: find every explicit comparison against `exitStatus`, take the
-#       operand it reads, and require THAT identifier's own declaration to
-#       be 0. QProcess::ExitStatus::NormalExit is fixed at 0 by Qt, so 0 is
-#       the only admissible binding; a numeric literal operand is accepted
-#       only if it IS 0. Every declaration of the identifier is checked, not
-#       merely the first, and an identifier with no declaration anywhere is
-#       a FAIL -- `Process.NormalExit` lands there too, which is check 9's
-#       finding reached a second way.
-#
-#       A comparison shape this script cannot read is a FAIL, not a pass:
-#       same rule as check 8's onTriggered. Only an explicit
-#       `exitStatus <op> <operand>` is recognised -- a truthiness test
-#       (`if (exitStatus)`) is equivalent in behaviour but not readable
-#       here, and would have to be spelled out to pass. What this still
-#       cannot do, like check 5b, is verify that the operand's QUALIFIER
-#       resolves to the object holding that declaration; the identifier
-#       after the last dot is what is followed.
-exit_cmp_pat='exitStatus[[:space:]]*(!==|===|!=|==)[[:space:]]*[A-Za-z0-9_.]+'
-cmp_hits="$(grep_stripped_all "$exit_cmp_pat" || true)"
-if [[ -z "$cmp_hits" ]]; then
-  bad "the exitStatus comparison reads a constant declared 0" \
-      "no explicit 'exitStatus <op> <operand>' comparison found in any qml file -- markerProc's guard against trusting exitCode after a signal-kill either lost its comparison or wears a shape this script cannot read; either way it cannot be verified"
-else
-  norm_bad=""
-  while IFS= read -r hit; do
-    [[ -z "$hit" ]] && continue
-    while IFS= read -r operand; do
-      [[ -z "$operand" ]] && continue
-      if [[ "$operand" =~ ^[0-9]+$ ]]; then
-        [[ "$operand" == "0" ]] || norm_bad="$norm_bad
-$hit -- compares against the literal $operand, and NormalExit is 0"
-        continue
-      fi
-      ident="${operand##*.}"
-      decl_pat="property[[:space:]]+int[[:space:]]+${ident}[[:space:]]*:"
-      decl="$(grep_stripped_all "$decl_pat" || true)"
-      if [[ -z "$decl" ]]; then
-        norm_bad="$norm_bad
-$hit -- reads '$operand', but no 'property int $ident:' is declared in any qml file"
-      else
-        wrong="$(grep -vE "${decl_pat}[[:space:]]*0[[:space:]]*$" <<<"$decl" || true)"
-        [[ -n "$wrong" ]] && norm_bad="$norm_bad
-$hit -- reads '$operand', declared as: $(tr '\n' ';' <<<"$wrong")"
-      fi
-    done < <(grep -oE "$exit_cmp_pat" <<<"$hit" \
-             | sed -E 's/^.*(!==|===|!=|==)[[:space:]]*([A-Za-z0-9_.]+)$/\2/')
-  done <<<"$cmp_hits"
-  norm_bad="$(sed '/^$/d' <<<"$norm_bad")"
-  [[ -z "$norm_bad" ]] && ok "the exitStatus comparison reads a constant declared 0" \
-                       || bad "the exitStatus comparison reads a constant declared 0" "$norm_bad"
-fi
 
 # BarWidget.qml checks below all read through strip_comments, like every
 # other check in this file -- a comment repeating the right words must never
@@ -1354,136 +1289,6 @@ raw_env="$(sed '/^$/d' <<<"$raw_env")"
 [[ -z "$raw_env" ]] && ok "Panel: every envelope error is worded through Model.envelopeText" \
                     || bad "Panel: every envelope error is worded through Model.envelopeText" "$raw_env"
 
-# 24/25 -- the fix for this task's worst defect, bound as a class.
-#
-#          THE DEFECT: collapsing a row while one of its fields has focus
-#          clears no focus and fires no activeFocusChanged, so the focus
-#          counter sticks above zero. Escape is then swallowed for the rest of
-#          the open session, and -- worse -- the now-invisible field remains
-#          the window's activeFocusItem, so keystrokes go on editing the draft
-#          with Apply ready to persist them. Measured, offscreen qml, a stub of
-#          Panel.qml's exact shape:
-#            collapsed without the hand-over  editorsFocused=1 blocked=true  activeFocusItem=field1 fieldVisible=false
-#            collapsed with it                editorsFocused=0 blocked=false activeFocusItem=keyCatcher
-#
-#          THE FIX was held by nothing at all: deleting the hand-over line
-#          leaves all five suites AND qmllint green. Two checks bind it,
-#          because either alone is insufficient -- the hand-over is only
-#          reached if every collapse goes through the setter, and the setter is
-#          only useful if the hand-over happens before the write.
-#
-#          Neither check can see whether focus actually moves at runtime; that
-#          part is measured in the stub above and recorded in the task report,
-#          not here. What these bind is the SHAPE the measurement was taken of.
-
-# The line numbers a named function's brace-delimited body spans, so order
-# inside it can be compared. Same brace-depth technique as function_body(),
-# which returns the text but loses the positions.
-function_line_range() {
-  # $1 = comment-stripped content, $2 = function name. Prints "START END".
-  awk -v fn="$2" '
-    BEGIN { capturing = 0; depth = 0; started = 0; s = 0 }
-    {
-      if (!capturing) {
-        if ($0 !~ "(^|[^A-Za-z0-9_])function[[:space:]]+" fn "[[:space:]]*\\(") next
-        capturing = 1; depth = 0; started = 0; s = NR
-      }
-      n = length($0)
-      for (i = 1; i <= n; i++) {
-        c = substr($0, i, 1)
-        if (c == "{") { depth++; started = 1 }
-        else if (c == "}") {
-          depth--
-          if (started && depth <= 0) { print s " " NR; exit }
-        }
-      }
-    }
-  ' <<<"$1"
-}
-
-# The PanelKeyCatcher's own id, so the hand-over below is origin-qualified
-# rather than merely a call to some forceActiveFocus. Same
-# first-id-after-the-opener technique check 16 uses, on the same block.
-panel_catcher_id="$(awk '
-    /(^|[^A-Za-z0-9_])PanelKeyCatcher[[:space:]]*\{/ { incatcher = 1 }
-    incatcher && /id:[[:space:]]*[A-Za-z_]/ {
-        match($0, /id:[[:space:]]*[A-Za-z_][A-Za-z0-9_]*/)
-        t = substr($0, RSTART, RLENGTH); sub(/id:[[:space:]]*/, "", t)
-        print t; exit
-    }
-' <<<"$keyboard_block")"
-
-expanded_write_pat='(^|[^A-Za-z0-9_.])(root\.)?expandedRow[[:space:]]*=[[:space:]]*[^=]'
-setter_range="$(function_line_range "$stripped_panel" setExpandedRow)"
-
-# 24 -- the hand-over happens, on the key catcher, and BEFORE the write.
-#       Order is the whole point: handing focus over after expandedRow has
-#       already changed is handing it over after the field is gone, which is
-#       the unfixed behaviour with an extra line in it.
-if [[ -z "$setter_range" ]]; then
-  bad "Panel: setExpandedRow hands focus to the key catcher before writing" \
-      "no 'function setExpandedRow(...) { ... }' block found -- the collapse paths have nowhere to route through"
-elif [[ -z "$panel_catcher_id" ]]; then
-  bad "Panel: setExpandedRow hands focus to the key catcher before writing" \
-      "no PanelKeyCatcher id could be read, so a hand-over cannot be qualified against it"
-else
-  setter_start="${setter_range%% *}"; setter_end="${setter_range##* }"
-  handover_line=0; write_line=0
-  for ((i = setter_start; i <= setter_end; i++)); do
-    line="${panel_all[$((i - 1))]}"
-    if (( handover_line == 0 )) \
-       && grep -qE "(^|[^A-Za-z0-9_])${panel_catcher_id}[[:space:]]*\.[[:space:]]*forceActiveFocus[[:space:]]*\(" <<<"$line"; then
-      handover_line=$i
-    fi
-    if (( write_line == 0 )) && grep -qE "$expanded_write_pat" <<<"$line"; then
-      write_line=$i
-    fi
-  done
-  if (( handover_line == 0 )); then
-    bad "Panel: setExpandedRow hands focus to the key catcher before writing" \
-        "no '${panel_catcher_id}.forceActiveFocus()' inside setExpandedRow -- collapsing then strands focus on an invisible field and blocks Escape for the session"
-  elif (( write_line == 0 )); then
-    bad "Panel: setExpandedRow hands focus to the key catcher before writing" \
-        "setExpandedRow never writes expandedRow at all"
-  elif (( handover_line < write_line )); then
-    ok "Panel: setExpandedRow hands focus to the key catcher before writing"
-  else
-    bad "Panel: setExpandedRow hands focus to the key catcher before writing" \
-        "the hand-over is on line $handover_line and the write on line $write_line -- after the write the field is already gone, which is the unfixed behaviour with an extra line in it"
-  fi
-fi
-
-# 25 -- and it is the ONLY write site. This is what makes check 24 sufficient:
-#       a direct assignment anywhere else bypasses the hand-over completely,
-#       and there were five such sites before this round (close, removeProgram,
-#       reload, revert, and the two row buttons) -- routing them through the
-#       setter is the entire reason the fix reaches every collapse.
-write_sites=""
-for ((i = 0; i < ${#panel_all[@]}; i++)); do
-  grep -qE "$expanded_write_pat" <<<"${panel_all[$i]}" || continue
-  write_sites="$write_sites
-$((i + 1)): ${panel_all[$i]}"
-done
-write_sites="$(sed '/^$/d' <<<"$write_sites")"
-site_count=0
-[[ -n "$write_sites" ]] && site_count="$(grep -c . <<<"$write_sites")"
-if (( site_count != 1 )); then
-  bad "Panel: expandedRow has exactly one write site, inside setExpandedRow" \
-      "found $site_count write site(s); every one outside the setter bypasses the focus hand-over:$write_sites"
-elif [[ -z "$setter_range" ]]; then
-  bad "Panel: expandedRow has exactly one write site, inside setExpandedRow" \
-      "the single write site cannot be placed: no setExpandedRow block found"
-else
-  only_line="${write_sites%%:*}"
-  only_line="$(tr -d '[:space:]' <<<"$only_line")"
-  if (( only_line >= ${setter_range%% *} && only_line <= ${setter_range##* } )); then
-    ok "Panel: expandedRow has exactly one write site, inside setExpandedRow"
-  else
-    bad "Panel: expandedRow has exactly one write site, inside setExpandedRow" \
-        "the write is on line $only_line, outside setExpandedRow (lines $setter_range) -- it bypasses the focus hand-over"
-  fi
-fi
-
 # 26 -- the truncation marker Panel.qml watches for is the text Runners.qml
 #       actually writes.
 #
@@ -1512,159 +1317,6 @@ else
       "the literal '$truncation_marker' is absent from:$marker_missing -- a reworded marker stops being recognised and a merely-long application list is reported as broken"
 fi
 
-# --- THE LAUNCH ROUTE ------------------------------------------------------
-#
-# THE GAP THIS CLOSES, measured by the final review: swapping
-# `run.launcher(` for `run.runner(` at Service.qml's launch site left ALL
-# FIVE suites green -- 70 structural, 6 runner-shape, 213 shell -- and kills
-# the user's programs 120 s after login. `--foreground`, `setsid -f` and the
-# `bash -n` gate appeared in NO test in this repository. They are the three
-# measured fixes that keep a launched program alive past `timeout`'s deadline
-# and past a Quickshell Process teardown, and the wrapper carrying them is
-# duplicated verbatim in two files with nothing binding the copies.
-#
-# Read through the comment-stripped view like everything else here, and
-# scoped to the launch FUNCTION rather than to the file, so a mention
-# anywhere else cannot stand in for the call that actually launches.
-
-# The body of one function, from its header to the line that starts the
-# process, on the comment-stripped view.
-launch_block() {
-  local file="$1" start="$2"
-  strip_comments "$file" \
-    | awk -v start="$start" '
-        $0 ~ start { inb = 1 }
-        inb { print }
-        inb && /launchProc\.running[[:space:]]*=[[:space:]]*true/ { exit }'
-}
-
-for pair in "Service.qml:function launchAll" "Panel.qml:function launchMissing"; do
-  lf="${pair%%:*}"; lstart="${pair#*:}"
-  block="$(launch_block "$lf" "$lstart")"
-
-  if [[ -z "$block" ]]; then
-    bad "$lf: the launch function was found at all" \
-        "no block between '$lstart' and 'launchProc.running = true' -- every check below would have been vacuous"
-    continue
-  fi
-  ok "$lf: the launch function was found at all"
-
-  # 1. The route. run.runner() lets GNU timeout put its child in a new
-  #    process group and signal the WHOLE group at the deadline; measured,
-  #    0 of 2 backgrounded grandchildren survived without --foreground.
-  if grep -qE 'launchProc\.command[[:space:]]*=[[:space:]]*run\.launcher\(' <<<"$block"; then
-    ok "$lf: the launch goes through run.launcher()"
-  else
-    bad "$lf: the launch goes through run.launcher()" \
-        "no 'launchProc.command = run.launcher(' in the launch function: $block"
-  fi
-
-  # 2. And not through the plain runner, which is the exact one-word swap
-  #    that killed the programs and stayed green.
-  if grep -qE 'run\.runner\(' <<<"$block"; then
-    bad "$lf: the launch does NOT go through run.runner()" \
-        "run.runner( appears inside the launch function -- that is the swap that kills every launched program at timeout's deadline"
-  else
-    ok "$lf: the launch does NOT go through run.runner()"
-  fi
-
-  # 3. Each entry detached, so a teardown of this Process
-  #    (Component.onDestruction, or a superseded generation) cannot reach
-  #    the programs either. --foreground alone does not cover that.
-  if grep -qE 'binSetsid[[:space:]]*\+[[:space:]]*"[[:space:]]*-f[[:space:]]*"' <<<"$block"; then
-    ok "$lf: each launched entry is detached with setsid -f"
-  else
-    bad "$lf: each launched entry is detached with setsid -f" \
-        "no 'binSetsid + \" -f \"' in the launch function -- a Process teardown then reaches the launched programs"
-  fi
-
-  # 4. The parse gate. Closing the entry's stdio also closes the only
-  #    channel on which it could report a syntax error, and Model.validate
-  #    accepts an unbalanced quote (a shell-syntax problem, not a
-  #    field-shape one). Without the gate the failure is silent.
-  if grep -qE 'binBash[[:space:]]*\+[[:space:]]*"[[:space:]]*-n[[:space:]]+-c[[:space:]]*"' <<<"$block"; then
-    ok "$lf: each entry is gated by a bash -n parse check"
-  else
-    bad "$lf: each entry is gated by a bash -n parse check" \
-        "no 'binBash + \" -n -c \"' in the launch function -- a malformed command line then fails with nothing on any stream"
-  fi
-done
-
-# The class-level answer to the two file-scoped blocks above: a THIRD launch
-# site added in some future task is covered the moment it assigns
-# launchProc.command, with nobody having to remember to extend a list here.
-# Every such assignment in any qml file must name run.launcher().
-launch_assign="$(grep_stripped_all 'launchProc\.command[[:space:]]*=' || true)"
-launch_bad="$(grep -vE 'run\.launcher\(' <<<"$launch_assign" | sed '/^$/d' || true)"
-launch_count="$(grep -c . <<<"$launch_assign" || true)"
-if [[ "$launch_count" -lt 2 ]]; then
-  bad "every launchProc.command assignment goes through run.launcher()" \
-      "found $launch_count assignment(s); there are two launch sites (Service.qml, Panel.qml), so the discovery pattern is broken and this check proves nothing"
-elif [[ -n "$launch_bad" ]]; then
-  bad "every launchProc.command assignment goes through run.launcher()" "$launch_bad"
-else
-  ok "every launchProc.command assignment goes through run.launcher() ($launch_count sites)"
-fi
-
-# --foreground itself, in the helper the two sites above go through. Grepping
-# it over test/ returned no hits before this block existed.
-launcher_body="$(awk '/function[[:space:]]+launcher[[:space:]]*\(/ {inb=1} inb {print} inb && /^[[:space:]]*}/ && !/function/ {exit}' <<<"$stripped_runners")"
-runner_body="$(awk '/function[[:space:]]+runner[[:space:]]*\(/ {inb=1} inb {print} inb && /^[[:space:]]*}/ && !/function/ {exit}' <<<"$stripped_runners")"
-if grep -qF -- '--foreground' <<<"$launcher_body"; then
-  ok "Runners.qml: launcher() passes --foreground to timeout"
-else
-  bad "Runners.qml: launcher() passes --foreground to timeout" \
-      "not in the launcher() body: $launcher_body -- without it timeout signals the whole process group at the deadline and every launched program dies with it"
-fi
-# The two helpers must stay distinguishable: if runner() also carried
-# --foreground, a launch site swapped onto runner() would look harmless here.
-if grep -qF -- '--foreground' <<<"$runner_body"; then
-  bad "Runners.qml: runner() is the plain route and does NOT pass --foreground" \
-      "runner() carries --foreground, so the launcher/runner distinction the launch checks rely on no longer exists: $runner_body"
-else
-  ok "Runners.qml: runner() is the plain route and does NOT pass --foreground"
-fi
-
-stripped_service="$(strip_comments Service.qml)"
-
-# --- the two appliers must judge hyprctl the same way ----------------------
-#
-# Service.qml and Panel.qml send the SAME payload through the SAME run.hypr()
-# helper. Panel.qml used to read only exitCode while Service.qml also required
-# the answer "ok", which made the interactive path -- the one where the user
-# pressed Apply and is watching -- the weaker of the two. Bound across both
-# files against one literal, comment-stripped, so a comment saying the right
-# thing cannot stand in for either check.
-ok_missing=""
-grep -qE '!==[[:space:]]*"ok"' <<<"$stripped_service" || ok_missing="$ok_missing Service.qml"
-grep -qE '!==[[:space:]]*"ok"' <<<"$stripped_panel"   || ok_missing="$ok_missing Panel.qml"
-if [[ -z "$ok_missing" ]]; then
-  ok "both appliers require hyprctl's \"ok\", not just a zero exit"
-else
-  bad "both appliers require hyprctl's \"ok\", not just a zero exit" \
-      "the '!== \"ok\"' check is absent from:$ok_missing -- a chunk hyprctl refused then reads as applied on that path"
-fi
-
-# --- no second copy of a Model.js bound in Panel.qml ------------------------
-#
-# Panel.qml's own header declares that every derivation lives in Model.js.
-# workspaceOptions() restated MAX_WORKSPACES as a bare 99, which is the copy
-# that drifts silently: the picker would offer a number validate() rejects, or
-# stop offering one it accepts.
-ws_opts="$(awk '/function[[:space:]]+workspaceOptions[[:space:]]*\(/ {inb=1} inb {print} inb && /^[[:space:]]*}/ && !/function/ {exit}' <<<"$stripped_panel")"
-if [[ -z "$ws_opts" ]]; then
-  bad "Panel.qml: workspaceOptions takes its bound from Model, not a literal" \
-      "workspaceOptions() was not found at all, so this check would have been vacuous"
-elif ! grep -qF 'Model.MAX_WORKSPACES' <<<"$ws_opts"; then
-  bad "Panel.qml: workspaceOptions takes its bound from Model, not a literal" \
-      "no Model.MAX_WORKSPACES in workspaceOptions(): $ws_opts"
-elif grep -qE '(^|[^A-Za-z0-9_.])99([^A-Za-z0-9_]|$)' <<<"$ws_opts"; then
-  bad "Panel.qml: workspaceOptions takes its bound from Model, not a literal" \
-      "a bare 99 is still in workspaceOptions(), so the bound exists twice: $ws_opts"
-else
-  ok "Panel.qml: workspaceOptions takes its bound from Model, not a literal"
-fi
-
 # The body of one JavaScript function, from its `function` line to the line
 # that closes it, by BRACE DEPTH rather than by "the next line that is only a
 # closing brace". The latter idiom is used by two older checks in this file and
@@ -1683,90 +1335,6 @@ fn_body() {
       if (opens > 0) started = 1
     }'
 }
-
-# 27 -- THE CUTOVER IS ONE SWITCH, AND EVERY WRITE ROUTE IS BEHIND IT.
-#
-#       While the writer does not exist, the plugin must apply nothing. That
-#       is not a property of a hidden button: a hidden control is not a closed
-#       route, and this project has already shipped one gate that read as
-#       armed and was inert (`Process.NormalExit` was `undefined`, so the
-#       marker's claim/refuse decision never ran at all). So the check is on
-#       the ROUTES, not on the visibility.
-#
-#       Four things, and each of them is one way this could rot:
-#         (a) Model.js actually says the switch is off. A cutover documented
-#             in prose and left `true` in code is the worst of the outcomes,
-#             because every other check here would still pass.
-#         (b) Panel.qml reads it exactly once, into root.offersEditing. More
-#             than once means two switches, which is the shape this whole
-#             change of direction exists to remove.
-#         (c) each of Panel.qml's three dispatching entry points -- apply,
-#             applyRules, launchMissing -- returns early on it. Named
-#             individually so that adding a fourth without a gate fails here
-#             rather than passing quietly.
-#         (d) Service.qml's load() consults it BEFORE it arms the watchdog and
-#             dispatches a read: gating further down would leave the apply
-#             sequence half-entered, which is exactly the state its own
-#             generation discipline is written to avoid.
-switch_name='Model\.WRITE_PATH_ENABLED'
-
-if grep -qE '^var WRITE_PATH_ENABLED = false;$' Model.js; then
-  ok "cutover: Model.js has the switch, and it is off"
-else
-  bad "cutover: Model.js has the switch, and it is off" \
-      "no line 'var WRITE_PATH_ENABLED = false;' in Model.js -- the switch is missing, renamed, or turned on"
-fi
-
-panel_reads="$(grep -cE "$switch_name" <<<"$stripped_panel" || true)"
-if [[ "$panel_reads" == "1" ]]; then
-  ok "cutover: Panel.qml reads the switch exactly once"
-else
-  bad "cutover: Panel.qml reads the switch exactly once" \
-      "found $panel_reads reads of $switch_name in Panel.qml -- expected the single one in root.offersEditing"
-fi
-
-if grep -qE '^[[:space:]]*readonly property bool offersEditing:[[:space:]]*'"$switch_name"'[[:space:]]*$' <<<"$stripped_panel"; then
-  ok "cutover: Panel.qml's one read is the offersEditing property"
-else
-  bad "cutover: Panel.qml's one read is the offersEditing property" \
-      "no 'readonly property bool offersEditing: $switch_name' line in Panel.qml"
-fi
-
-ungated=""
-for fn in apply applyRules launchMissing; do
-  body="$(fn_body "$fn" <<<"$stripped_panel")"
-  if [[ -z "$body" ]]; then
-    ungated="$ungated $fn(not-found)"
-  elif ! grep -qE 'if[[:space:]]*\(![[:space:]]*root\.offersEditing[[:space:]]*\)[[:space:]]*return' <<<"$body"; then
-    ungated="$ungated $fn"
-  fi
-done
-if [[ -z "$ungated" ]]; then
-  ok "cutover: Panel.qml's apply, applyRules and launchMissing all refuse"
-else
-  bad "cutover: Panel.qml's apply, applyRules and launchMissing all refuse" \
-      "no 'if (!root.offersEditing) return' in:$ungated"
-fi
-
-# Service.qml's load(): the switch has to come before watchdog.start() and
-# before dispatchRead(). Line numbers within the function body, so a gate
-# moved below either of them fails.
-load_body="$(fn_body load <<<"$stripped_service")"
-gate_line="$(grep -nE "$switch_name" <<<"$load_body" | head -1 | cut -d: -f1)"
-arm_line="$(grep -nF 'watchdog.start()' <<<"$load_body" | head -1 | cut -d: -f1)"
-dispatch_line="$(grep -nE 'dispatchRead\(' <<<"$load_body" | head -1 | cut -d: -f1)"
-if [[ -z "$load_body" ]]; then
-  bad "cutover: Service.qml consults the switch before it arms or dispatches" \
-      "load() was not found at all, so this check would have been vacuous"
-elif [[ -z "$gate_line" || -z "$arm_line" || -z "$dispatch_line" ]]; then
-  bad "cutover: Service.qml consults the switch before it arms or dispatches" \
-      "load() is missing one of the three: switch=${gate_line:-none} watchdog.start=${arm_line:-none} dispatchRead=${dispatch_line:-none}"
-elif (( gate_line < arm_line && gate_line < dispatch_line )); then
-  ok "cutover: Service.qml consults the switch before it arms or dispatches"
-else
-  bad "cutover: Service.qml consults the switch before it arms or dispatches" \
-      "in load(): switch at $gate_line, watchdog.start at $arm_line, dispatchRead at $dispatch_line"
-fi
 
 # --- THE WRITE OF autostart.lua --------------------------------------------
 #
@@ -1868,16 +1436,41 @@ else
       "no root.autostartWritable in the code of Panel.qml"
 fi
 
-# 35b -- the bar widget's two numbers are DERIVED IN Model.js. Finding 1 of the
+# 35b -- the bar widget's number is DERIVED IN Model.js. Finding 1 of the
 #        task 18 review was this tally written in the panel, comparing section
 #        names in the one file no suite can execute.
-if grep -qE 'Model\.hyprProgramCount\(' <<<"$stripped_panel" \
-   && grep -qE 'Model\.hyprPlacementCount\(' <<<"$stripped_panel"; then
-  ok "autostart write: the panel's two counts come from Model.js"
+#
+#        ONE number now: hyprPlacementCount counted the other two files.
+#        `counted` carries one argument since, and BarWidget.qml's handler
+#        takes one -- a two-argument handler on a one-argument signal is not
+#        an error in QML, the extra parameter simply arrives undefined, so
+#        the arity of the pair is bound here too.
+if grep -qE 'Model\.hyprProgramCount\(' <<<"$stripped_panel"; then
+  ok "autostart write: the panel's count comes from Model.js"
 else
-  bad "autostart write: the panel's two counts come from Model.js" \
-      "Model.hyprProgramCount / Model.hyprPlacementCount are not both called in the code of Panel.qml"
+  bad "autostart write: the panel's count comes from Model.js" \
+      "Model.hyprProgramCount is not called in the code of Panel.qml"
 fi
+if grep -qE '(^|[^A-Za-z0-9_])signal[[:space:]]+counted[[:space:]]*\([[:space:]]*int[[:space:]]+[A-Za-z_][A-Za-z0-9_]*[[:space:]]*\)' <<<"$stripped_panel"; then
+  ok "autostart write: the counted signal carries exactly one number"
+else
+  bad "autostart write: the counted signal carries exactly one number" \
+      "no 'signal counted(int <name>)' with a single parameter in the code of Panel.qml"
+fi
+counted_handler="$(grep -oE 'counted\.connect\(function[[:space:]]*\([^)]*\)' <<<"$stripped_barwidget" || true)"
+if [[ -z "$counted_handler" ]]; then
+  bad "autostart write: and BarWidget's handler takes exactly one" \
+      "no 'counted.connect(function (...))' in the code of BarWidget.qml, so the arity cannot be compared"
+elif [[ "$counted_handler" == *,* ]]; then
+  bad "autostart write: and BarWidget's handler takes exactly one" \
+      "the handler declares more than one parameter ($counted_handler) -- every one past the signal's own arrives undefined, silently"
+else
+  ok "autostart write: and BarWidget's handler takes exactly one"
+fi
+# The three names stay in the pattern although two of the files are no longer
+# read: this forbids the panel classifying a section by its file name, and a
+# panel that started comparing against "windowrules.lua" again would be doing
+# exactly the thing the rule exists to stop.
 name_compare="$(grep -nE '===[[:space:]]*"(autostart|windowrules|workspaces)\.lua"' <<<"$stripped_panel" || true)"
 [[ -z "$name_compare" ]] && ok "autostart write: the panel classifies no section by its file name" \
                          || bad "autostart write: the panel classifies no section by its file name" "$name_compare"
