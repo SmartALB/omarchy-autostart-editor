@@ -154,7 +154,18 @@ probe "model: the generated Lua compiles" "$LUA_SUITE" Model.js \
 probe "manifest: a panel kind would move the plugin off the bar" "$SHELL_SUITE" manifest.json \
   's/"kinds": \["bar-widget", "service"\]/"kinds": ["bar-widget", "panel", "service"]/'
 
-probe "manifest: the service kind is what loads Service.qml" "$SHELL_SUITE" manifest.json \
+# An entry point whose kind is not declared. This is the direction NOTHING
+# else caught: it is not `panel`, so the "no panel key" assertion passes; the
+# kinds list is untouched, so the sorted-kinds assertion passes; and
+# `omarchy plugin validate` only checks kind -> entryPoint, so the platform
+# validator passes it too. Only the pair check refuses it.
+probe "manifest: an entry point with no kind to load it" "$SHELL_SUITE" manifest.json \
+  's|"barWidget": "BarWidget.qml",|"barWidget": "BarWidget.qml",\n    "overlay": "Panel.qml",|'
+
+# The opposite direction: the kind gone while its entry point stays. This is
+# the exact inconsistent pair that would ship a plugin whose autostart never
+# runs, and it is what fix round 1 was raised about.
+probe "manifest: a kind removed while its entry point stays" "$SHELL_SUITE" manifest.json \
   's/"kinds": \["bar-widget", "service"\]/"kinds": ["bar-widget"]/'
 
 probe "readme: a privileged verb in prose" "$SHELL_SUITE" README.md \

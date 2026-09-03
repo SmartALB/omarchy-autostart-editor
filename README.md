@@ -59,8 +59,20 @@ add the id to a bar section in `~/.config/omarchy/shell.json`:
 { "bar": { "layout": { "right": [ { "id": "smartalb.autostart" } ] } } }
 ```
 
-The same entry is what enables the background part of the plugin, the one that
-applies your list at login -- there is no second switch to find.
+**This step is not optional, and skipping it fails quietly.** That one entry is
+what enables *both* halves of the plugin: the bar widget you click, and the
+background part that applies your list at login. Until the id is referenced
+from `shell.json`, Omarchy treats the plugin as disabled -- nothing appears in
+the bar and nothing starts at login, with no error anywhere. One entry is
+enough; do not add a second one under a top-level `plugins[]` array.
+
+To check it took, after the restart:
+
+```bash
+omarchy plugin list | grep smartalb.autostart
+```
+
+The row should read `enabled` and list both `bar-widget` and `service`.
 
 ### Removal
 

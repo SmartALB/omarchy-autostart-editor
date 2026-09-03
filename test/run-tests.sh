@@ -1097,6 +1097,41 @@ test_manifest_is_sound() {
     assert_eq "manifest: Panel.qml ships anyway, for the widget's Loader" \
               "$([[ -f "$root/Panel.qml" ]] && echo yes || echo no)" "yes"
 
+    # KIND AND ENTRY POINT ARE ONE FACT, NOT TWO. `shell.qml:289-290` needs
+    # BOTH to instantiate a service -- the kind gates it, the entry point
+    # supplies the file -- and the same pair guards the loop at :329-330. A
+    # manifest carrying one without the other installs, enables, validates
+    # clean, and does nothing: that is why the assertions above pin each half
+    # by name AND this one refuses the inconsistent pair in either direction.
+    #
+    # `omarchy plugin validate` checks only kind -> entryPoint. The reverse
+    # direction is a real gap: an `entryPoints.overlay` with no overlay kind
+    # passes every other assertion in this function (it is not `panel`, and
+    # the kinds list is unchanged) and passes the platform validator too.
+    # It is inert at runtime, and it is one edit away from being read as an
+    # intent to declare the kind.
+    local kind_table='{"bar":"bar","bar-widget":"barWidget","menu":"menu","overlay":"overlay","panel":"panel","service":"service"}'
+    local pair_program='
+      . as $m
+      | [ $m.kinds[]
+          | select($t[.] != null) as $k
+          | select(($m.entryPoints | has($t[$k])) | not)
+          | "kind \($k) declares no entryPoints.\($t[$k])" ]
+      + [ ($m.entryPoints | keys[]) as $ep
+          | ($t | to_entries | map(select(.value == $ep)) | .[0].key) as $k
+          | select($k != null)
+          | select(($m.kinds | index($k)) == null)
+          | "entryPoints.\($ep) declares no kind \($k)" ]
+      | join("; ")'
+    assert_eq "manifest: every kind has its entry point and every entry point its kind" \
+              "$(jq -r --argjson t "$kind_table" "$pair_program" "$m")" ""
+    # Fail-closed: a table that recognises none of this manifest's kinds would
+    # make the assertion above vacuously green, which is the blind shape one
+    # level up.
+    assert_eq "manifest: the pair check actually examined both declared kinds" \
+              "$(jq -r --argjson t "$kind_table" '[.kinds[] | select($t[.] != null)] | length' "$m")" \
+              "2"
+
     assert_eq "manifest: defaultSection is one the registry accepts" \
               "$(jq -r '.barWidget.defaultSection' "$m")" "right"
     assert_eq "manifest: allowMultiple is off" \

@@ -45,6 +45,16 @@ Two things to know:
   1. Restart the shell so the widget appears:  omarchy-restart-shell
   2. Add the widget to your bar in ~/.config/omarchy/shell.json
 
+Step 2 is not optional, and skipping it fails quietly. That one entry enables
+both halves of the plugin -- the widget you click AND the background part that
+applies your list at login. Until the id is referenced from shell.json,
+Omarchy treats the plugin as disabled: nothing in the bar, nothing at login,
+no error anywhere. Check it took with:
+
+  omarchy plugin list | grep smartalb.autostart
+
+The row should read "enabled" and list both bar-widget and service.
+
 Your configuration will live in
   $CONFIG
 with mode 0600. It holds command lines that are run as you when your session

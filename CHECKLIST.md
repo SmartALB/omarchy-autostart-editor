@@ -46,7 +46,57 @@ while `preview.png` is absent *and* named here as owed, and it passes once the
 file is present and is a real PNG. It fails only if the obligation disappears
 from both places at once.
 
-### A2. Run the two checks this repository cannot run for you
+### A2. Enable the plugin in `shell.json`, and confirm the service came up
+
+**Installing is not sufficient, and the failure is silent.** A third-party
+plugin counts as enabled only when its id is referenced from
+`~/.config/omarchy/shell.json`; only first-party shell infrastructure is
+implicitly enabled (`shell.qml:263-266`, `PluginRegistry.isEnabled`). Until
+that reference exists, `_syncServices` (`shell.qml:329-331`) skips this plugin
+and `Service.qml` is never created -- so the autostart, which is the entire
+point of the plugin, does not run at login. Nothing complains: the plugin
+installs, `omarchy plugin validate` exits 0, and the bar shows nothing.
+
+**One entry is enough, and it is the bar entry.** `findEntryLocation`
+(`PluginRegistry.qml:206-224`) accepts the id in `bar.id`, in any
+`bar.layout.*` section, or in the top-level `plugins[]` array, and
+`isEnabled()` for a third-party plugin is exactly that predicate. So adding
+the widget to the bar -- through Omarchy's own plugin screen, or by hand:
+
+```json
+{ "bar": { "layout": { "right": [ { "id": "smartalb.autostart" } ] } } }
+```
+
+enables **both** halves, the widget and the service. There is no second
+switch.
+
+**Do not also add it under `plugins[]`.** A second reference is not needed and
+is not harmless bookkeeping: `setEnabled(false)` removes only the first
+location it finds, so switching the plugin off through the interface would
+leave the other entry behind and the plugin would stay enabled.
+
+Verify, after `omarchy-restart-shell`:
+
+```bash
+omarchy plugin list | grep smartalb.autostart
+```
+
+The row must read `enabled`, and its KINDS column must show **both**
+`bar-widget` and `service`. A row that lists only `bar-widget` means the
+manifest lost the kind and the autostart is dead.
+
+Then confirm the service instantiated rather than failed to load:
+
+```bash
+journalctl --user -b -t omarchy-shell | grep -i "service plugin"
+```
+
+Silence is the good outcome. `service plugin load failed for
+smartalb.autostart: ...` or `service plugin createObject returned null` are the
+two ways `ensureService` reports a failure (`shell.qml:297`, `:302`), and both
+leave the autostart absent.
+
+### A3. Run the two checks this repository cannot run for you
 
 ```bash
 omarchy plugin validate "$PWD"
@@ -58,7 +108,7 @@ qmllint -I "${OMARCHY_PATH:-/usr/share/omarchy}/shell" \
 manifest. `qmllint` needs the shell's own import path, which only exists on a
 machine with Omarchy installed.
 
-### A3. Confirm what you are asserting in the submission
+### A4. Confirm what you are asserting in the submission
 
 The marketplace asks the submitter to confirm ownership of the plugin **and of
 the preview image**, and to state the plugin's dependencies. Note also that
@@ -93,7 +143,9 @@ reloads the shell after any change under the plugin directory and takes running
    -- and **none** of them twice.
 8. `omarchy-restart-shell` starts **nothing** again. That is the start marker
    doing its job.
-9. **Apply twice in a row**, then:
+9. **Apply twice in a row** -- but only after A2 has confirmed the service is
+   actually running. If the service never instantiated, applying twice cannot
+   grow the rule count and a green result here would mean nothing. Then:
 
    ```bash
    hyprctl workspacerules | grep -c "Workspace rule"
