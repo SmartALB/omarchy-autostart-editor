@@ -20,9 +20,46 @@ HYPRCTL="${HYPRCTL:-hyprctl}"
 # latter, but the guarantee should not depend on that.
 GREP="${GREP:-/usr/bin/grep}"
 
+# A named seam like the two above, and the only reason the command line half of
+# this script is testable at all: a sandbox cannot create /proc/<pid>/cmdline,
+# so the tests point this at a directory of their own.
+PROC_DIR="${PROC_DIR:-/proc}"
+
 MAX_WINDOWS=500
 MAX_WORKSPACES=99
 MAX_PROGRAMS=200
+
+# The command line cap. 500 is MAX_COMMAND in Model.js -- the longest command
+# that file will write -- so a command line longer than this could not be
+# written even if it were offered, and a TRUNCATED one is worse than none: it
+# looks like a command and is not one. So past the cap the field is empty and
+# the window says it has no offer, rather than offering half a nimbus line.
+# (Measured on his session: the nimbus line is 452 characters.)
+MAX_COMMAND_CHARS=500
+# Only the basename of argv 0 is needed for the .desktop-by-binary match, and
+# that stays available even when the whole line is past the cap.
+MAX_PROGRAM_CHARS=128
+# What is read from /proc at all. Bounded before anything looks at it, for the
+# same reason the window count is: the content is not ours.
+MAX_CMDLINE_BYTES=4096
+
+# One process's command line, NUL-separated in /proc, as one line of text --
+# or nothing at all when it cannot be read. An unreadable /proc entry is an
+# empty field and never an error: a window belonging to another user, or one
+# whose process exited between the two reads, must not cost the whole list.
+#
+# The tab, the newline and the carriage return are squashed HERE rather than in
+# jq, because the pid and the command line travel to jq as one tab-separated
+# line: a tab surviving this would shift the field and hand a window someone
+# else's command. The remaining control characters are squashed in jq, where
+# the class and the title already are.
+proc_cmdline() {
+    local pid="$1"
+    [[ "$pid" =~ ^[0-9]{1,10}$ ]] || return 0
+    head -c "$MAX_CMDLINE_BYTES" -- "$PROC_DIR/$pid/cmdline" 2>/dev/null \
+        | tr '\0\n\t\r' '    '
+    return 0
+}
 
 cmd_list_json() {
     local monitors clients
@@ -35,7 +72,8 @@ cmd_list_json() {
     fi
     jq -e 'type == "array"' <<<"$monitors" >/dev/null 2>&1 || monitors="[]"
 
-    jq -c --argjson mon "$monitors" --argjson max "$MAX_WINDOWS" '
+    local windows
+    windows="$(jq -c --argjson mon "$monitors" --argjson max "$MAX_WINDOWS" '
         # monitors travels through --argjson (argv) while clients is streamed
         # through stdin to respect the MAX_ARG_STRLEN limit. A monitor list is
         # bounded by physical hardware and will never approach that limit;
@@ -66,9 +104,57 @@ cmd_list_json() {
             class:     ((.class // "") | gsub("[[:cntrl:]]"; " ")),
             title:     ((.title // "") | gsub("[[:cntrl:]]"; " ")),
             workspace: ((.workspace.id // 0) | tostring),
-            monitor:   ($names[(.monitor // -1) | tostring] // "")
+            monitor:   ($names[(.monitor // -1) | tostring] // ""),
+            # The pid travels only as far as the second pass below, which
+            # replaces it with the command line it resolved. Nothing outside
+            # this script ever sees it: a pid is stale the moment it is read,
+            # and a consumer holding one would eventually act on a process
+            # that is no longer the one it looked at.
+            pid:       (if (.pid | type) == "number" then (.pid | floor) else -1 end)
           })
-    ' <<<"$clients"
+    ' <<<"$clients")"
+
+    # The command line per window, resolved once per DISTINCT pid: his three
+    # nimbus windows are three windows of one process, and the whole reason
+    # this is a list of suggestions rather than an automatic mapping.
+    local pairs
+    pairs="$(
+        while IFS= read -r pid; do
+            printf '%s\t%s\n' "$pid" "$(proc_cmdline "$pid")"
+        done < <(jq -r '.[].pid | select(. > 0) | tostring' <<<"$windows" | sort -u)
+    )"
+
+    # NEITHER input travels in argv, and that is measured rather than assumed:
+    # MAX_WINDOWS distinct pids at MAX_CMDLINE_BYTES each is far past
+    # MAX_ARG_STRLEN (128 KiB for one argument), and a window list of 500
+    # titles is not comfortably under it either. An over-long argument does not
+    # truncate, it makes execve fail with E2BIG -- jq would never run, and the
+    # panel would see an empty window list with nothing to say why. So the
+    # window list stays on stdin and the pid/command pairs arrive through
+    # --rawfile on a pipe. A pipe rather than a temporary file: there is
+    # nothing to clean up on any of this script's several exit paths.
+    jq -c --rawfile pairs <(printf '%s' "$pairs") \
+          --argjson maxcmd "$MAX_COMMAND_CHARS" \
+          --argjson maxprog "$MAX_PROGRAM_CHARS" '
+        def clean: gsub("[[:cntrl:]]"; " ") | gsub("  +"; " ") | sub("^ +"; "") | sub(" +$"; "");
+        # `last // ""` rather than `last`: jq splits the empty string to the
+        # EMPTY ARRAY, whose last element is null -- so a window whose /proc
+        # entry could not be read reported a program of null instead of "".
+        # Measured, not guessed at: the assertion for it went red.
+        def basename: split("/") | last // "";
+        ( $pairs | split("\n") | map(select(length > 0) | split("\t"))
+                 | map({ key: .[0], value: (.[1] // "") }) | from_entries ) as $cmds
+        | map(. + { raw: ($cmds[(.pid | tostring)] // "") })
+        | map({ address, class, title, workspace, monitor,
+                # Past the cap the field is empty -- see MAX_COMMAND_CHARS.
+                command: ((.raw | clean) as $c
+                          | if ($c | length) > $maxcmd then "" else $c end),
+                # The basename of argv 0, which survives the cap because the
+                # .desktop-by-binary match is the route that fixes the two
+                # cases /proc cannot answer, and it needs only this word.
+                program: ((.raw | clean | split(" ") | first // "" | basename)
+                          | .[0:$maxprog]) })
+    ' <<<"$windows"
 }
 
 cmd_workspaces() {

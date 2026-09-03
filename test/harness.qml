@@ -1970,6 +1970,457 @@ QtObject {
                   Model.autostartWrittenText().indexOf("starts nothing and reloads nothing") >= 0,
                   true);
 
+
+            // --- FROM A RUNNING PROGRAM TO AN AUTOSTART COMMAND --------------
+            //
+            // THE FIXTURES ARE HIS OWN SESSION, measured on 2026-09-02 with
+            // `hyprctl -j clients`, /proc/<pid>/cmdline and
+            // bin/omarchy-autostart-apps -- not invented shapes. The three
+            // cases that make this a choice rather than a mapping are all in
+            // here: the AppImage mount path, the three windows of one nimbus
+            // process, and the .desktop file with the right command and no
+            // StartupWMClass.
+            var hisApps = [
+                { name: "Termpane", exec: "termpane", wmclass: "Termpane", icon: "" },
+                // Sorts BEFORE Webmail (Nimbus) in his real list, and that is
+                // load-bearing: without the host-token ordering the Webmail
+                // window offers YouTube Music first.
+                { name: "YouTube Music",
+                  exec: "/opt/nimbus-bin/nimbus --profile-directory=Default --app-id=cinhimbnkkaeohfgghhklpknlkffjgod",
+                  wmclass: "crx_cinhimbnkkaeohfgghhklpknlkffjgod", icon: "" },
+                // ~/.local/share/applications/Webmail-nimbus.desktop, verbatim:
+                // the right command, and NO StartupWMClass.
+                { name: "Webmail (Nimbus)",
+                  exec: "nimbus --app=https://mail.example.com/mail/", wmclass: "", icon: "" },
+                { name: "Nimbus", exec: "nimbus %U", wmclass: "nimbus-browser", icon: "" },
+                { name: "Modelbox", exec: "modelbox %U", wmclass: "LM-Studio", icon: "" },
+                { name: "Vaultkey", exec: "vaultkey %f", wmclass: "vaultkey", icon: "" },
+                { name: "Chatterbox", exec: "Chatterbox -- %U", wmclass: "ChatterboxDesktop", icon: "" },
+                { name: "Signal", exec: "msgbox-desktop -- %u", wmclass: "signal", icon: "" },
+                { name: "Microsoft Teams for Linux",
+                  exec: "notes-app --gtk-version=3 %U", wmclass: "", icon: "" },
+                { name: "Chat", exec: "omarchy-launch-webapp https://chat.example.org/",
+                  wmclass: "", icon: "" }
+            ];
+
+            // His ~/.config/hypr/autostart.lua, verbatim. notes-app is
+            // in it and signal is not -- which is what the already-present
+            // warnings are judged against.
+            var hisAutostart =
+                "-- Autostart. Portiert aus autostart.conf.\n"
+              + "\n"
+              + "-- Dienstliche Kommunikation\n"
+              + "o.launch_on_start(\"notes-app\")\n"
+              + "o.launch_on_start(\"nimbus --app=https://mail.example.com/mail/\")\n"
+              + "\n"
+              + "-- Private Kommunikation\n"
+              + "o.exec_on_start(o.launch_webapp_sole(\"Chat\", \"https://chat.example.org/\"))\n"
+              + "o.launch_on_start(\"Chatterbox\")\n"
+              + "\n"
+              + "-- Browser\n"
+              + "o.launch_on_start(\"nimbus\")\n"
+              + "\n"
+              + "-- Schluesselverwaltung\n"
+              + "o.launch_on_start(\"keyring-gui\")\n"
+              + "\n"
+              + "-- Modelbox (am 28.08.2026 nach dem Upgrade neu installiert).\n"
+              + "o.launch_on_start(\"modelbox\")\n";
+            var hisEntries = Model.parseAutostartLua(hisAutostart, "autostart.lua");
+
+            // The command line all three nimbus windows report, verbatim from
+            // /proc/1866/cmdline. It ENDS in --app=https://mail.example.com/
+            // mail/, so the plain browser window reports a line that is wrong
+            // for it -- which no amount of parsing can detect.
+            var braveRunning =
+                "/opt/nimbus-bin/nimbus --ozone-platform=wayland --ozone-platform-hint=wayland"
+              + " --enable-features=TouchpadOverscrollHistoryNavigation"
+              + " --load-extension=/usr/share/omarchy/default/chromium/extensions/copy-url,"
+              + "/usr/share/omarchy/default/chromium/extensions/yt-dlp,"
+              + "/usr/share/omarchy/default/chromium/extensions/chat-slim"
+              + " --password-store=gnome-libsecret --app=https://mail.example.com/mail/";
+
+            function forWindow(windowClass, command, program) {
+                return Model.autostartCandidatesForWindow(
+                    { "class": windowClass, title: "t", command: command,
+                      program: program, address: "0x1", workspace: "1", monitor: "DP-4" },
+                    hisApps, hisEntries);
+            }
+            // The whole ordered list as one comparable string: source, the
+            // Name= it came from, the command, and every warning. Order is
+            // part of the answer, so it is part of the assertion.
+            function rendered(list) {
+                var out = [];
+                for (var r = 0; r < list.length; r++) {
+                    out.push(list[r].source + "|" + list[r].name + "|" + list[r].command
+                             + (list[r].warnings.length > 0
+                                ? "|!" + list[r].warnings.join("+") : ""));
+                }
+                return out.join("  ,  ");
+            }
+
+            check("candidates fixture: his autostart.lua reads back six editable entries",
+                  hisEntries.length + "/" + Model.hyprEditableCount(
+                      [{ name: "autostart.lua", entries: hisEntries }]), "7/6");
+
+            // --- one assertion per row of the measured table ------------------
+            check("candidates row: org.example.chatterbox",
+                  rendered(forWindow("org.example.chatterbox", "/usr/bin/Chatterbox", "Chatterbox")),
+                  "desktop-binary|Chatterbox|Chatterbox --|!program-already-present"
+                  + "  ,  running||/usr/bin/Chatterbox|!program-already-present");
+            check("candidates row: org.vaultkey.Vaultkey",
+                  rendered(forWindow("org.vaultkey.Vaultkey", "/usr/bin/vaultkey", "vaultkey")),
+                  "desktop-binary|Vaultkey|vaultkey"
+                  + "  ,  running||/usr/bin/vaultkey");
+            check("candidates row: notes-app",
+                  rendered(forWindow("notes-app", "/opt/notes-app/notes-app",
+                                     "notes-app")),
+                  "desktop-binary|Microsoft Teams for Linux|notes-app --gtk-version=3"
+                  + "|!program-already-present"
+                  + "  ,  running||/opt/notes-app/notes-app|!program-already-present");
+            check("candidates row: signal",
+                  rendered(forWindow("signal", "/usr/lib/msgbox-desktop/msgbox-desktop",
+                                     "msgbox-desktop")),
+                  "desktop-class|Signal|msgbox-desktop --"
+                  + "  ,  running||/usr/lib/msgbox-desktop/msgbox-desktop");
+            check("candidates row: Termpane",
+                  rendered(forWindow("Termpane", "/usr/bin/termpane --working-directory=/home/user",
+                                     "termpane")),
+                  "desktop-class|Termpane|termpane"
+                  + "  ,  running||/usr/bin/termpane --working-directory=/home/user");
+            check("candidates row: ai.elementlabs.modelbox",
+                  rendered(forWindow("ai.elementlabs.modelbox", "/tmp/.mount_lm-stuFjMMHD/modelbox",
+                                     "modelbox")),
+                  "desktop-binary|Modelbox|modelbox|!already-present"
+                  + "  ,  running||/tmp/.mount_lm-stuFjMMHD/modelbox"
+                  + "|!unstable-path+program-already-present");
+            check("candidates row: nimbus-browser",
+                  rendered(forWindow("nimbus-browser", braveRunning, "nimbus")),
+                  "desktop-class|Nimbus|nimbus|!already-present"
+                  + "  ,  desktop-binary|YouTube Music|/opt/nimbus-bin/nimbus"
+                  + " --profile-directory=Default --app-id=cinhimbnkkaeohfgghhklpknlkffjgod"
+                  + "|!program-already-present"
+                  + "  ,  desktop-binary|Webmail (Nimbus)|nimbus"
+                  + " --app=https://mail.example.com/mail/|!already-present"
+                  + "  ,  running||" + braveRunning + "|!program-already-present");
+            check("candidates row: nimbus-mail.example.com__mail_-Default",
+                  rendered(forWindow("nimbus-mail.example.com__mail_-Default", braveRunning, "nimbus")),
+                  "desktop-binary|Webmail (Nimbus)|nimbus"
+                  + " --app=https://mail.example.com/mail/|!already-present"
+                  + "  ,  desktop-binary|YouTube Music|/opt/nimbus-bin/nimbus"
+                  + " --profile-directory=Default --app-id=cinhimbnkkaeohfgghhklpknlkffjgod"
+                  + "|!program-already-present"
+                  + "  ,  desktop-binary|Nimbus|nimbus|!already-present"
+                  + "  ,  running||" + braveRunning + "|!program-already-present");
+            check("candidates row: nimbus-chat.example.org__-Default",
+                  rendered(forWindow("nimbus-chat.example.org__-Default", braveRunning, "nimbus")),
+                  "desktop-binary|YouTube Music|/opt/nimbus-bin/nimbus"
+                  + " --profile-directory=Default --app-id=cinhimbnkkaeohfgghhklpknlkffjgod"
+                  + "|!program-already-present"
+                  + "  ,  desktop-binary|Webmail (Nimbus)|nimbus"
+                  + " --app=https://mail.example.com/mail/|!already-present"
+                  + "  ,  desktop-binary|Nimbus|nimbus|!already-present"
+                  + "  ,  running||" + braveRunning + "|!program-already-present");
+
+            // --- THE OUTLOOK CASE, named ------------------------------------
+            //
+            // A .desktop file with NO StartupWMClass whose Exec starts with
+            // the same program as the running window. This is the only route
+            // that reaches it, and the suggestion must be that command --
+            // never the /proc line, which belongs to a browser process
+            // serving three windows at once.
+            var webmail = forWindow("nimbus-mail.example.com__mail_-Default", braveRunning, "nimbus");
+            check("webmail case: the top suggestion is the .desktop command",
+                  webmail[0].command, "nimbus --app=https://mail.example.com/mail/");
+            check("webmail case: and it is found by binary, not by class",
+                  webmail[0].source, "desktop-binary");
+            check("webmail case: it is NOT the /proc line",
+                  webmail[0].command === braveRunning, false);
+            check("webmail case: the Name= is carried so five nimbus entries can be told apart",
+                  webmail[0].name, "Webmail (Nimbus)");
+            check("webmail case: nothing at all matched by class",
+                  (function() {
+                      var n = 0;
+                      for (var q = 0; q < webmail.length; q++) {
+                          if (webmail[q].source === "desktop-class") n++;
+                      }
+                      return n;
+                  })(), 0);
+            check("webmail case: the desktop entry it comes from really has no StartupWMClass",
+                  hisApps[2].name + "/" + hisApps[2].wmclass, "Webmail (Nimbus)/");
+            check("webmail case: the host token out of the window class",
+                  Model.classHostToken("nimbus-mail.example.com__mail_-Default"),
+                  "mail.example.com");
+            check("webmail case: the browser name in front of the host is not part of it",
+                  Model.classHostToken("nimbus-mail.example.com__mail_-Default")
+                  .indexOf("nimbus"), -1);
+            check("webmail case: a class with no dotted token has none",
+                  Model.classHostToken("Termpane"), "");
+            check("webmail case: a host whose own label has a hyphen still yields a substring",
+                  Model.classHostToken("nimbus-web-app.example.com__-Default"), "app.example.com");
+            check("webmail case: the ordering signal is what puts it first",
+                  Model.classHostToken("nimbus-mail.example.com__mail_-Default").length > 0
+                  && "nimbus --app=https://mail.example.com/mail/".indexOf(
+                         Model.classHostToken("nimbus-mail.example.com__mail_-Default")) >= 0,
+                  true);
+            check("webmail case: and the runner-up does NOT carry that token",
+                  hisApps[1].exec.indexOf("mail.example.com"), -1);
+
+            // --- THE LM STUDIO CASE, named ----------------------------------
+            //
+            // The most important warning in this task: a path that exists
+            // today and not after a restart, written into a file nobody looks
+            // at again until it silently stops working.
+            var modelbox = forWindow("ai.elementlabs.modelbox",
+                                     "/tmp/.mount_lm-stuFjMMHD/modelbox", "modelbox");
+            check("lm studio case: the running line is warned about",
+                  modelbox[1].warning, "unstable-path");
+            check("lm studio case: it is the running command that carries it",
+                  modelbox[1].source + "|" + modelbox[1].command,
+                  "running|/tmp/.mount_lm-stuFjMMHD/modelbox");
+            check("lm studio case: the duplicate warning is not suppressed by it",
+                  modelbox[1].warnings.join("+"), "unstable-path+program-already-present");
+            check("lm studio case: the .desktop suggestion above it has no path at all",
+                  modelbox[0].command, "modelbox");
+            check("lm studio case: /tmp is unstable",
+                  Model.commandIsUnstablePath("/tmp/.mount_x/modelbox"), true);
+            check("lm studio case: /run is unstable",
+                  Model.commandIsUnstablePath("/run/user/1000/appimage/thing"), true);
+            check("lm studio case: /proc is unstable",
+                  Model.commandIsUnstablePath("/proc/self/cwd/thing"), true);
+            check("lm studio case: /dev/shm is unstable",
+                  Model.commandIsUnstablePath("/dev/shm/thing"), true);
+            check("lm studio case: a .mount_ segment mid-path is unstable wherever it sits",
+                  Model.commandIsUnstablePath("/home/user/.cache/.mount_abc123/modelbox"), true);
+            check("lm studio case: a mount segment after a space is caught too",
+                  Model.commandIsUnstablePath("env FOO=1 .mount_abc/modelbox"), true);
+            check("lm studio case: /usr/bin is not unstable",
+                  Model.commandIsUnstablePath("/usr/bin/vaultkey"), false);
+            check("lm studio case: a bare program name is not unstable",
+                  Model.commandIsUnstablePath("modelbox"), false);
+            check("lm studio case: /tmpfoo is not /tmp -- the prefix ends at the slash",
+                  Model.commandIsUnstablePath("/tmpfoo/modelbox"), false);
+            check("lm studio case: a mount-like word that is not a path segment is not caught",
+                  Model.commandIsUnstablePath("nimbus --mount_point=/x"), false);
+
+            // --- already-present, against his real file ----------------------
+            check("already-present: notes-app is in his autostart.lua",
+                  forWindow("notes-app", "/opt/notes-app/notes-app",
+                            "notes-app")[0].warning, "program-already-present");
+            check("already-present: and signal is not",
+                  forWindow("signal", "/usr/lib/msgbox-desktop/msgbox-desktop",
+                            "msgbox-desktop")[0].warning, "");
+            check("already-present: an exact match is told apart from the same program",
+                  forWindow("ai.elementlabs.modelbox", "/tmp/.mount_x/modelbox",
+                            "modelbox")[0].warning, "already-present");
+            check("already-present: nothing is warned about with no file to compare against",
+                  Model.autostartCandidatesForWindow(
+                      { "class": "notes-app", command: "notes-app", program: "notes-app" },
+                      hisApps, [])[0].warning, "");
+            check("already-present: the nested webapp line carries no command, so it warns nothing",
+                  Model.autostartCandidatesForWindow(
+                      { "class": "x", command: "omarchy-launch-webapp https://chat.example.org/",
+                        program: "omarchy-launch-webapp" },
+                      hisApps, hisEntries)[0].warning, "");
+            check("already-present: spacing does not make a command a different one",
+                  Model.autostartCandidatesForWindow(
+                      { "class": "x", command: "nimbus   --app=https://mail.example.com/mail/",
+                        program: "nimbus" },
+                      [], hisEntries)[0].warning, "already-present");
+
+            // --- three windows, one command line ----------------------------
+            //
+            // Three windows of one nimbus process are THREE entries with three
+            // different answers, not one. The classes differ, so the lists
+            // differ -- and that is the only thing that tells the Webmail
+            // window from the browser window at all.
+            var braveWindows = [
+                forWindow("nimbus-browser", braveRunning, "nimbus"),
+                forWindow("nimbus-mail.example.com__mail_-Default", braveRunning, "nimbus"),
+                forWindow("nimbus-chat.example.org__-Default", braveRunning, "nimbus")
+            ];
+            check("three windows: each gets its own list",
+                  braveWindows.length, 3);
+            check("three windows: and the three lists are not the same list",
+                  (rendered(braveWindows[0]) !== rendered(braveWindows[1]))
+                  && (rendered(braveWindows[1]) !== rendered(braveWindows[2]))
+                  && (rendered(braveWindows[0]) !== rendered(braveWindows[2])), true);
+            check("three windows: the top suggestion differs where the class does",
+                  braveWindows[0][0].command + " / " + braveWindows[1][0].command,
+                  "nimbus / nimbus --app=https://mail.example.com/mail/");
+            check("three windows: all three report the identical running command",
+                  braveWindows[0][braveWindows[0].length - 1].command
+                  === braveWindows[1][braveWindows[1].length - 1].command
+                  && braveWindows[1][braveWindows[1].length - 1].command === braveRunning, true);
+
+            // --- a window with nothing to offer -----------------------------
+            check("no candidates: a window with no match and no command line",
+                  forWindow("some.unknown.thing", "", "").length, 0);
+            check("no candidates: and it says why",
+                  Model.autostartCandidateReason(
+                      { "class": "some.unknown.thing", command: "", program: "" }, []),
+                  "no-command-line");
+            check("no candidates: a command line past the writer cap is a different reason",
+                  Model.autostartCandidateReason(
+                      { "class": "some.unknown.thing", command: "", program: "huge" }, []),
+                  "command-too-long");
+            check("no candidates: a window that HAS suggestions gives no reason",
+                  Model.autostartCandidateReason(
+                      { "class": "signal", command: "", program: "" },
+                      forWindow("signal", "", "")), "");
+            check("no candidates: an empty class still offers its running line",
+                  rendered(forWindow("", "/usr/bin/odd --flag", "odd")),
+                  "running||/usr/bin/odd --flag");
+            check("no candidates: an empty class matches no .desktop by class",
+                  Model.autostartCandidatesForWindow(
+                      { "class": "", command: "", program: "" },
+                      [{ name: "Odd", exec: "odd", wmclass: "" }], []).length, 0);
+
+            // --- field codes never reach a suggestion -----------------------
+            check("field codes: %U is gone from the Chatterbox suggestion",
+                  forWindow("org.example.chatterbox", "/usr/bin/Chatterbox", "Chatterbox")[0].command,
+                  "Chatterbox --");
+            check("field codes: no suggestion for any measured window contains a percent sign",
+                  (function() {
+                      var all = [
+                          forWindow("org.example.chatterbox", "/usr/bin/Chatterbox", "Chatterbox"),
+                          forWindow("signal", "/usr/lib/msgbox-desktop/msgbox-desktop", "msgbox-desktop"),
+                          forWindow("nimbus-browser", braveRunning, "nimbus"),
+                          forWindow("ai.elementlabs.modelbox", "/tmp/.mount_x/modelbox", "modelbox")
+                      ];
+                      var hits = 0;
+                      for (var a = 0; a < all.length; a++) {
+                          for (var b = 0; b < all[a].length; b++) {
+                              if (all[a][b].command.indexOf("%") >= 0) hits++;
+                          }
+                      }
+                      return hits;
+                  })(), 0);
+            check("field codes: a %f suggestion arrives stripped",
+                  forWindow("org.vaultkey.Vaultkey", "/usr/bin/vaultkey", "vaultkey")[0].command,
+                  "vaultkey");
+
+            // --- the shape of the list itself -------------------------------
+            check("candidates: a .desktop matching by class AND by binary is offered once",
+                  forWindow("Termpane", "/usr/bin/termpane", "termpane").length, 2);
+            check("candidates: the running line is offered last",
+                  forWindow("Termpane", "/usr/bin/termpane", "termpane")[1].source, "running");
+            check("candidates: the list is capped",
+                  (function() {
+                      var many = [];
+                      for (var m = 0; m < 30; m++) {
+                          many.push({ name: "App " + m, exec: "nimbus --app-id=" + m, wmclass: "" });
+                      }
+                      return Model.autostartCandidatesForWindow(
+                          { "class": "nimbus-browser", command: "nimbus", program: "nimbus" },
+                          many, []).length;
+                  })(), Model.MAX_CANDIDATES);
+            check("candidates: and the cap is not one",
+                  Model.MAX_CANDIDATES >= 6, true);
+            check("candidates: an application list of junk throws nothing",
+                  Model.autostartCandidatesForWindow(
+                      { "class": "x", command: "x", program: "x" },
+                      [null, 7, "str", {}, { exec: undefined }], []).length, 1);
+            check("candidates: no window at all is an empty list, not a throw",
+                  Model.autostartCandidatesForWindow(undefined, undefined, undefined).length, 0);
+            check("candidates: a command of __proto__ does not read back as already seen",
+                  Model.autostartCandidatesForWindow(
+                      { "class": "x", command: "__proto__", program: "__proto__" },
+                      [], []).length, 1);
+
+            // --- the two derivations both halves of the match depend on -----
+            check("commandProgram: the basename of the first word",
+                  Model.commandProgram("/opt/nimbus-bin/nimbus --ozone-platform=wayland"), "nimbus");
+            check("commandProgram: a bare name is its own basename",
+                  Model.commandProgram("nimbus --app=https://x/"), "nimbus");
+            check("commandProgram: leading spaces do not become the program",
+                  Model.commandProgram("   /usr/bin/vaultkey %f"), "vaultkey");
+            check("commandProgram: nothing gives nothing",
+                  Model.commandProgram(""), "");
+            check("windowProgram: the field the window helper provides wins",
+                  Model.windowProgram({ program: "nimbus", command: "" }), "nimbus");
+            check("windowProgram: and it falls back to the command line",
+                  Model.windowProgram({ command: "/usr/bin/termpane --working-directory=/home/user" }),
+                  "termpane");
+            check("windowProgram: a program field that is a path is reduced too",
+                  Model.windowProgram({ program: "/tmp/.mount_x/modelbox" }), "modelbox");
+            check("windowProgram: no window is no program",
+                  Model.windowProgram(undefined), "");
+
+            // --- what the picker shows for a window -------------------------
+            check("window label: class and title",
+                  Model.autostartWindowLabel({ "class": "signal", title: "Signal (139)" }),
+                  "signal -- Signal (139)");
+            check("window label: a window with no title is its class",
+                  Model.autostartWindowLabel({ "class": "signal", title: "" }), "signal");
+            check("window label: a window with no class is its title",
+                  Model.autostartWindowLabel({ "class": "", title: "Signal" }), "Signal");
+            check("window label: a window with neither is named as such",
+                  Model.autostartWindowLabel({}), "(a window with no class and no title)");
+
+            // --- the wording, with the same two-sided guarantee -------------
+            check("candidate wording: every source has plain wording",
+                  unwordedAmong(Model.candidateSources(), Model.candidateSourceText), "");
+            check("candidate wording: every warning has plain wording",
+                  unwordedAmong(Model.candidateWarnings(), Model.candidateWarningText), "");
+            check("candidate wording: every empty reason has plain wording",
+                  unwordedAmong(Model.candidateReasons(), Model.candidateReasonText), "");
+            check("candidate wording: the three lists it checks are not empty",
+                  Model.candidateSources().length + "/" + Model.candidateWarnings().length
+                  + "/" + Model.candidateReasons().length, "3/3/2");
+            check("candidate wording: every source the model can emit is in that list",
+                  (function() {
+                      var all = [
+                          forWindow("nimbus-browser", braveRunning, "nimbus"),
+                          forWindow("org.example.chatterbox", "/usr/bin/Chatterbox", "Chatterbox")
+                      ];
+                      var unknown = [];
+                      for (var a = 0; a < all.length; a++) {
+                          for (var b = 0; b < all[a].length; b++) {
+                              if (Model.candidateSources().indexOf(all[a][b].source) === -1) {
+                                  unknown.push(all[a][b].source);
+                              }
+                          }
+                      }
+                      return unknown.join(",");
+                  })(), "");
+            check("candidate wording: every warning the model can emit is in that list",
+                  (function() {
+                      var all = [
+                          forWindow("nimbus-browser", braveRunning, "nimbus"),
+                          forWindow("ai.elementlabs.modelbox", "/tmp/.mount_x/modelbox", "modelbox"),
+                          forWindow("notes-app", "/opt/notes-app/notes-app",
+                                    "notes-app")
+                      ];
+                      var unknown = [];
+                      for (var a = 0; a < all.length; a++) {
+                          for (var b = 0; b < all[a].length; b++) {
+                              for (var c = 0; c < all[a][b].warnings.length; c++) {
+                                  if (Model.candidateWarnings().indexOf(all[a][b].warnings[c]) === -1) {
+                                      unknown.push(all[a][b].warnings[c]);
+                                  }
+                              }
+                          }
+                      }
+                      return unknown.join(",");
+                  })(), "");
+            check("candidate wording: an unknown source is named, not shown bare",
+                  Model.candidateSourceText("brand-new").indexOf("brand-new") >= 0, true);
+            check("candidate wording: an unknown warning is named, not shown bare",
+                  Model.candidateWarningText("brand-new").indexOf("brand-new") >= 0, true);
+            check("candidate wording: an absent reason says nothing at all",
+                  Model.candidateReasonText(""), "");
+            check("candidate wording: an absent warning does not print undefined",
+                  Model.candidateWarningText(undefined).indexOf("undefined"), -1);
+            check("candidate wording: the unstable-path warning says what will happen",
+                  Model.candidateWarningText("unstable-path").indexOf("after a restart") >= 0, true);
+            check("candidate wording: and what to do instead",
+                  Model.candidateWarningText("unstable-path").indexOf("without a path") >= 0, true);
+            check("candidate wording: the running source says it is measured, not packaged",
+                  Model.candidateSourceText("running").indexOf("running right now") >= 0, true);
+            check("candidate wording: both empty reasons tell him to type it by hand",
+                  (Model.candidateReasonText("no-command-line").indexOf("by hand") >= 0)
+                  && (Model.candidateReasonText("command-too-long").indexOf("by hand") >= 0), true);
+
             // --- the cutover, asserted rather than assumed -------------------------
             //
             // Panel.qml and Service.qml both read this and nothing here can

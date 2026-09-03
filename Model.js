@@ -1908,3 +1908,327 @@ function oneLineDifference(oldText, newText) {
     }
     return "multiple";
 }
+
+// --- FROM A RUNNING PROGRAM TO AN AUTOSTART COMMAND ------------------------
+//
+// A window has a CLASS, not a command. Measured on his own session, the gap
+// between the two is not a rounding error, it is three distinct defects
+// waiting to be written into a file that runs at every login:
+//
+//   ai.elementlabs.modelbox  ->  /tmp/.mount_lm-stuFjMMHD/modelbox
+//       An AppImage mount path. It changes at every start, so the entry is
+//       dead at the next boot -- and looks perfectly right until then.
+//   nimbus-browser
+//   nimbus-mail.example.com__mail_-Default
+//   nimbus-chat.example.org__-Default   ->  ONE command line, all three
+//       Three windows of one process. /proc cannot say that the Webmail
+//       window needs `nimbus --app=https://mail.example.com/mail/`; worse,
+//       the line it does report happens to END in that flag, so the plain
+//       browser window reports a command that is actively wrong for it.
+//   ~/.local/share/applications/Webmail-nimbus.desktop
+//       holds exactly that command -- and has NO StartupWMClass, so a
+//       class-to-desktop match never finds it.
+//
+// So this produces SUGGESTIONS, ordered, each naming where it came from, and
+// nothing writes until the user has confirmed the line. The plugin does not
+// know which of these he means; only he does.
+
+// How many suggestions one window can produce. His nimbus binary alone matches
+// five .desktop files by basename, and a window that offered twenty would not
+// be a choice, it would be a wall.
+var MAX_CANDIDATES = 12;
+
+// Path prefixes that do not survive a reboot. /tmp and /run are cleared,
+// /proc and /dev/shm are not filesystems anything is installed in.
+var UNSTABLE_PREFIXES = ["/tmp/", "/run/", "/proc/", "/dev/shm/"];
+
+// The program a command line runs: the first word, without its directory.
+// This is the ONE derivation both sides of the .desktop-by-binary match use
+// -- `nimbus` out of `/opt/nimbus-bin/nimbus --ozone-platform=wayland ...` and
+// `nimbus` out of `nimbus --app=https://mail.example.com/mail/` -- which is
+// why it is a named function rather than two open-coded splits that could
+// drift apart.
+function commandProgram(command) {
+    var text = String(command === undefined || command === null ? "" : command);
+    var first = text.replace(/^[ \t]+/, "").split(/[ \t]/)[0] || "";
+    var parts = first.split("/");
+    return parts[parts.length - 1];
+}
+
+// Whitespace-collapsed, for comparing two command lines that mean the same
+// thing written with different spacing. Never used to WRITE a command: what
+// goes into the file is what the user confirmed, byte for byte.
+function commandNormalized(command) {
+    return String(command === undefined || command === null ? "" : command)
+           .replace(/[ \t]+/g, " ").replace(/^ | $/g, "");
+}
+
+// Does this command start from a path that will not exist at the next boot?
+//
+// THIS IS THE MOST IMPORTANT WARNING IN THIS TASK. The Modelbox window
+// reports /tmp/.mount_lm-stuFjMMHD/modelbox, the mount point of a running
+// AppImage. Written verbatim the entry fails silently at the next login,
+// months later, with nobody watching.
+//
+// Two rules: the command STARTS under one of the volatile directories, or it
+// contains a path segment beginning with ".mount_" anywhere -- the second
+// catches an AppImage mounted somewhere other than /tmp, which is what
+// $TMPDIR being set does.
+function commandIsUnstablePath(command) {
+    var text = commandNormalized(command);
+    var first = text.split(" ")[0] || "";
+    for (var i = 0; i < UNSTABLE_PREFIXES.length; i++) {
+        if (first.indexOf(UNSTABLE_PREFIXES[i]) === 0) return true;
+    }
+    return /(^|[\/ \t])\.mount_/.test(text);
+}
+
+// The host a webapp window names in its own class. Chromium and Nimbus build
+// the class of an --app window out of the URL:
+//   nimbus-mail.example.com__mail_-Default
+// and that dotted token is the only thing in the whole window that says WHICH
+// of the five nimbus .desktop entries is the one. It is used for ORDERING
+// only: a candidate is never dropped for failing to contain it, and no
+// candidate is ever synthesised from it.
+//
+// "" when the class carries no dotted token. A class such as
+// org.example.chatterbox yields one too ("org.example.chatterbox"); no command
+// contains that string, so it reorders nothing -- which is the correct
+// outcome, not a lucky one.
+// MEASURED, not assumed: the first version of this returned
+// "nimbus-mail.example.com" for his Webmail window -- the leftmost dotted
+// match swallows the browser name in front of the host, because a hostname
+// label may contain a hyphen and the regular expression cannot know that this
+// particular hyphen separates the browser from the host. That token appears in
+// no command, so it reordered nothing and the Webmail window offered YouTube
+// Music first. Hence the second step: everything up to the last hyphen BEFORE
+// the first dot is dropped. A host whose own first label contains a hyphen
+// ("nimbus-web-app.example.com") loses that label too and yields
+// "app.example.com" -- still a substring of the URL in the command, so the
+// ordering still lands right.
+function classHostToken(windowClass) {
+    var match = /([A-Za-z0-9-]+\.)+[A-Za-z]{2,}/.exec(
+        String(windowClass === undefined || windowClass === null ? "" : windowClass));
+    if (!match) return "";
+    var token = match[0];
+    var firstDot = token.indexOf(".");
+    var lastDash = token.lastIndexOf("-", firstDot);
+    if (lastDash >= 0) token = token.substring(lastDash + 1);
+    // A token that lost its own first label entirely, or that no longer holds
+    // a dot, identifies nothing and is dropped rather than used.
+    if (token.charAt(0) === "." || token.indexOf(".") < 0) return "";
+    return token;
+}
+
+// The program the window's own process runs. `program` comes from
+// bin/omarchy-autostart-windows, which derives it from argv 0 and therefore
+// still has it when the whole command line was past the cap and arrived
+// empty. The fallback derives it from the command line, so a window object
+// built by hand -- in a test, or by a future caller -- behaves the same.
+function windowProgram(window) {
+    var source = window || {};
+    var named = String(source.program === undefined || source.program === null
+                       ? "" : source.program);
+    return named !== "" ? commandProgram(named) : commandProgram(source.command);
+}
+
+// Where a suggestion came from, shown on every row. The user is choosing
+// between a packaged command and a measured one, and that difference is the
+// whole basis for choosing.
+var CANDIDATE_SOURCES = ["desktop-class", "desktop-binary", "running"];
+
+function candidateSources() { return CANDIDATE_SOURCES.slice(); }
+
+function candidateSourceText(source) {
+    switch (source) {
+    case "desktop-class":
+        return "from its installed .desktop file, matched on the window class";
+    case "desktop-binary":
+        return "from an installed .desktop file that runs the same program";
+    case "running":
+        return "the command line this window is running right now";
+    }
+    return "from an unknown source (" + String(source) + ")";
+}
+
+var CANDIDATE_WARNINGS = ["unstable-path", "already-present", "program-already-present"];
+
+function candidateWarnings() { return CANDIDATE_WARNINGS.slice(); }
+
+function candidateWarningText(code) {
+    // THE EMPTY CASE IS EXPLICIT, for the reason envelopeText's is: the
+    // QML version of that function printed the literal text "undefined: "
+    // to the user for every one of the several ways a value can go missing.
+    if (code === undefined || code === null || String(code) === "") return "";
+    switch (code) {
+    case "unstable-path":
+        return "This path will not exist after a restart -- it is a temporary "
+             + "mount, the kind an AppImage gets a new one of at every start. "
+             + "Written like this the entry works today and fails silently at "
+             + "some later login. Prefer a suggestion that names the program "
+             + "without a path.";
+    case "already-present":
+        return "This exact command is already in autostart.lua.";
+    case "program-already-present":
+        return "autostart.lua already starts this program, with a different "
+             + "command line.";
+    }
+    return "Take care with this suggestion (" + String(code) + ").";
+}
+
+// Which warnings a command earns, in the order they matter. Both are
+// returned: one is about the next boot and the other about a duplicate, and
+// suppressing either because the other applies would hide exactly the fact
+// the user needed.
+function candidateWarningsFor(command, entries) {
+    var out = [];
+    if (commandIsUnstablePath(command)) out.push("unstable-path");
+    var wanted = commandNormalized(command);
+    var program = commandProgram(command);
+    var exact = false, sameProgram = false;
+    var list = entries || [];
+    for (var i = 0; i < list.length; i++) {
+        var entry = list[i];
+        // Only the entries this reader can represent carry a command at all.
+        // The nested `o.exec_on_start(o.launch_webapp_sole("Chat", ...))`
+        // line in his file does not, so a Chat suggestion is NOT reported
+        // as already present -- a known blind spot of this comparison, and the
+        // honest one: the alternative is to guess what that Lua helper expands
+        // to and be wrong.
+        if (!entry || entry.editable !== true || typeof entry.command !== "string") continue;
+        if (commandNormalized(entry.command) === wanted) { exact = true; break; }
+        if (program !== "" && commandProgram(entry.command) === program) sameProgram = true;
+    }
+    if (exact) out.push("already-present");
+    else if (sameProgram) out.push("program-already-present");
+    return out;
+}
+
+// THE SUGGESTION LIST for one open window, ordered, deduplicated by command.
+//
+//   entry.command   the exact line that would go into the file
+//   entry.source    one of CANDIDATE_SOURCES, shown on the row
+//   entry.name      the Name= of the .desktop file it came from, so five
+//                   nimbus entries can be told apart; "" for "running"
+//   entry.warning   the first of entry.warnings, or ""
+//   entry.warnings  every warning that applies, none suppressed
+//
+// The order: the .desktop file matched on the window class first (packaged,
+// stable, and the class is a strong signal), then the .desktop files that run
+// the same program -- those whose command mentions the host in the window
+// class ahead of those that do not, which is what puts Webmail (Nimbus) at the
+// top for the Webmail window instead of YouTube Music -- and the running
+// command line last, because it is the one most likely to carry a volatile
+// path or the wrong window's flags.
+//
+// `entries` is the autostart.lua entry list from parseAutostartLua and only
+// feeds the already-present warnings. Absent, the suggestions are the same
+// and simply carry no duplicate warning.
+function autostartCandidatesForWindow(window, apps, entries) {
+    var source = window || {};
+    var windowClass = String(source["class"] === undefined || source["class"] === null
+                             ? "" : source["class"]);
+    var wanted = windowClass.toLowerCase();
+    var program = windowProgram(source);
+    var host = classHostToken(windowClass);
+    var list = apps || [];
+    var byClass = [], hosted = [], other = [], i;
+
+    for (i = 0; i < list.length; i++) {
+        var app = list[i];
+        if (!app || typeof app !== "object") continue;
+        // String() around every value: the application list is built from
+        // files this plugin does not own, and a missing Exec= must not throw
+        // and take the whole suggestion list with it.
+        var command = commandFromApp(app);
+        if (command === "") continue;
+        var name = String(app.name === undefined || app.name === null ? "" : app.name);
+        var wmclass = String(app.wmclass === undefined || app.wmclass === null ? "" : app.wmclass);
+        if (wmclass !== "" && windowClass !== "" && wmclass.toLowerCase() === wanted) {
+            byClass.push({ command: command, source: "desktop-class", name: name });
+            continue;
+        }
+        if (program !== "" && commandProgram(command) === program) {
+            var row = { command: command, source: "desktop-binary", name: name };
+            if (host !== "" && command.indexOf(host) >= 0) hosted.push(row);
+            else other.push(row);
+        }
+    }
+
+    var running = String(source.command === undefined || source.command === null
+                         ? "" : source.command);
+    var ordered = byClass.concat(hosted, other);
+    if (running !== "") {
+        ordered.push({ command: running, source: "running", name: "" });
+    }
+
+    // Deduplicated on the command itself, first occurrence kept: the highest
+    // ranked source wins, and Termpane -- whose .desktop file matches both
+    // by class and by binary -- offers `termpane` once, not twice.
+    // Object.create(null) for the reason newId uses it: a command of
+    // "__proto__" would read back as already seen from a plain object.
+    var seen = Object.create(null);
+    var out = [];
+    for (i = 0; i < ordered.length && out.length < MAX_CANDIDATES; i++) {
+        var candidate = ordered[i];
+        if (seen[candidate.command]) continue;
+        seen[candidate.command] = true;
+        var warnings = candidateWarningsFor(candidate.command, entries);
+        out.push({ command: candidate.command, source: candidate.source,
+                   name: candidate.name,
+                   warning: warnings.length > 0 ? warnings[0] : "",
+                   warnings: warnings });
+    }
+    return out;
+}
+
+// WHY A WINDOW HAS NOTHING TO OFFER. Such a window is SHOWN with this reason,
+// never left out of the list -- a window that silently disappears is one the
+// user cannot even ask about.
+//
+// "" when there is at least one suggestion. The two codes are distinguishable
+// for free and are not the same problem: `program` survives the command line
+// cap in bin/omarchy-autostart-windows, so a program name with no command
+// means the line was too long to offer, while neither means /proc could not
+// be read at all (a window of another user, or a process that exited between
+// the two reads).
+var CANDIDATE_REASONS = ["no-command-line", "command-too-long"];
+
+function candidateReasons() { return CANDIDATE_REASONS.slice(); }
+
+function autostartCandidateReason(window, candidates) {
+    if ((candidates || []).length > 0) return "";
+    return windowProgram(window) === "" ? "no-command-line" : "command-too-long";
+}
+
+function candidateReasonText(code) {
+    switch (code) {
+    case "no-command-line":
+        return "No installed application matches this window, and its command "
+             + "line could not be read. Type the command by hand.";
+    case "command-too-long":
+        return "No installed application matches this window, and its command "
+             + "line is longer than this panel will write. Type the command by "
+             + "hand.";
+    }
+    if (code === undefined || code === null || String(code) === "") {
+        return "";
+    }
+    return "This window offers nothing to add (" + String(code) + ").";
+}
+
+// How one open window is named in the picker: the class, which is what
+// identifies it, and the title, which is what the user recognises. Here
+// rather than in Panel.qml for the reason every other piece of wording is:
+// a string built in QML is a string no suite in this project can execute.
+function autostartWindowLabel(window) {
+    var source = window || {};
+    var windowClass = String(source["class"] === undefined || source["class"] === null
+                             ? "" : source["class"]);
+    var title = String(source.title === undefined || source.title === null
+                       ? "" : source.title).substring(0, MAX_NAME);
+    if (windowClass === "" && title === "") return "(a window with no class and no title)";
+    if (title === "") return windowClass;
+    if (windowClass === "") return title;
+    return windowClass + " -- " + title;
+}

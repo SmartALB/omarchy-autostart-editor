@@ -376,10 +376,25 @@ Panel {
     property string autostartEditCommand: ""
     property bool autostartAddOpen: false
 
+    // "Add from a running program": the window list, and which window's
+    // suggestions are unfolded. BY ROW rather than by class, for the reason
+    // expandedRow and pickForRow are (see there) -- and here the reason is not
+    // theoretical at all: his three nimbus windows are three windows with three
+    // different classes but one command line, and two Termpane windows share
+    // a class outright. Keyed by class, unfolding one would unfold the other.
+    property bool autostartFromWindowOpen: false
+    property int autostartWindowRow: -1
+
     readonly property var autostartSection:
         Model.hyprSectionNamed(root.hyprSections, "autostart.lua")
     readonly property bool autostartWritable:
         Model.hyprSectionIsWritable(root.autostartSection)
+
+    // The entries autostart.lua holds right now, as the reader returned them.
+    // They are what the already-present warnings are compared against, so
+    // this must be the CURRENT read and not a remembered list.
+    readonly property var autostartEntriesNow:
+        (root.autostartSection && root.autostartSection.entries) || []
 
     function autostartWrite(op) {
         root.autostartMessage = ""
@@ -430,6 +445,60 @@ Panel {
     function autostartAdd() {
         root.autostartWrite(
             root.autostartOperation("add", undefined, root.autostartNewCommand))
+    }
+
+    // --- add from a running program ----------------------------------------
+    //
+    // Opening the list needs BOTH reads: the open windows, because a program
+    // started since the panel opened must be offerable, and the installed
+    // applications, because the .desktop-by-binary route is the one that turns
+    // his Webmail window into `nimbus --app=https://mail.example.com/mail/`
+    // instead of a browser command line that is wrong for it. Without the
+    // second read every window would offer nothing but its /proc line -- which
+    // is exactly the automatic mapping this task exists not to be.
+    function autostartFromWindowToggle() {
+        root.autostartMessage = ""
+        root.autostartError = ""
+        root.autostartFromWindowOpen = !root.autostartFromWindowOpen
+        root.autostartWindowRow = -1
+        if (!root.autostartFromWindowOpen) return
+        root.autostartAddOpen = false
+        root.refreshWindows()
+        root.startAppsRead()
+    }
+
+    // The suggestions for one window. A pure Model call: the panel decides
+    // nothing about which command a window means, it only shows what the
+    // model ranked and hands back whatever the user picks.
+    function autostartCandidatesFor(window) {
+        return Model.autostartCandidatesForWindow(window, root.apps,
+                                                  root.autostartEntriesNow)
+    }
+
+    // Is this window's suggestion list unfolded, and the toggle for it.
+    //
+    // FUNCTIONS RATHER THAN AN INLINE COMPARISON, and the reason is the
+    // nested-Repeater trap this project has already measured: inside the
+    // suggestions delegate `index` is the SUGGESTION's index and shadows the
+    // window's. Written inline the comparison spans two lines at that
+    // indentation, and a line-based check cannot see the row name and the
+    // bare `index` together. Here both sit on one line, where a check can.
+    function autostartWindowUnfolded(windowIndex) {
+        return root.autostartWindowRow === windowIndex
+    }
+
+    function autostartWindowUnfold(windowIndex) {
+        root.autostartWindowRow = (root.autostartWindowRow === windowIndex) ? -1 : windowIndex
+    }
+
+    // Picking a suggestion FILLS THE FIELD. It does not write: the line that
+    // goes into a file which runs at every login is one the user has read
+    // first, and that is also the answer to a command line that might carry a
+    // secret -- he decides whether it is written, not the plugin.
+    function autostartUseCandidate(command) {
+        root.autostartNewCommand = String(command || "")
+        root.autostartFromWindowOpen = false
+        root.autostartWindowRow = -1
     }
 
     function autostartRemove(line) {
@@ -1463,7 +1532,8 @@ Panel {
                                                         autostartAdd.width
                                                         - autostartAddButton.implicitWidth
                                                         - autostartPickButton.implicitWidth
-                                                        - 2 * parent.spacing)
+                                                        - autostartWindowButton.implicitWidth
+                                                        - 3 * parent.spacing)
                                         placeholderText: "Command to add"
                                         text: root.autostartNewCommand
                                         foreground: root.fg
@@ -1480,8 +1550,24 @@ Panel {
                                         anchors.verticalCenter: parent.verticalCenter
                                         onClicked: {
                                             root.autostartAddOpen = !root.autostartAddOpen
-                                            if (root.autostartAddOpen) root.startAppsRead()
+                                            if (root.autostartAddOpen) {
+                                                // The two lists share the field and the
+                                                // application read; only one is open.
+                                                root.autostartFromWindowOpen = false
+                                                root.startAppsRead()
+                                            }
                                         }
+                                    }
+
+                                    Button {
+                                        id: autostartWindowButton
+                                        text: root.autostartFromWindowOpen
+                                              ? "Close windows" : "Running programs"
+                                        foreground: root.fg
+                                        fontFamily: root.fontFam
+                                        bordered: true
+                                        anchors.verticalCenter: parent.verticalCenter
+                                        onClicked: root.autostartFromWindowToggle()
                                     }
 
                                     Button {
@@ -1563,6 +1649,171 @@ Panel {
                                             elide: Text.ElideRight
                                             width: Style.space(170)
                                             anchors.verticalCenter: parent.verticalCenter
+                                        }
+                                    }
+                                }
+
+                                // --- ADD FROM A RUNNING PROGRAM --------------
+                                //
+                                // The open windows, and per window the ranked
+                                // suggestions with the SOURCE named on every
+                                // one of them. A window has a class, not a
+                                // command, so this is a choice and not a
+                                // mapping: three of his windows are three
+                                // windows of one nimbus process, and one of
+                                // them reports a mount path that will not
+                                // exist after a restart. Picking fills the
+                                // field; the write is still the [Add] button.
+                                Column {
+                                    id: autostartWindowPicker
+                                    width: autostartAdd.width
+                                    visible: root.autostartFromWindowOpen
+                                    spacing: Style.spacing.xs
+
+                                    Text {
+                                        textFormat: Text.PlainText
+                                        width: autostartWindowPicker.width
+                                        text: root.appsPending
+                                              ? "Reading the installed applications..."
+                                              : "Pick a window, then a suggestion. "
+                                                + "Nothing is written until you press Add."
+                                        color: root.fg
+                                        opacity: 0.7
+                                        font.family: root.fontFam
+                                        font.pixelSize: Style.font.caption
+                                        wrapMode: Text.WordWrap
+                                    }
+
+                                    Text {
+                                        textFormat: Text.PlainText
+                                        width: autostartWindowPicker.width
+                                        visible: root.openWindows.length === 0
+                                        text: "No open windows were found."
+                                        color: root.fg
+                                        opacity: 0.7
+                                        font.family: root.fontFam
+                                        font.pixelSize: Style.font.caption
+                                        wrapMode: Text.WordWrap
+                                    }
+
+                                    Repeater {
+                                        model: root.autostartFromWindowOpen
+                                               ? root.openWindows : []
+
+                                        delegate: Column {
+                                            id: autostartWindowEntry
+                                            required property var modelData
+                                            // The outer index under a name of its
+                                            // own: the suggestions Repeater below
+                                            // has an `index` that shadows this one,
+                                            // and this project has already measured
+                                            // what that costs -- 4 of 6 delegates
+                                            // reading the wrong row.
+                                            readonly property int windowIndex: index
+                                            readonly property var candidates:
+                                                root.autostartCandidatesFor(autostartWindowEntry.modelData)
+                                            readonly property string emptyReason:
+                                                Model.candidateReasonText(
+                                                    Model.autostartCandidateReason(
+                                                        autostartWindowEntry.modelData,
+                                                        autostartWindowEntry.candidates))
+                                            width: autostartWindowPicker.width
+                                            spacing: Style.spacing.xs
+
+                                            Button {
+                                                // The fold marker as escapes, on
+                                                // bytes: a Nerd-Font glyph pasted in
+                                                // literally is what this project
+                                                // learned to stop doing.
+                                                text: (root.autostartWindowUnfolded(autostartWindowEntry.windowIndex)
+                                                       ? "\u25BE  " : "\u25B8  ")
+                                                      + Model.autostartWindowLabel(
+                                                            autostartWindowEntry.modelData)
+                                                foreground: root.fg
+                                                fontFamily: root.fontFam
+                                                leftAlign: true
+                                                width: autostartWindowPicker.width
+                                                onClicked: root.autostartWindowUnfold(autostartWindowEntry.windowIndex)
+                                            }
+
+                                            // A window with nothing to offer says so
+                                            // HERE, unfolded or not, and stays in the
+                                            // list. A window that quietly disappeared
+                                            // would be one the user cannot even ask
+                                            // about.
+                                            Text {
+                                                textFormat: Text.PlainText
+                                                width: autostartWindowPicker.width
+                                                visible: autostartWindowEntry.emptyReason !== ""
+                                                text: autostartWindowEntry.emptyReason
+                                                color: root.warn
+                                                font.family: root.fontFam
+                                                font.pixelSize: Style.font.caption
+                                                wrapMode: Text.WordWrap
+                                            }
+
+                                            Repeater {
+                                                model: root.autostartWindowUnfolded(autostartWindowEntry.windowIndex)
+                                                       ? autostartWindowEntry.candidates : []
+
+                                                delegate: Column {
+                                                    id: autostartCandidate
+                                                    required property var modelData
+                                                    width: autostartWindowPicker.width
+                                                    spacing: 0
+
+                                                    Button {
+                                                        text: String(autostartCandidate.modelData.command)
+                                                        foreground: root.fg
+                                                        fontFamily: root.fontFam
+                                                        leftAlign: true
+                                                        width: autostartWindowPicker.width
+                                                        onClicked: root.autostartUseCandidate(
+                                                            autostartCandidate.modelData.command)
+                                                    }
+
+                                                    // WHERE IT CAME FROM, on every
+                                                    // row. The user is choosing
+                                                    // between a packaged command and
+                                                    // a measured one, and that
+                                                    // difference is the whole basis
+                                                    // for choosing.
+                                                    Text {
+                                                        textFormat: Text.PlainText
+                                                        width: autostartWindowPicker.width
+                                                        text: Model.candidateSourceText(
+                                                                  autostartCandidate.modelData.source)
+                                                              + (String(autostartCandidate.modelData.name) !== ""
+                                                                 ? " -- " + String(autostartCandidate.modelData.name)
+                                                                 : "")
+                                                        color: root.fg
+                                                        opacity: 0.6
+                                                        font.family: root.fontFam
+                                                        font.pixelSize: Style.font.caption
+                                                        wrapMode: Text.WordWrap
+                                                    }
+
+                                                    // EVERY warning, never only the
+                                                    // first: one is about the next
+                                                    // boot and the other about a
+                                                    // duplicate, and neither stands
+                                                    // in for the other.
+                                                    Repeater {
+                                                        model: autostartCandidate.modelData.warnings || []
+
+                                                        delegate: Text {
+                                                            required property var modelData
+                                                            textFormat: Text.PlainText
+                                                            width: autostartWindowPicker.width
+                                                            text: Model.candidateWarningText(modelData)
+                                                            color: root.warn
+                                                            font.family: root.fontFam
+                                                            font.pixelSize: Style.font.caption
+                                                            wrapMode: Text.WordWrap
+                                                        }
+                                                    }
+                                                }
+                                            }
                                         }
                                     }
                                 }

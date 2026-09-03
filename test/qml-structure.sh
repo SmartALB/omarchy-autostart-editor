@@ -1930,5 +1930,122 @@ if [[ -n "${write_body:-}" ]]; then
                           || bad "autostart write: the write path reloads and launches nothing" "$reload_hits"
 fi
 
+# --- ADD FROM A RUNNING PROGRAM --------------------------------------------
+#
+# A window has a class, not a command. Everything that turns one into the
+# other is a DECISION, and a decision in Panel.qml is a decision no suite in
+# this project can execute -- so the checks below are about where those
+# decisions are NOT.
+
+# 38 -- the suggestions come out of Model.js. A second producer here would
+#       rank, warn and de-duplicate with nothing able to run it.
+if grep -qE 'Model\.autostartCandidatesForWindow\(' <<<"$stripped_panel"; then
+  ok "from window: the suggestions come from Model.autostartCandidatesForWindow"
+else
+  bad "from window: the suggestions come from Model.autostartCandidatesForWindow" \
+      "that call is not in the code of Panel.qml"
+fi
+panel_derives="$(grep -nE '/proc/|cmdline|StartupWMClass|\.mount_|/tmp/' <<<"$stripped_panel" || true)"
+[[ -z "$panel_derives" ]] && ok "from window: and the panel derives none of them itself" \
+                          || bad "from window: and the panel derives none of them itself" "$panel_derives"
+
+# 39 -- PICKING A SUGGESTION WRITES NOTHING. The whole answer to "can a
+#       command line carry a secret" is that the user reads the line first and
+#       presses Add himself, so the picker must not reach the writer at all.
+use_body="$(fn_body autostartUseCandidate <<<"$stripped_panel")"
+if [[ -z "$use_body" ]]; then
+  bad "from window: picking a suggestion only fills the field" \
+      "autostartUseCandidate() is not in Panel.qml, so this check would have been vacuous"
+else
+  write_hits="$(grep -nE 'autostartWrite|autostartApply|\.running|Proc\.' <<<"$use_body" || true)"
+  [[ -z "$write_hits" ]] && ok "from window: picking a suggestion only fills the field" \
+                         || bad "from window: picking a suggestion only fills the field" "$write_hits"
+  if grep -qE 'autostartNewCommand[[:space:]]*=' <<<"$use_body"; then
+    ok "from window: and what it fills is the add field the user can still edit"
+  else
+    bad "from window: and what it fills is the add field the user can still edit" \
+        "no assignment to autostartNewCommand in autostartUseCandidate()"
+  fi
+fi
+
+# 40 -- OPENING THE LIST READS THE APPLICATIONS TOO. Without that read the
+#       .desktop routes are dead and every window offers nothing but its
+#       /proc line -- which is precisely the automatic mapping this task
+#       exists not to be. Measured against a real session: the Webmail window
+#       has NO suggestion at all without the application list.
+toggle_body="$(fn_body autostartFromWindowToggle <<<"$stripped_panel")"
+if [[ -z "$toggle_body" ]]; then
+  bad "from window: opening the list reads both the windows and the applications" \
+      "autostartFromWindowToggle() is not in Panel.qml, so this check would have been vacuous"
+elif grep -qE 'root\.refreshWindows\(\)' <<<"$toggle_body" \
+  && grep -qE 'root\.startAppsRead\(\)' <<<"$toggle_body"; then
+  ok "from window: opening the list reads both the windows and the applications"
+else
+  bad "from window: opening the list reads both the windows and the applications" \
+      "autostartFromWindowToggle() does not call both refreshWindows() and startAppsRead()"
+fi
+
+# 41 -- EVERY warning is shown, not the first one. One is about the next boot
+#       and the other about a duplicate; neither stands in for the other.
+if grep -qE 'modelData\.warnings' <<<"$stripped_panel"; then
+  ok "from window: the rows iterate every warning a suggestion carries"
+else
+  bad "from window: the rows iterate every warning a suggestion carries" \
+      "nothing in the code of Panel.qml reads .warnings"
+fi
+if grep -qE 'Model\.candidateWarningText\(' <<<"$stripped_panel"; then
+  ok "from window: and the wording for them comes from Model.js"
+else
+  bad "from window: and the wording for them comes from Model.js" \
+      "no Model.candidateWarningText( in the code of Panel.qml"
+fi
+
+# 42 -- a window with nothing to offer is SHOWN with its reason. A window that
+#       silently disappears is one the user cannot even ask about.
+if grep -qE 'Model\.autostartCandidateReason\(' <<<"$stripped_panel" \
+   && grep -qE 'Model\.candidateReasonText\(' <<<"$stripped_panel"; then
+  ok "from window: a window with no suggestion shows the reason from Model.js"
+else
+  bad "from window: a window with no suggestion shows the reason from Model.js" \
+      "Model.autostartCandidateReason and Model.candidateReasonText are not both called in Panel.qml"
+fi
+
+# 43 -- the source is named on every suggestion row. The user is choosing
+#       between a packaged command and a measured one, and that difference is
+#       the whole basis for choosing.
+if grep -qE 'Model\.candidateSourceText\(' <<<"$stripped_panel"; then
+  ok "from window: every suggestion row names where it came from"
+else
+  bad "from window: every suggestion row names where it came from" \
+      "no Model.candidateSourceText( in the code of Panel.qml"
+fi
+
+# 44 -- THE NESTED REPEATER DOES NOT READ A BARE `index`. Inside the
+#       suggestions delegate `index` is the SUGGESTION's index and shadows the
+#       window's -- this project measured that exact shape once already, with
+#       4 of 6 delegates reading the wrong row. So the window row is addressed
+#       through the captured name, and the unfold comparison must use it.
+if grep -qE 'readonly property int windowIndex:[[:space:]]*index' <<<"$stripped_panel"; then
+  ok "from window: the window row index is captured under a name of its own"
+else
+  bad "from window: the window row index is captured under a name of its own" \
+      "no 'readonly property int windowIndex: index' in the code of Panel.qml"
+fi
+# Every line that unfolds or asks about a window row, and none of them may
+# mention a bare `index` -- one not reached through an object. That is why the
+# unfold is a FUNCTION: written inline the comparison spans two lines at that
+# indentation and this line-based check could not see both halves at once.
+# `windowIndex` does not match: the pattern requires a lower-case "i".
+bare_index="$(grep -nE 'autostartWindowUnfold' <<<"$stripped_panel" \
+              | grep -E '(^|[^.A-Za-z0-9_])index([^A-Za-z0-9_]|$)' || true)"
+if [[ "$(grep -cE 'autostartWindowUnfold' <<<"$stripped_panel" || true)" -lt 4 ]]; then
+  bad "from window: the unfold goes through the named helpers" \
+      "fewer than four mentions of autostartWindowUnfold in the code of Panel.qml -- the two definitions and their call sites; this check would have been vacuous"
+else
+  ok "from window: the unfold goes through the named helpers"
+fi
+[[ -z "$bare_index" ]] && ok "from window: and the unfold never compares against a bare index" \
+                       || bad "from window: and the unfold never compares against a bare index" "$bare_index"
+
 printf '\nqml structure: total=%d failed=%d\n' "$run" "$failed"
 (( failed == 0 ))

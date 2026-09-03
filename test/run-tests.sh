@@ -654,6 +654,205 @@ test_windows_survives_valid_json_that_is_not_an_array() {
     teardown_sandbox
 }
 
+# --- THE COMMAND LINE OF A WINDOW -------------------------------------------
+#
+# A window has a class, not a command, and this is the half that measures the
+# command it is actually running. A sandbox cannot create /proc/<pid>/cmdline,
+# so PROC_DIR is a named seam like HYPRCTL and GREP -- without it none of this
+# would be testable at all, which is how it would end up untested.
+fake_proc() {
+    export PROC_DIR="$SANDBOX/proc"
+    mkdir -p "$PROC_DIR"
+}
+
+# One fake process: fake_cmdline <pid> <arg>...  Written with real NUL
+# separators, because that is what /proc/<pid>/cmdline is and turning them
+# into spaces is the first thing the script has to do.
+fake_cmdline() {
+    local pid="$1"; shift
+    mkdir -p "$PROC_DIR/$pid"
+    local arg
+    for arg in "$@"; do printf '%s\0' "$arg"; done > "$PROC_DIR/$pid/cmdline"
+}
+
+test_windows_reads_the_command_line() {
+    setup_sandbox; fake_hyprctl_json; fake_proc
+    fake_cmdline 1876 /usr/bin/Chatterbox
+    fake_cmdline 226441 /usr/bin/termpane --working-directory=/home/user
+    cat > "$FAKE_CLIENTS" <<'JSON'
+[{"address":"0x1","class":"org.example.chatterbox","title":"Chatterbox","workspace":{"id":3},"monitor":0,"pid":1876},
+ {"address":"0x2","class":"Termpane","title":"term","workspace":{"id":1},"monitor":0,"pid":226441}]
+JSON
+    local out; out="$("$WINDOWS_BIN")"
+    assert_eq "windows: the NUL separators become spaces" \
+              "$(jq -r '.[0].command' <<<"$out")" "/usr/bin/Chatterbox"
+    assert_eq "windows: an argument comes with it" \
+              "$(jq -r '.[1].command' <<<"$out")" "/usr/bin/termpane --working-directory=/home/user"
+    assert_eq "windows: the program is the basename of the first word" \
+              "$(jq -r '.[1].program' <<<"$out")" "termpane"
+    # The pid is the script's own business and must not leave it: a pid is
+    # stale the moment it is read.
+    assert_eq "windows: the pid does not reach the caller" \
+              "$(jq -r '.[0] | has("pid")' <<<"$out")" "false"
+    teardown_sandbox
+}
+
+test_windows_three_windows_of_one_process() {
+    setup_sandbox; fake_hyprctl_json; fake_proc
+    # His three nimbus windows, measured: three classes, one pid, one command
+    # line -- and that line ends in the Webmail flag, so it is WRONG for the
+    # plain browser window. The script reports what it measured; deciding
+    # what it means is Model.js's job and the user's.
+    fake_cmdline 1866 /opt/nimbus-bin/nimbus --password-store=gnome-libsecret \
+                 --app=https://mail.example.com/mail/
+    cat > "$FAKE_CLIENTS" <<'JSON'
+[{"address":"0x1","class":"nimbus-browser","title":"b","workspace":{"id":1},"monitor":0,"pid":1866},
+ {"address":"0x2","class":"nimbus-mail.example.com__mail_-Default","title":"o","workspace":{"id":2},"monitor":0,"pid":1866},
+ {"address":"0x3","class":"nimbus-chat.example.org__-Default","title":"w","workspace":{"id":3},"monitor":0,"pid":1866}]
+JSON
+    local out; out="$("$WINDOWS_BIN")"
+    assert_eq "windows: three windows of one process stay three windows" \
+              "$(jq -r 'length' <<<"$out")" "3"
+    assert_eq "windows: and all three carry the identical command line" \
+              "$(jq -r '[.[].command] | unique | length' <<<"$out")" "1"
+    assert_eq "windows: which is the one that was measured" \
+              "$(jq -r '.[0].command' <<<"$out")" \
+              "/opt/nimbus-bin/nimbus --password-store=gnome-libsecret --app=https://mail.example.com/mail/"
+    assert_eq "windows: their classes are what tells them apart" \
+              "$(jq -r '[.[].class] | unique | length' <<<"$out")" "3"
+    teardown_sandbox
+}
+
+test_windows_unreadable_proc_is_an_empty_field() {
+    setup_sandbox; fake_hyprctl_json; fake_proc
+    fake_cmdline 1483 /usr/lib/msgbox-desktop/msgbox-desktop
+    # 4242 has no directory at all -- a window of another user, or a process
+    # that exited between the two reads.
+    cat > "$FAKE_CLIENTS" <<'JSON'
+[{"address":"0x1","class":"gone","title":"g","workspace":{"id":1},"monitor":0,"pid":4242},
+ {"address":"0x2","class":"signal","title":"s","workspace":{"id":2},"monitor":0,"pid":1483}]
+JSON
+    local out; out="$("$WINDOWS_BIN")"
+    assert_eq "windows: an unreadable /proc entry is an empty command" \
+              "$(jq -r '.[0].command' <<<"$out")" ""
+    assert_eq "windows: and an empty program" \
+              "$(jq -r '.[0].program' <<<"$out")" ""
+    assert_eq "windows: the window itself is still listed" \
+              "$(jq -r '.[0].class' <<<"$out")" "gone"
+    assert_eq "windows: and the other window is unaffected" \
+              "$(jq -r '.[1].command' <<<"$out")" "/usr/lib/msgbox-desktop/msgbox-desktop"
+    teardown_sandbox
+}
+
+test_windows_a_window_without_a_pid() {
+    setup_sandbox; fake_hyprctl_json; fake_proc
+    cat > "$FAKE_CLIENTS" <<'JSON'
+[{"address":"0x1","class":"nopid","title":"n","workspace":{"id":1},"monitor":0},
+ {"address":"0x2","class":"badpid","title":"b","workspace":{"id":1},"monitor":0,"pid":"1876"}]
+JSON
+    local out; out="$("$WINDOWS_BIN")"
+    assert_eq "windows: a window with no pid gets an empty command, not a crash" \
+              "$(jq -r '.[0].command' <<<"$out")" ""
+    assert_eq "windows: a pid that is a string is not looked up either" \
+              "$(jq -r '.[1].command' <<<"$out")" ""
+    assert_eq "windows: and both windows are still listed" \
+              "$(jq -r 'length' <<<"$out")" "2"
+    teardown_sandbox
+}
+
+test_windows_a_tab_in_a_command_line_does_not_shift_a_field() {
+    setup_sandbox; fake_hyprctl_json; fake_proc
+    # The pid and the command line travel to jq as one tab-separated line. A
+    # tab surviving into the command would split that line into the wrong
+    # fields -- and this project has been bitten by exactly that shape once
+    # already, by a tab inside a .desktop value.
+    fake_cmdline 100 "/usr/bin/odd" $'--flag=a\tb'
+    fake_cmdline 101 "/usr/bin/plain"
+    cat > "$FAKE_CLIENTS" <<'JSON'
+[{"address":"0x1","class":"odd","title":"o","workspace":{"id":1},"monitor":0,"pid":100},
+ {"address":"0x2","class":"plain","title":"p","workspace":{"id":1},"monitor":0,"pid":101}]
+JSON
+    local out; out="$("$WINDOWS_BIN")"
+    assert_eq "windows: a tab in a command line becomes a space" \
+              "$(jq -r '.[0].command' <<<"$out")" "/usr/bin/odd --flag=a b"
+    assert_eq "windows: and the next window keeps its own command" \
+              "$(jq -r '.[1].command' <<<"$out")" "/usr/bin/plain"
+    teardown_sandbox
+}
+
+test_windows_control_characters_in_a_command_line() {
+    setup_sandbox; fake_hyprctl_json; fake_proc
+    # A newline inside a command line is the shape that once returned a
+    # foreign window address from the match query.
+    fake_cmdline 100 "/usr/bin/odd" $'--flag=a\nb' $'--bell=\a'
+    cat > "$FAKE_CLIENTS" <<'JSON'
+[{"address":"0x1","class":"odd","title":"o","workspace":{"id":1},"monitor":0,"pid":100}]
+JSON
+    local out; out="$("$WINDOWS_BIN")"
+    assert_eq "windows: a newline in a command line becomes a space" \
+              "$(jq -r '.[0].command' <<<"$out")" "/usr/bin/odd --flag=a b --bell="
+    assert_eq "windows: and the output is still exactly one JSON array" \
+              "$(jq -s 'length' <<<"$out" 2>/dev/null || echo BADJSON)" "1"
+    teardown_sandbox
+}
+
+test_windows_a_command_line_past_the_cap() {
+    setup_sandbox; fake_hyprctl_json; fake_proc
+    # Past the writer cap the field is EMPTY rather than truncated: a
+    # truncated command line looks like a command and is not one. The program
+    # survives, because the .desktop-by-binary route needs only that word and
+    # it is the route that answers the two cases /proc cannot.
+    local long; long="$(printf 'x%.0s' $(seq 1 600))"
+    fake_cmdline 100 "/usr/bin/verylong" "--flag=$long"
+    fake_cmdline 101 "/usr/bin/short" "--flag=ok"
+    cat > "$FAKE_CLIENTS" <<'JSON'
+[{"address":"0x1","class":"long","title":"l","workspace":{"id":1},"monitor":0,"pid":100},
+ {"address":"0x2","class":"short","title":"s","workspace":{"id":1},"monitor":0,"pid":101}]
+JSON
+    local out; out="$("$WINDOWS_BIN")"
+    assert_eq "windows: a command line past the cap arrives empty, not truncated" \
+              "$(jq -r '.[0].command' <<<"$out")" ""
+    assert_eq "windows: but its program survives the cap" \
+              "$(jq -r '.[0].program' <<<"$out")" "verylong"
+    assert_eq "windows: a command line under the cap is untouched" \
+              "$(jq -r '.[1].command' <<<"$out")" "/usr/bin/short --flag=ok"
+    # 500 exactly is MAX_COMMAND in Model.js: the longest command that file
+    # will write. One character more could not be written even if it were
+    # offered, which is why the cap sits there and not somewhere rounder.
+    # 485, because "/usr/bin/e --f=" is the other 15 characters of the 500.
+    local at_cap; at_cap="$(printf 'y%.0s' $(seq 1 485))"
+    fake_cmdline 102 "/usr/bin/e" "--f=$at_cap"
+    cat > "$FAKE_CLIENTS" <<'JSON'
+[{"address":"0x1","class":"atcap","title":"a","workspace":{"id":1},"monitor":0,"pid":102}]
+JSON
+    assert_eq "windows: a command line of exactly 500 characters still arrives" \
+              "$(jq -r '.[0].command | length' <<<"$("$WINDOWS_BIN")")" "500"
+    teardown_sandbox
+}
+
+test_windows_the_program_is_a_basename_not_a_path() {
+    setup_sandbox; fake_hyprctl_json; fake_proc
+    fake_cmdline 1883 /tmp/.mount_lm-stuFjMMHD/modelbox
+    cat > "$FAKE_CLIENTS" <<'JSON'
+[{"address":"0x1","class":"ai.elementlabs.modelbox","title":"Modelbox","workspace":{"id":8},"monitor":0,"pid":1883}]
+JSON
+    local out; out="$("$WINDOWS_BIN")"
+    assert_eq "windows: the AppImage mount path is reported as measured" \
+              "$(jq -r '.[0].command' <<<"$out")" "/tmp/.mount_lm-stuFjMMHD/modelbox"
+    assert_eq "windows: and its program is the basename alone" \
+              "$(jq -r '.[0].program' <<<"$out")" "modelbox"
+    teardown_sandbox
+}
+
+test_windows_reads_the_command_line
+test_windows_three_windows_of_one_process
+test_windows_unreadable_proc_is_an_empty_field
+test_windows_a_window_without_a_pid
+test_windows_a_tab_in_a_command_line_does_not_shift_a_field
+test_windows_control_characters_in_a_command_line
+test_windows_a_command_line_past_the_cap
+test_windows_the_program_is_a_basename_not_a_path
+
 test_windows_resolves_the_monitor_name
 test_windows_drops_special_workspaces
 test_windows_caps_the_count
