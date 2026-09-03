@@ -3,6 +3,8 @@
 An Omarchy bar widget for Hyprland: an editor for the one Hyprland file that
 decides which programs your session starts.
 
+![The Autostart Editor panel, showing the entries of an autostart.lua](preview.png)
+
 ## What it is
 
 One file, one panel:
