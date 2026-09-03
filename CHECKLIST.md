@@ -262,13 +262,24 @@ are now gone unless you port them by hand into your own files:
 | what | where the old JSON put it | in your `*.lua`? |
 |---|---|---|
 | `Termpane` | workspace 4 | no |
-| `ai.elementlabs.modelbox` | workspace 10 | no -- `windowrules.lua` sends `LM[- ]?Studio` to 8 |
+| `ai.elementlabs.modelbox` | workspace 10 | no, and the rule that looks like a substitute is not one -- see below |
 | `nimbus-browser` | workspace 9 | no |
 | workspace 10 | monitor `DP-3` | no -- `workspaces.lua` stops at 9 |
 
 Decide for each one whether you want it. If you do, add the line to
 `windowrules.lua` or `workspaces.lua` yourself -- the plugin cannot, and that
 is the point of this release.
+
+**About Modelbox, stated plainly** (corrected after the task 18 review, which
+found this row misleading): `windowrules.lua` does contain
+`o.window("LM[- ]?Studio", { workspace = "8" })`, but that pattern does **not**
+match the window Modelbox actually opens -- its class is
+`ai.elementlabs.modelbox`. So the rule is stale: it places nothing, and reading
+this row as "workspace 8 instead of 10" would be reading a placement that does
+not happen. The old JSON configuration's workspace-10 rule matched the real
+class and did work. If you want Modelbox placed at all, the line to add to
+your `windowrules.lua` is one that matches `ai.elementlabs.modelbox`. The
+plugin was right about this and the note was not.
 
 ### D6. Is the session single, and did nothing start twice?
 

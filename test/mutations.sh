@@ -327,6 +327,144 @@ probe "cutover: the panel has one switch, not two" "$STRUCT_SUITE" Panel.qml \
 probe "cutover: the service consults it in load()" "$STRUCT_SUITE" Service.qml \
   's|^        if (!Model.WRITE_PATH_ENABLED) {$|        if (false) {|'
 
+# --- WRITING autostart.lua --------------------------------------------------
+#
+# The file under this writer RUNS AT EVERY LOGIN, so each probe below turns off
+# exactly one of its safeguards and requires a suite to notice. A green suite
+# over a disarmed guard here is the difference between a change taking effect
+# and a session that does not start the user's programs.
+
+# The reader half the writer stands on: a line inside a block comment came back
+# editable before the task 18 review found it, so changing it would have
+# rewritten a line the user had deliberately switched off.
+probe "autostart: a block-commented line is not an entry" "$QML_SUITE" Model.js \
+  '/if (inBracket\[n\]) continue;/d'
+
+probe "autostart: the bracket scanner keeps its state across lines" "$QML_SUITE" Model.js \
+  's|^        flags.push(level >= 0);$|        flags.push(false);|'
+
+probe "autostart: a quoted string does not open a bracket" "$QML_SUITE" Model.js \
+  's|^                var str = luaStringAt(line, i);$|                var str = null;|'
+
+# The escaper. Dropping either escape is silent in the file and fatal at login.
+probe "autostart: a double quote is escaped" "$QML_SUITE" Model.js \
+  's|out += BACKSLASH + QUOTE;|out += QUOTE;|'
+
+probe "autostart: a backslash is escaped" "$QML_SUITE" Model.js \
+  's|out += BACKSLASH + BACKSLASH;|out += BACKSLASH;|'
+
+probe "autostart: the literal is quoted at all" "$QML_SUITE" Model.js \
+  's|return QUOTE + out + QUOTE;|return out;|'
+
+# The allowlist, and the throw that makes it unbypassable.
+probe "autostart: luaQuote throws on a character it cannot write" "$QML_SUITE" Model.js \
+  's|        if (autostartCharRefused(code)) {|        if (false) {|'
+
+probe "autostart: a control character is refused" "$QML_SUITE" Model.js \
+  's|^    if (code < 0x20) return true;$|    if (code < 0x00) return true;|'
+
+probe "autostart: an empty command is refused" "$QML_SUITE" Model.js \
+  's|return "empty-command";|return null;|'
+
+probe "autostart: a command past the cap is refused" "$QML_SUITE" Model.js \
+  's|return "command-too-long";|return null;|'
+
+# The surgery itself. Each of these three changes exactly one line of Model.js
+# and makes a byte-exact assertion red.
+probe "autostart: add appends, it does not prepend" "$QML_SUITE" Model.js \
+  's|^        appended.push(autostartLine(String(operation.command)));$|        appended.unshift(autostartLine(String(operation.command)));|'
+
+probe "autostart: change replaces the line named and no other" "$QML_SUITE" Model.js \
+  's|^    out\[wanted - 1\] = autostartLine(String(operation.command));$|    out[wanted] = autostartLine(String(operation.command));|'
+
+probe "autostart: remove deletes one line, not two" "$QML_SUITE" Model.js \
+  's|^        out.splice(wanted - 1, 1);$|        out.splice(wanted - 1, 2);|'
+
+probe "autostart: the file keeps its single trailing newline" "$QML_SUITE" Model.js \
+  's|^    return lines.join("\\\\n") + "\\\\n";$|    return lines.join("\\\\n");|'
+
+# THE NON-EDITABLE ENTRY, which in the user's file is the nested Chat line.
+# With this check gone, the plugin would rewrite a line it cannot represent.
+probe "autostart: a non-editable entry cannot be changed or removed" "$QML_SUITE" Model.js \
+  's|^    if (found.editable !== true) return { ok: false, error: "entry-not-editable" };$|    if (false) return { ok: false, error: "entry-not-editable" };|'
+
+probe "autostart: a line that holds no entry cannot be edited" "$QML_SUITE" Model.js \
+  's|^    if (found === null) return { ok: false, error: "no-entry-on-line" };$|    if (found === null) found = { editable: true, raw: lines[wanted - 1] };|'
+
+# THE ONE-LINE ASSERTION'S OWN SENSITIVITY. If oneLineDifference reported "one
+# line" for two edits, every surgery assertion above would be decoration.
+probe "autostart: the one-line proof notices a second changed line" "$QML_SUITE" Model.js \
+  's|^            if (at !== -1) return "multiple";$|            if (false) return "multiple";|'
+
+probe "autostart: the one-line proof notices a shifted tail" "$QML_SUITE" Model.js \
+  's|^        for (var j = i; j < a.length; j++) if (a\[j\] !== b\[j + 1\]) return "multiple";$|        for (var j = i; j < a.length; j++) if (false) return "multiple";|'
+
+# The section the surgery reads its bytes from, and which section may be
+# written at all.
+probe "autostart: the section carries the bytes the surgery works on" "$QML_SUITE" Model.js \
+  's|^            content: present ? String(f.content \|\| "") : "",$|            content: "",|'
+
+probe "autostart: only autostart.lua is writable" "$QML_SUITE" Model.js \
+  's|^    if (String(s.name) !== "autostart.lua") return false;$|    if (false) return false;|'
+
+probe "autostart: a truncated read is not writable" "$QML_SUITE" Model.js \
+  's|^    if (s.truncated === true) return false;$|    if (false) return false;|'
+
+probe "autostart: a refusal code cannot reach the panel unworded" "$QML_SUITE" Model.js \
+  '/^    case "entry-not-editable":$/,+2d'
+
+# --- the writer script's own guards -----------------------------------------
+
+# THE luac5.1 GATE, and it is the strongest safeguard in this task. Disarmed,
+# a file that will not compile is renamed into place and the next login fails.
+probe "writer: the syntax gate actually gates" "$SHELL_SUITE" bin/omarchy-autostart-hypr-write \
+  's|^    if ! diagnostic="$("$luac" -p "$STAGEFILE" 2>&1)"; then$|    if false; then diagnostic=""|'
+
+probe "writer: an absent Lua compiler is a refusal, not a skip" "$SHELL_SUITE" bin/omarchy-autostart-hypr-write \
+  's|^    return 1$|    printf "/bin/true\\n"; return 0|'
+
+# THE FRESHNESS CHECK. This is a file the user also edits by hand.
+probe "writer: a file that changed on disk is refused" "$SHELL_SUITE" bin/omarchy-autostart-hypr-write \
+  's|^    \[\[ "$current" == "$expect_mtime" \]\] \\\\$|    [[ "$current" == "$current" ]] \\\\|'
+
+# THE ONLY WAY BACK: ~/.config/hypr is not under version control.
+probe "writer: the backup is taken before the replacement" "$SHELL_SUITE" bin/omarchy-autostart-hypr-write \
+  's|^    cp -p -- "$TARGET" "$BACKUP" \\\\$|    true \\\\|'
+
+probe "writer: a symlink is refused" "$SHELL_SUITE" bin/omarchy-autostart-hypr-write \
+  's|^    \[\[ ! -h "$TARGET" \]\] \|\| err "is-a-symlink"|    [[ 1 -eq 1 ]] \|\| err "is-a-symlink"|'
+
+probe "writer: a group-writable file is refused" "$SHELL_SUITE" bin/omarchy-autostart-hypr-write \
+  's|^    if (( 8#$mode \& 8#22 )); then$|    if (( 8#$mode \& 8#00 )); then|'
+
+probe "writer: an absent file is not written into existence" "$SHELL_SUITE" bin/omarchy-autostart-hypr-write \
+  's|^    \[\[ -e "$TARGET" \]\] \|\| err "not-a-file" "$TARGET does not exist"$|    [[ -e "$TARGET" ]] \|\| touch "$TARGET"|'
+
+probe "writer: a candidate past the cap is refused" "$SHELL_SUITE" bin/omarchy-autostart-hypr-write \
+  's|^        err "too-large" "the candidate exceeds $MAX_BYTES bytes"$|        true|'
+
+probe "writer: the replacement is staged beside the destination" "$SHELL_SUITE" bin/omarchy-autostart-hypr-write \
+  's|^    STAGEFILE="$(mktemp "$HYPR_DIR/.autostart.lua.XXXXXX")" \\\\$|    STAGEFILE="$(mktemp)" \\\\|'
+
+probe "writer: the staged file gets the original's permissions" "$SHELL_SUITE" bin/omarchy-autostart-hypr-write \
+  's|^    chmod --reference="$TARGET" "$STAGEFILE" \\\\$|    true \\\\|'
+
+# --- the panel's one route to the file --------------------------------------
+probe "panel: the write goes through the writer script, not a second route" "$STRUCT_SUITE" Panel.qml \
+  's|omarchy-autostart-hypr-write|omarchy-autostart-config|'
+
+probe "panel: the new content is shell-quoted" "$STRUCT_SUITE" Panel.qml \
+  's|Model.shellQuote(result.text)|result.text|'
+
+probe "panel: a refused operation never arms the Process" "$STRUCT_SUITE" Panel.qml \
+  '/^        if (!result.ok) {$/,+3d'
+
+probe "panel: the row controls are gated on the entry being editable" "$STRUCT_SUITE" Panel.qml \
+  's|hyprEntryRow.entry.editable === true|true|'
+
+probe "panel: the counting is Model'"'"'s, not the panel'"'"'s" "$STRUCT_SUITE" Panel.qml \
+  's|Model.hyprProgramCount(root.hyprSections)|0|'
+
 # --- the guards themselves --------------------------------------------------
 #
 # Two probes of the two mechanisms that exist because an assertion which does

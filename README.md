@@ -3,7 +3,7 @@
 An Omarchy bar widget for Hyprland: a reader -- and, later, a writer -- for the
 Hyprland configuration files you already keep by hand.
 
-## Status: it reads. It does not write yet.
+## Status: it reads all three, and writes `autostart.lua`.
 
 This plugin used to keep a list of its own, in
 `~/.config/omarchy/autostart-layout.json`, and apply it at login through
@@ -18,17 +18,52 @@ So the direction changed. The single source of truth is now your own
 - `~/.config/hypr/workspaces.lua`,
 
 which Hyprland already reads and applies at login by itself. This release reads
-those three files and shows them. It changes nothing in them, and it no longer
-applies anything of its own: your autostart and your window placement keep
-working exactly as they did, because they were never this plugin's doing in the
-first place -- they are Hyprland's.
+all three and shows them, and it writes exactly one of them: `autostart.lua`.
+`windowrules.lua` and `workspaces.lua` are read only. It applies nothing of its
+own -- no `hyprctl eval`, no `hyprctl reload`, nothing started and nothing
+killed -- so your autostart and your window placement keep working exactly as
+they did, because they were never this plugin's doing in the first place: they
+are Hyprland's.
 
-The write half is the next piece of work, and it will be **line surgery**: only
-the lines the reader understands may ever change, and comments, blank lines and
-forms the reader cannot represent stay byte for byte as you wrote them. That is
-why every entry the reader produces carries its line number and its original
-line text, and why the reader had to be proved right before anything was
-allowed near your configuration.
+### What writing `autostart.lua` means, precisely
+
+It is **line surgery**, and only three operations exist:
+
+- **add** -- one line, appended as the last line, in the style the file already
+  uses: `o.launch_on_start("<your command>")`. Nothing is sorted into a
+  "matching" comment section, because guessing which of your section comments a
+  program belongs under is exactly the surprise this design avoids.
+- **change** -- exactly the line you picked, no other.
+- **remove** -- exactly the line you picked, no other.
+
+Your comments, your blank lines and every form the reader cannot represent stay
+byte for byte as you wrote them. In particular, **a line the panel cannot
+represent can be neither changed nor removed.** It is shown as it stands, marked
+as such, with the note that the file has to be edited by hand for it. That is a
+real limitation and it is named rather than hidden: in a file with a nested
+helper call like
+`o.exec_on_start(o.launch_webapp_sole("Chat", "https://chat.example.org/"))`,
+that entry is visible and untouchable.
+
+Four things stand between a change and your next login:
+
+1. The new file content is produced by a **pure function** in `Model.js` -- old
+   text plus one operation gives new text, no file I/O -- so every case is a
+   unit test with a byte-exact expected result, plus the assertion that old and
+   new differ in exactly one line.
+2. A command that cannot be written as a readable Lua string literal -- a line
+   break, a control character, a NUL -- is **refused**, with a sentence saying
+   why, rather than encoded into something unreadable.
+3. The candidate is compiled with `luac5.1 -p` **before** anything is renamed
+   into place. `-p` parses without executing. A file that would not compile is
+   never published, and the original is left byte for byte as it was.
+4. Your file is backed up to `autostart.lua.bak` (one step back, overwritten
+   each time) and replaced by an atomic rename. If its modification time is not
+   the one the panel read, the write is refused: you also edit this file by
+   hand, and a line number from a stale read means a different line.
+
+A change takes effect **at your next login.** The plugin starts nothing and
+reloads nothing.
 
 The old JSON half is still in the source, disconnected at one named place
 (`WRITE_PATH_ENABLED` in `Model.js`), because the writer is built from it. It

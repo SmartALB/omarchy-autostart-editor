@@ -1140,6 +1140,364 @@ test_hypr_read_caps_and_flags_an_oversized_file
 test_hypr_read_changes_nothing
 test_hypr_read_resolves_its_directory_from_the_sandbox
 
+# --- bin/omarchy-autostart-hypr-write --------------------------------------
+#
+# THE WRITER, and the file it writes RUNS AT EVERY LOGIN. A malformed
+# autostart.lua means the user's programs do not start and Hyprland reports a
+# Lua error when he logs in, so every refusal below also asserts that THE
+# ORIGINAL IS BYTE-IDENTICAL afterwards, with `cmp` against a copy taken
+# before the attempt -- not by re-reading a field the script itself produced.
+#
+# The content is never built here. It comes finished from
+# Model.autostartApply(), whose cases are byte-exact assertions in
+# test/harness.qml; this script owns only the freshness check, the
+# permissions, the backup, the luac5.1 gate and the atomic rename.
+#
+# Every assertion runs against setup_sandbox's redirected XDG_CONFIG_HOME. The
+# real ~/.config/hypr is never opened, which is asserted once at the end.
+WRITE_BIN="$PWD/../bin/omarchy-autostart-hypr-write"
+
+# The script with its whole-line comments removed. Several assertions below
+# ask whether the script NAMES something, and this script's comments name
+# every one of those things in order to say that it does not do them.
+write_code() { grep -v '^[[:space:]]*#' "$WRITE_BIN"; }
+
+autostart_path() { printf '%s/hypr/autostart.lua' "$XDG_CONFIG_HOME"; }
+autostart_mtime() { stat -c %Y "$(autostart_path)"; }
+
+# The user's own file, and the reason it is spelled out rather than copied
+# from ~/.config/hypr: a test must never READ from there either, so that a
+# change to his file cannot change what this suite asserts.
+write_autostart_fixture() {
+    mkdir -p "$(hypr_dir)"
+    printf '%s\n' \
+        '-- Autostart. Portiert aus autostart.conf.' \
+        '' \
+        '-- Dienstliche Kommunikation' \
+        'o.launch_on_start("notes-app")' \
+        'o.exec_on_start(o.launch_webapp_sole("Chat", "https://chat.example.org/"))' \
+        > "$(autostart_path)"
+    chmod 644 "$(autostart_path)"
+    cp -p "$(autostart_path)" "$SANDBOX/before.lua"
+}
+
+# The candidate a successful write publishes: the fixture with one more line,
+# which is what "add" produces.
+write_good_candidate() {
+    cat "$SANDBOX/before.lua"
+    printf '%s\n' 'o.launch_on_start("obsidian")'
+}
+
+assert_original_untouched() {
+    local name="$1"
+    assert_eq "$name" \
+              "$(cmp -s "$SANDBOX/before.lua" "$(autostart_path)" \
+                 && echo identical || echo CHANGED)" "identical"
+}
+
+# No dotfile left beside the user's own configuration after a refusal. The
+# staged replacement lives in his directory by necessity -- a rename is only
+# atomic within one filesystem -- so the cleanup for it is load-bearing.
+assert_nothing_staged() {
+    local name="$1" left
+    left="$(ls -A "$(hypr_dir)" | grep -c '^\.autostart' || true)"
+    assert_eq "$name" "$left" "0"
+}
+
+test_write_publishes_a_good_candidate() {
+    setup_sandbox
+    write_autostart_fixture
+    local out; out="$(write_good_candidate | "$WRITE_BIN" write --expect-mtime "$(autostart_mtime)")"
+    assert_eq "write: it succeeds" "$(jq -r .ok <<<"$out")" "true"
+    assert_eq "write: it reports the new mtime" \
+              "$(jq -r .mtime <<<"$out")" "$(autostart_mtime)"
+    write_good_candidate > "$SANDBOX/expected.lua"
+    assert_eq "write: the published file is exactly the candidate" \
+              "$(cmp -s "$SANDBOX/expected.lua" "$(autostart_path)" \
+                 && echo identical || echo DIFFERENT)" "identical"
+    assert_nothing_staged "write: nothing is left staged after a publish"
+    assert_eq "write: the mode of the original is kept" \
+              "$(stat -c %a "$(autostart_path)")" "644"
+    # ATOMIC means the rename happens within one filesystem, which means the
+    # staged file has to live in the DESTINATION's directory -- a $TMPDIR stage
+    # would turn `mv` into a copy-then-unlink with a window in which
+    # autostart.lua is half written. Nothing observable distinguishes the two
+    # after the fact, so this is asserted on the code.
+    assert_eq "write: the replacement is staged in the destination's own directory" \
+              "$(write_code | grep -cF 'mktemp "$HYPR_DIR/' || true)" "1"
+    teardown_sandbox
+}
+
+# THE ONLY WAY BACK. ~/.config/hypr is not under version control, so this copy
+# is it -- and it has to hold the OLD content, not the new one.
+test_write_backs_the_old_content_up() {
+    setup_sandbox
+    write_autostart_fixture
+    write_good_candidate | "$WRITE_BIN" write --expect-mtime "$(autostart_mtime)" >/dev/null
+    assert_eq "write: the backup exists" \
+              "$([[ -f "$(autostart_path).bak" ]] && echo yes || echo no)" "yes"
+    assert_eq "write: and it holds the content that was replaced" \
+              "$(cmp -s "$SANDBOX/before.lua" "$(autostart_path).bak" \
+                 && echo identical || echo DIFFERENT)" "identical"
+    assert_eq "write: the answer names the backup it took" \
+              "$(write_good_candidate | "$WRITE_BIN" write --expect-mtime "$(autostart_mtime)" \
+                 | jq -r .backup)" "$(autostart_path).bak"
+    # One step back, overwritten: after a second write the backup is the file
+    # as it stood before THAT write, not the original from two writes ago.
+    cp -p "$(autostart_path)" "$SANDBOX/second-before.lua"
+    printf '%s\n' 'o.launch_on_start("x")' | "$WRITE_BIN" write --expect-mtime "$(autostart_mtime)" >/dev/null
+    assert_eq "write: the backup is one step back, not a history" \
+              "$(cmp -s "$SANDBOX/second-before.lua" "$(autostart_path).bak" \
+                 && echo identical || echo DIFFERENT)" "identical"
+    teardown_sandbox
+}
+
+# THE luac5.1 GATE, and it is the strongest assurance in this task: a
+# candidate that would not compile never reaches the destination.
+test_write_refuses_a_candidate_that_does_not_compile() {
+    setup_sandbox
+    write_autostart_fixture
+    local out; out="$(printf 'o.launch_on_start("nimbus\n' \
+                      | "$WRITE_BIN" write --expect-mtime "$(autostart_mtime)")"
+    assert_eq "write: a broken candidate is refused" "$(jq -r .ok <<<"$out")" "false"
+    assert_eq "write: and says which refusal it is" \
+              "$(jq -r .error <<<"$out")" "does-not-compile"
+    assert_contains "write: the compiler's own diagnostic is passed through" \
+                    "$(jq -r .detail <<<"$out")" "unfinished string"
+    assert_contains "write: and it names the file the user knows, not the staged one" \
+                    "$(jq -r .detail <<<"$out")" "autostart.lua:1:"
+    assert_original_untouched "write: THE ORIGINAL IS BYTE-IDENTICAL after a refused candidate"
+    assert_eq "write: and no backup was taken for a write that did not happen" \
+              "$([[ -e "$(autostart_path).bak" ]] && echo TAKEN || echo none)" "none"
+    assert_nothing_staged "write: nothing is left staged after a refused candidate"
+    teardown_sandbox
+}
+
+# The gate CHECKS and does not RUN. Measured on this machine: `luac5.1 -p` on a
+# file whose body is `print(...)` plus `os.exit(7)` exits 0 and prints nothing.
+# If the gate ever executed the candidate, this write would take the marker
+# file with it.
+test_write_never_executes_the_candidate() {
+    setup_sandbox
+    write_autostart_fixture
+    printf '%s\n' 'local f = io.open("'"$SANDBOX"'/executed", "w") f:write("x") f:close()' \
+        | "$WRITE_BIN" write --expect-mtime "$(autostart_mtime)" >/dev/null
+    assert_eq "write: the gate compiled the candidate without running it" \
+              "$([[ -e "$SANDBOX/executed" ]] && echo EXECUTED || echo compiled-only)" \
+              "compiled-only"
+    teardown_sandbox
+}
+
+# THE FRESHNESS CHECK. This is a file the user also maintains by hand: if the
+# mtime is not the one the panel read, every line number the caller carries
+# may now mean a different line.
+test_write_refuses_a_stale_expectation() {
+    setup_sandbox
+    write_autostart_fixture
+    local out; out="$(write_good_candidate | "$WRITE_BIN" write --expect-mtime 1)"
+    assert_eq "write: a stale mtime is refused" "$(jq -r .ok <<<"$out")" "false"
+    assert_eq "write: and says which refusal it is" "$(jq -r .error <<<"$out")" "stale"
+    assert_contains "write: it names both mtimes" "$(jq -r .detail <<<"$out")" \
+                    "caller expected 1"
+    assert_original_untouched "write: THE ORIGINAL IS BYTE-IDENTICAL after a stale refusal"
+    assert_nothing_staged "write: nothing is left staged after a stale refusal"
+    # And a file touched between the read and the write is exactly that case.
+    local mtime; mtime="$(autostart_mtime)"
+    touch -d "@$((mtime + 60))" "$(autostart_path)"
+    assert_eq "write: a file touched since the read is refused" \
+              "$(write_good_candidate | "$WRITE_BIN" write --expect-mtime "$mtime" | jq -r .error)" \
+              "stale"
+    teardown_sandbox
+}
+
+test_write_refuses_what_it_must_not_write_through() {
+    setup_sandbox
+    write_autostart_fixture
+    # A symlink, named as one rather than blamed on permissions: a link could
+    # point into a directory somebody else controls.
+    mv "$(autostart_path)" "$(hypr_dir)/real.lua"
+    ln -s "$(hypr_dir)/real.lua" "$(autostart_path)"
+    assert_eq "write: a symlink is refused" \
+              "$(write_good_candidate | "$WRITE_BIN" write --expect-mtime "$(stat -Lc %Y "$(autostart_path)")" \
+                 | jq -r .error)" "is-a-symlink"
+    assert_eq "write: and the file it pointed at is untouched" \
+              "$(cmp -s "$SANDBOX/before.lua" "$(hypr_dir)/real.lua" \
+                 && echo identical || echo CHANGED)" "identical"
+    rm -f "$(autostart_path)"
+    mv "$(hypr_dir)/real.lua" "$(autostart_path)"
+
+    # A group-writable file: the lines in it are command lines run at login, so
+    # a foreign writer here is a foreign writer in the user's session.
+    chmod g+w "$(autostart_path)"
+    assert_eq "write: a group-writable file is refused" \
+              "$(write_good_candidate | "$WRITE_BIN" write --expect-mtime "$(autostart_mtime)" \
+                 | jq -r .error)" "insecure-permissions"
+    assert_original_untouched "write: THE ORIGINAL IS BYTE-IDENTICAL after a permission refusal"
+    chmod 644 "$(autostart_path)"
+
+    # A group-writable directory is enough on its own: the file can simply be
+    # replaced.
+    chmod g+w "$(hypr_dir)"
+    assert_eq "write: a group-writable directory is refused" \
+              "$(write_good_candidate | "$WRITE_BIN" write --expect-mtime "$(autostart_mtime)" \
+                 | jq -r .error)" "insecure-permissions"
+    chmod 755 "$(hypr_dir)"
+
+    # A file that is not there is not written INTO EXISTENCE: this writer does
+    # surgery on bytes that were read, and Omarchy ships an autostart.lua.
+    rm -f "$(autostart_path)"
+    assert_eq "write: an absent file is refused rather than created" \
+              "$(write_good_candidate | "$WRITE_BIN" write --expect-mtime 0 | jq -r .error)" \
+              "not-a-file"
+    assert_eq "write: and it was not created after all" \
+              "$([[ -e "$(autostart_path)" ]] && echo CREATED || echo absent)" "absent"
+
+    # A directory at that path is not a plain file either.
+    mkdir -p "$(autostart_path)"
+    assert_eq "write: a directory at that path is refused" \
+              "$(write_good_candidate | "$WRITE_BIN" write --expect-mtime "$(autostart_mtime)" \
+                 | jq -r .error)" "not-a-file"
+    rmdir "$(autostart_path)"
+    teardown_sandbox
+}
+
+test_write_refuses_an_oversized_candidate() {
+    setup_sandbox
+    write_autostart_fixture
+    # 64 KiB + 1, and it has to be VALID Lua so that the size refusal is what
+    # is being measured rather than the syntax gate. A comment line of the
+    # right length compiles and is over the cap.
+    local out
+    out="$({ printf -- '-- '; head -c 65532 /dev/zero | tr '\0' 'x'; printf '\n'; } \
+           | "$WRITE_BIN" write --expect-mtime "$(autostart_mtime)")"
+    assert_eq "write: a candidate at the cap is accepted" "$(jq -r .ok <<<"$out")" "true"
+    cp -p "$(autostart_path)" "$SANDBOX/before.lua"
+    out="$({ printf -- '-- '; head -c 65533 /dev/zero | tr '\0' 'x'; printf '\n'; } \
+           | "$WRITE_BIN" write --expect-mtime "$(autostart_mtime)")"
+    assert_eq "write: one byte past the cap is refused" "$(jq -r .error <<<"$out")" "too-large"
+    assert_original_untouched "write: THE ORIGINAL IS BYTE-IDENTICAL after a size refusal"
+    assert_nothing_staged "write: nothing is left staged after a size refusal"
+    teardown_sandbox
+}
+
+test_write_has_one_envelope_and_one_usage() {
+    setup_sandbox
+    write_autostart_fixture
+    # Every path is exactly one JSON object on stdout, so a caller parses one
+    # shape and can always tell why.
+    local path
+    for path in stale broken permissions; do
+        local out
+        case "$path" in
+            stale)       out="$(write_good_candidate | "$WRITE_BIN" write --expect-mtime 1)" ;;
+            broken)      out="$(printf 'o.launch(\n' | "$WRITE_BIN" write --expect-mtime "$(autostart_mtime)")" ;;
+            permissions) chmod g+w "$(autostart_path)"
+                         out="$(write_good_candidate | "$WRITE_BIN" write --expect-mtime "$(autostart_mtime)")"
+                         chmod 644 "$(autostart_path)" ;;
+        esac
+        assert_eq "write: the $path path is exactly one JSON object" \
+                  "$(jq -sr 'length' <<<"$out")" "1"
+        assert_eq "write: the $path path exits 0 so the answer is readable" \
+                  "$(jq -r 'has("ok")' <<<"$out")" "true"
+    done
+
+    # Usage errors are status 2 and NOT an envelope: they are a caller bug, not
+    # an outcome of a write.
+    assert_eq "write: no subcommand is a usage error" \
+              "$("$WRITE_BIN" >/dev/null 2>&1; echo $?)" "2"
+    assert_eq "write: a wrong subcommand is a usage error" \
+              "$("$WRITE_BIN" read >/dev/null 2>&1; echo $?)" "2"
+    assert_eq "write: no --expect-mtime is a usage error" \
+              "$(printf 'x' | "$WRITE_BIN" write >/dev/null 2>&1; echo $?)" "2"
+    assert_eq "write: a non-numeric --expect-mtime is a usage error" \
+              "$(printf 'x' | "$WRITE_BIN" write --expect-mtime abc >/dev/null 2>&1; echo $?)" "2"
+    # A BARE TRAILING --expect-mtime, and this is the bash detail task 4 was
+    # bitten by: `shift 2` with one parameter left is a no-op, so a loop that
+    # trusts it spins forever. Bounded by `timeout` so a regression fails
+    # instead of hanging the suite.
+    assert_eq "write: a bare trailing --expect-mtime terminates rather than spinning" \
+              "$(printf 'x' | timeout 10 "$WRITE_BIN" write --expect-mtime >/dev/null 2>&1; echo $?)" "2"
+    assert_original_untouched "write: no usage error touched the file"
+    teardown_sandbox
+}
+
+# The two files this plugin does NOT write, and the two things this script
+# does NOT do.
+test_write_touches_only_autostart_lua() {
+    setup_sandbox
+    write_real_files
+    cp -p "$(hypr_dir)/windowrules.lua" "$SANDBOX/wr.before"
+    cp -p "$(hypr_dir)/workspaces.lua" "$SANDBOX/ws.before"
+    printf '%s\n' 'o.launch_on_start("x")' \
+        | "$WRITE_BIN" write --expect-mtime "$(autostart_mtime)" >/dev/null
+    assert_eq "write: windowrules.lua is untouched" \
+              "$(cmp -s "$SANDBOX/wr.before" "$(hypr_dir)/windowrules.lua" \
+                 && echo identical || echo CHANGED)" "identical"
+    assert_eq "write: workspaces.lua is untouched" \
+              "$(cmp -s "$SANDBOX/ws.before" "$(hypr_dir)/workspaces.lua" \
+                 && echo identical || echo CHANGED)" "identical"
+    # There is no path in this script that can be pointed at another file, and
+    # no compositor call of any kind: a change takes effect at the next login.
+    #
+    # THE CODE, NOT THE PROSE. These four greps read write_code, which drops
+    # whole-line `#` comments -- the script EXPLAINS in comments that it never
+    # calls hyprctl and that the other two files are read-only, and a grep
+    # over the raw file counts those sentences as hits. That is the same trap
+    # test/qml-structure.sh's strip_comments exists for, one language over:
+    # a check a comment can satisfy -- or defeat -- is not a check.
+    assert_eq "write: it names no second file to write" \
+              "$(write_code | grep -cE 'windowrules|workspaces' || true)" "0"
+    assert_eq "write: it never calls hyprctl" \
+              "$(write_code | grep -cE 'hyprctl' || true)" "0"
+    assert_eq "write: it takes no --file option" \
+              "$(write_code | grep -cE -- '--file' || true)" "0"
+    # The real ~/.config/hypr is unreachable from here: the path is resolved
+    # from XDG_CONFIG_HOME and no absolute home path is spelled anywhere.
+    assert_eq "write: no absolute path into a real home directory" \
+              "$(write_code | grep -cE '/home/|/\.config/hypr' || true)" "0"
+    # The stripper itself has to be doing something, or all four above are
+    # vacuous: the raw file DOES contain those words, in its comments.
+    assert_eq "write: the comment stripper actually removes lines" \
+              "$([[ "$(write_code | wc -l)" -lt "$(wc -l < "$WRITE_BIN")" ]] \
+                 && echo stripped || echo NOTHING-STRIPPED)" "stripped"
+    assert_eq "write: and the prose it removes really does mention hyprctl" \
+              "$(grep -cE '^[[:space:]]*#.*hyprctl' "$WRITE_BIN" || true)" "1"
+    teardown_sandbox
+}
+
+# The gate is a REFUSAL when the compiler is missing, never a silent skip.
+# Skipping it is the one failure mode this script exists to prevent.
+test_write_refuses_when_there_is_no_lua_compiler() {
+    setup_sandbox
+    write_autostart_fixture
+    # The resolution loop names three absolute candidates and verifies each by
+    # running it, so the only honest way to simulate absence is to make each
+    # one fail its own check. A copy of the script with the candidate list
+    # pointed at the sandbox does exactly that and changes nothing else.
+    sed 's#for candidate in /usr/bin/luac5.1 /usr/bin/luac /usr/bin/luac5.4; do#for candidate in "$SANDBOX/no-luac"; do#' \
+        "$WRITE_BIN" > "$SANDBOX/write-no-luac"
+    chmod +x "$SANDBOX/write-no-luac"
+    assert_eq "write: the substitution actually took" \
+              "$(grep -c 'SANDBOX/no-luac' "$SANDBOX/write-no-luac")" "1"
+    local out; out="$(write_good_candidate \
+                      | SANDBOX="$SANDBOX" "$SANDBOX/write-no-luac" write --expect-mtime "$(autostart_mtime)")"
+    assert_eq "write: no compiler is a refusal, not a skipped gate" \
+              "$(jq -r .error <<<"$out")" "no-lua-compiler"
+    assert_original_untouched "write: THE ORIGINAL IS BYTE-IDENTICAL when the gate cannot run"
+    teardown_sandbox
+}
+
+test_write_publishes_a_good_candidate
+test_write_backs_the_old_content_up
+test_write_refuses_a_candidate_that_does_not_compile
+test_write_never_executes_the_candidate
+test_write_refuses_a_stale_expectation
+test_write_refuses_what_it_must_not_write_through
+test_write_refuses_an_oversized_candidate
+test_write_has_one_envelope_and_one_usage
+test_write_touches_only_autostart_lua
+test_write_refuses_when_there_is_no_lua_compiler
+
 MARKER_BIN="$PWD/../bin/omarchy-autostart-marker"
 
 # The marker script has six branches: no signature, an implausible (but
@@ -1452,12 +1810,15 @@ test_install_copies_the_plugin_into_the_sandbox() {
     assert_eq "install: the target directory was created" \
               "$([[ -d "$target" ]] && echo yes || echo no)" "yes"
     for f in manifest.json README.md LICENSE BarWidget.qml Panel.qml Service.qml \
-             Runners.qml Model.js bin/omarchy-autostart-config; do
+             Runners.qml Model.js bin/omarchy-autostart-config \
+             bin/omarchy-autostart-hypr bin/omarchy-autostart-hypr-write; do
         assert_eq "install: $f arrived" \
                   "$([[ -f "$target/$f" ]] && echo yes || echo no)" "yes"
     done
     assert_eq "install: the bin scripts are executable at the target" \
               "$([[ -x "$target/bin/omarchy-autostart-config" ]] && echo yes || echo no)" "yes"
+    assert_eq "install: the autostart.lua writer is executable at the target too" \
+              "$([[ -x "$target/bin/omarchy-autostart-hypr-write" ]] && echo yes || echo no)" "yes"
     # The install must not carry the development tree along: test/ holds a
     # harness that imports nothing the shell provides, and .git is a
     # checkout, not plugin content.

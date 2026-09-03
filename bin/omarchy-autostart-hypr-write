@@ -1,0 +1,227 @@
+#!/usr/bin/env bash
+# Writes ~/.config/hypr/autostart.lua, and nothing else.
+#
+# THE FILE THIS REPLACES RUNS AT EVERY LOGIN. A malformed autostart.lua means
+# the user's programs do not start and Hyprland reports a Lua error when he
+# logs in. Every safeguard here exists for that one sentence.
+#
+# It does NOTHING with the content -- it gets that finished, on stdin, from
+# Model.autostartApply(), which is a pure function and therefore the one place
+# where every surgery case is a unit test with a byte-exact expected result.
+# This script owns only the byte-level boundaries: the freshness check, the
+# permission refusals, the backup, the syntax gate and the atomic rename.
+#
+# It never runs a program, never talks to hyprctl, and reloads nothing. A
+# change takes effect at the next login.
+#
+# The path is fixed. There is no --file option and no argument that could name
+# another one: windowrules.lua and workspaces.lua are read-only in this
+# plugin, and a writer that can be pointed at a path is a writer that can be
+# pointed at the wrong one.
+set -uo pipefail
+
+HYPR_DIR="${XDG_CONFIG_HOME:-$HOME/.config}/hypr"
+TARGET="$HYPR_DIR/autostart.lua"
+BACKUP="$TARGET.bak"
+MAX_BYTES=65536           # the same cap bin/omarchy-autostart-hypr reads with
+
+# One cleanup for the whole script. The trap body must never name a
+# function-local variable: the trap runs at exit, when that local is out of
+# scope, and under `set -u` the expansion is fatal -- so the trap removes
+# nothing and a temporary file leaks on every single run. Here that leak would
+# be a dotfile beside the user's own Hyprland configuration. Learned in task
+# 4, copied deliberately.
+STAGEFILE=""   # the candidate, staged beside the destination
+cleanup() {
+    [[ -n "${STAGEFILE:-}" ]] && rm -f -- "$STAGEFILE"
+    return 0
+}
+trap cleanup EXIT
+
+# Every outcome leaves through one of these two, so a caller parses one shape.
+# Even jq itself failing must still produce exactly one JSON object on stdout
+# and exit 0 -- otherwise a caller sees nothing at all and cannot tell why.
+ok() {
+    jq -nc "$@" || printf '{"ok":false,"error":"internal","detail":"could not build the answer"}\n'
+    exit 0
+}
+err() {
+    jq -nc --arg e "$1" --arg d "${2:-}" '{ok:false,error:$e,detail:$d}' \
+        || printf '{"ok":false,"error":"internal","detail":"could not build the error answer"}\n'
+    exit 0
+}
+
+# THE SYNTAX GATE, and it is the strongest assurance available here.
+#
+# Measured: `/usr/bin/luac5.1 -p` exits 0 on a valid file and 1 with a
+# diagnostic on `o.launch_on_start("nimbus` ("unfinished string near"). `-p`
+# PARSES ONLY -- it writes no output file and it does not execute the chunk: a
+# file whose body is `print("x"); os.exit(7)` compiles with exit 0 and prints
+# nothing. So a candidate can be checked without running it, which is exactly
+# what a file that runs at login needs.
+#
+# Resolved by RUNNING the candidate binary, not by a PATH lookup and not by
+# taking `-x` as proof -- the same shape test/lua-syntax.sh uses. A wrapper
+# earlier in PATH would otherwise be trusted without ever being asked whether
+# it is a Lua compiler.
+#
+# Absent compiler = refusal, not a silent skip. Skipping the gate is the one
+# failure mode this script exists to prevent, and lua51 is part of
+# omarchy-base.packages, so its absence is a broken system rather than a
+# configuration this should tolerate.
+resolve_luac() {
+    local candidate
+    for candidate in /usr/bin/luac5.1 /usr/bin/luac /usr/bin/luac5.4; do
+        [[ -x "$candidate" ]] || continue
+        "$candidate" -v 2>&1 | grep -q "^Lua " && { printf '%s\n' "$candidate"; return 0; }
+    done
+    return 1
+}
+
+# Refuse when anyone but the owner can write the file or its directory. The
+# lines in this file are command lines executed at login, so a foreign writer
+# here is a foreign writer in the user's session. A writable directory is
+# enough -- the file can simply be replaced.
+#
+# Deliberately not -L: if $path is a symlink, GNU `stat -c %a` without -L
+# reports the LINK's own mode, which is always 777, so a symlinked
+# autostart.lua is refused here as well. That is on purpose. The explicit
+# symlink refusal below says so in its own words too, because a reader of
+# this script should not have to know that detail to see that the case is
+# covered.
+check_permissions() {
+    local path="$1" kind="$2" mode
+    [[ -e "$path" ]] || return 0
+    mode="$(stat -c %a "$path" 2>/dev/null)" \
+        || err "insecure-permissions" "cannot determine the permissions of $kind $path"
+    if (( 8#$mode & 8#22 )); then
+        err "insecure-permissions" \
+            "$kind $path is writable by group or others (mode $mode); run: chmod g-w,o-w $path"
+    fi
+}
+
+# Read at most MAX+1 bytes and reject when the extra byte arrived. Checking
+# the size first and reading afterwards would be a different program: the
+# producer can write more between the two.
+read_bounded() {
+    local src="$1" dst="$2" size
+    head -c $((MAX_BYTES + 1)) "$src" > "$dst" \
+        || err "write-failed" "could not read the candidate content"
+    size="$(wc -c < "$dst")"
+    if (( size > MAX_BYTES )); then
+        err "too-large" "the candidate exceeds $MAX_BYTES bytes"
+    fi
+}
+
+cmd_write() {
+    local expect_mtime=""
+    while (( $# )); do
+        case "$1" in
+            --expect-mtime)
+                # $# -ge 2, not just "$2 is set": with exactly one positional
+                # parameter left, `shift 2` is a no-op per the bash manual, so
+                # a bare trailing --expect-mtime would leave $1 unchanged and
+                # spin this loop forever instead of terminating.
+                [[ $# -ge 2 ]] || { usage; exit 2; }
+                expect_mtime="$2"
+                shift 2
+                ;;
+            *) usage; exit 2 ;;
+        esac
+    done
+    [[ "$expect_mtime" =~ ^[0-9]+$ ]] || { usage; exit 2; }
+
+    local luac
+    luac="$(resolve_luac)" \
+        || err "no-lua-compiler" \
+               "no working Lua compiler found (tried /usr/bin/luac5.1, /usr/bin/luac, /usr/bin/luac5.4); install lua51"
+
+    check_permissions "$HYPR_DIR" "directory"
+
+    # The file must ALREADY EXIST. This writer does line surgery against bytes
+    # that were read, and a file the panel never read is not something it may
+    # invent -- Omarchy ships an autostart.lua, and a missing one is a
+    # configuration question, not a write.
+    #
+    # -h before -f: a symlink to a regular file passes -f, and its mode as
+    # reported without -L is 777, so it would also trip the permission
+    # refusal. Named separately anyway, so the answer says what is actually
+    # wrong instead of blaming permissions for a link.
+    [[ -e "$TARGET" ]] || err "not-a-file" "$TARGET does not exist"
+    [[ ! -h "$TARGET" ]] || err "is-a-symlink" "$TARGET is a symbolic link; this plugin will not write through one"
+    [[ -f "$TARGET" ]] || err "not-a-file" "$TARGET is not a plain file"
+    [[ -r "$TARGET" ]] || err "not-a-file" "$TARGET cannot be read"
+    check_permissions "$TARGET" "file"
+
+    # THE FRESHNESS CHECK. This is a file the user also maintains by hand: if
+    # its mtime is not the one the panel read, somebody has touched it since,
+    # and every line number the caller carries may now mean a different line.
+    local current
+    current="$(stat -c %Y "$TARGET" 2>/dev/null)" \
+        || err "not-a-file" "$TARGET disappeared before it could be checked"
+    [[ "$current" =~ ^[0-9]+$ ]] || err "not-a-file" "implausible modification time for $TARGET"
+    [[ "$current" == "$expect_mtime" ]] \
+        || err "stale" "$TARGET changed on disk (mtime $current, caller expected $expect_mtime); reopen the panel so it reads the file again"
+
+    # Stage beside the destination so the publish is an atomic rename, and
+    # give the staged file the ORIGINAL's mode before any content reaches it.
+    # Ownership needs nothing: this runs as the owner and never as root.
+    STAGEFILE="$(mktemp "$HYPR_DIR/.autostart.lua.XXXXXX")" \
+        || err "write-failed" "could not stage a replacement in $HYPR_DIR"
+    [[ -n "$STAGEFILE" && -f "$STAGEFILE" ]] \
+        || err "write-failed" "could not stage a replacement in $HYPR_DIR"
+    chmod --reference="$TARGET" "$STAGEFILE" \
+        || err "write-failed" "could not give the staged file the permissions of $TARGET"
+
+    read_bounded /dev/stdin "$STAGEFILE"
+
+    # THE GATE. Nothing is renamed into place unless the candidate compiles.
+    # A file that does not is left staged and then removed by cleanup, and the
+    # ORIGINAL IS NEVER TOUCHED -- the backup below has not even been taken at
+    # this point, and the rename is still ahead.
+    local diagnostic
+    if ! diagnostic="$("$luac" -p "$STAGEFILE" 2>&1)"; then
+        # The staged file's name is scratch, and putting it in front of the
+        # user would name a file that no longer exists by the time he reads
+        # the message. Both spellings have to go: Lua abbreviates a long chunk
+        # name to its TAIL with a leading "..." (measured -- a 90-character
+        # staged path came back as "...e9e/scratchpad/.../.autostart.lua.Rwdrdn"),
+        # so a plain substitution of the full path misses it. Matching the
+        # basename with everything non-blank in front of it catches both the
+        # whole path and the abbreviated tail.
+        local staged_name="${STAGEFILE##*/}"
+        diagnostic="$(printf '%s\n' "$diagnostic" \
+                      | sed -e "s#[^ ]*${staged_name}#autostart.lua#g")"
+        err "does-not-compile" \
+            "the new autostart.lua would not compile, so nothing was written: $diagnostic"
+    fi
+
+    # THE ONLY WAY BACK. ~/.config/hypr is not under version control -- checked
+    # -- so this copy is it. One step back, overwritten each time.
+    #
+    # A failed backup is a refusal, not a warning: writing without one would
+    # leave the user with no way to undo a change to a file that decides
+    # whether his session starts what it should.
+    cp -p -- "$TARGET" "$BACKUP" \
+        || err "write-failed" "could not back $TARGET up to $BACKUP; nothing was written"
+
+    mv -f -- "$STAGEFILE" "$TARGET" || err "write-failed" "could not publish $TARGET"
+    # Published: the staged path no longer exists, so take it out of cleanup's
+    # hands rather than have it try to remove the destination's former name.
+    STAGEFILE=""
+
+    local mtime
+    mtime="$(stat -c %Y "$TARGET" 2>/dev/null)" \
+        || err "write-failed" "$TARGET vanished immediately after it was written"
+    [[ "$mtime" =~ ^[0-9]+$ ]] || err "write-failed" "implausible modification time"
+    ok --argjson m "$mtime" --arg b "$BACKUP" '{ok:true,mtime:$m,backup:$b}'
+}
+
+usage() {
+    echo "usage: ${0##*/} write --expect-mtime <int> < autostart.lua" >&2
+}
+
+case "${1:-}" in
+    write) shift; cmd_write "$@" ;;
+    *)     usage; exit 2 ;;
+esac

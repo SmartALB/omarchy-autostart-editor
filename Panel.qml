@@ -115,6 +115,7 @@ Panel {
         launchProc.running = false
         appsProc.running = false
         hyprProc.running = false
+        autostartWriteProc.running = false
     }
 
     // THE CUTOVER, and this panel's ONE named place for it. The switch is
@@ -341,19 +342,145 @@ Panel {
                     return
                 }
                 root.hyprSections = Model.parseHyprFiles(envelope.files)
-                // The bar tooltip's two numbers, now taken from the source of
-                // truth the panel actually reads: autostart entries are the
-                // programs, window and workspace rules are the placements.
-                // Leaving this unemitted would make the widget report nothing
-                // at all while the panel showed thirty entries.
-                var programs = 0, placements = 0
-                for (var i = 0; i < root.hyprSections.length; i++) {
-                    var section = root.hyprSections[i]
-                    var count = (section.entries || []).length
-                    if (section.name === "autostart.lua") programs += count
-                    else placements += count
+                // The bar tooltip's two numbers, DERIVED IN Model.js. This
+                // loop used to classify the sections here by comparing
+                // section.name, which finding 1 of the task 18 review named
+                // for what it was: a derivation in the one file no suite can
+                // execute, beside two counters in Model.js that already did
+                // the job and were unused.
+                root.counted(Model.hyprProgramCount(root.hyprSections),
+                             Model.hyprPlacementCount(root.hyprSections))
+            }
+        }
+    }
+
+    // --- WRITING autostart.lua --------------------------------------------
+    //
+    // THE ONE FILE THIS PLUGIN WRITES, and it runs at every login. The new
+    // content is NOT built here: Model.autostartApply() is a pure function
+    // (old text plus one operation gives new text) and every surgery case is
+    // a byte-exact assertion in test/harness.qml. This block only carries the
+    // operation to it and the result to bin/omarchy-autostart-hypr-write,
+    // which owns the freshness check, the backup, the luac5.1 gate and the
+    // atomic rename.
+    //
+    // Nothing is started, nothing is reloaded, no `hyprctl` of any kind. The
+    // sentence that says so is Model.autostartWrittenText().
+    property string autostartMessage: ""
+    property string autostartError: ""
+    property bool autostartBusy: false
+
+    // The add field, and the row currently open for a change. -1 is none.
+    property string autostartNewCommand: ""
+    property int autostartEditLine: -1
+    property string autostartEditCommand: ""
+    property bool autostartAddOpen: false
+
+    readonly property var autostartSection:
+        Model.hyprSectionNamed(root.hyprSections, "autostart.lua")
+    readonly property bool autostartWritable:
+        Model.hyprSectionIsWritable(root.autostartSection)
+
+    function autostartWrite(op) {
+        root.autostartMessage = ""
+        root.autostartError = ""
+        if (root.autostartBusy) return
+        var section = root.autostartSection
+        if (!Model.hyprSectionIsWritable(section)) {
+            root.autostartError = Model.hyprSectionNoteText(section)
+                                  || "autostart.lua cannot be edited right now."
+            return
+        }
+        // The pure function decides. A refusal here never reaches the disk and
+        // never produces a candidate -- see the assertions on refusal.text.
+        var result = Model.autostartApply(section.content, op)
+        if (!result.ok) {
+            root.autostartError = Model.autostartWriteReasonText(result.error)
+            return
+        }
+        root.autostartBusy = true
+        // The same route the configuration writer uses: the content goes in on
+        // stdin, shell-quoted once, so no length of it can be mistaken for an
+        // argument. `printf '%s'` and not `echo`, because the content ends in
+        // a newline that is part of the file.
+        autostartWriteProc.command = run.runnerOut(
+            "printf '%s' " + Model.shellQuote(result.text) + " | "
+            + Model.shellQuote(run.binDir + "omarchy-autostart-hypr-write")
+            + " write --expect-mtime " + Number(section.mtime))
+        autostartWriteProc.running = true
+    }
+
+    // The operation object handed to Model.autostartApply.
+    //
+    // ITS COMMAND FIELD IS ASSIGNED BY SUBSCRIPT, not written as a key, and
+    // that is not a style choice: test/qml-structure.sh check 5b requires
+    // every `command:` occurrence in a qml file to be a call on this file's
+    // own Runners instance -- which is what keeps a hand-built argv out of a
+    // Process -- and an object literal with a `command:` key here would have
+    // to loosen it. Model.js set the precedent (see `prefix` in
+    // hyprEntryText): rename or reshape the local, never widen a structural
+    // check to fit it.
+    function autostartOperation(action, line, commandLine) {
+        var op = { action: action }
+        if (line !== undefined) op.line = line
+        if (commandLine !== undefined) op["command"] = commandLine
+        return op
+    }
+
+    function autostartAdd() {
+        root.autostartWrite(
+            root.autostartOperation("add", undefined, root.autostartNewCommand))
+    }
+
+    function autostartRemove(line) {
+        root.autostartWrite(root.autostartOperation("remove", line, undefined))
+    }
+
+    function autostartChange() {
+        root.autostartWrite(root.autostartOperation("change", root.autostartEditLine,
+                                                    root.autostartEditCommand))
+    }
+
+    // Open the inline change editor on one row, closing whichever was open.
+    // The command it starts from is the one the reader took OUT of the line,
+    // not the raw line: what the user edits is what he sees.
+    function autostartEdit(entry) {
+        root.autostartMessage = ""
+        root.autostartError = ""
+        if (root.autostartEditLine === entry.line) {
+            root.autostartEditLine = -1
+            root.autostartEditCommand = ""
+            return
+        }
+        root.autostartEditLine = entry.line
+        root.autostartEditCommand = String(entry.command || "")
+    }
+
+    Process {
+        id: autostartWriteProc
+        stdout: StdioCollector {
+            waitForEnd: true
+            onStreamFinished: {
+                root.autostartBusy = false
+                var envelope
+                try { envelope = JSON.parse(String(text || "{}")) }
+                catch (e) {
+                    root.autostartError = "the autostart writer gave an unreadable answer"
+                    return
                 }
-                root.counted(programs, placements)
+                if (!envelope.ok) {
+                    root.autostartError = Model.envelopeText(envelope.error, envelope.detail)
+                    return
+                }
+                root.autostartMessage = Model.autostartWrittenText()
+                root.autostartNewCommand = ""
+                root.autostartAddOpen = false
+                root.autostartEditLine = -1
+                root.autostartEditCommand = ""
+                // Read the file again rather than patching the list in place:
+                // the mtime moved, and every later operation's freshness check
+                // is against the one on disk now.
+                root.readHypr()
             }
         }
     }
@@ -1124,19 +1251,37 @@ Panel {
                                 width: body.width
                             }
 
+                            // The note under the header. THE SENTENCES ARE IN
+                            // Model.hyprSectionNoteText -- finding 2 of the task 18
+                            // review found all three of them written inline right
+                            // here, sixty lines under the comment forbidding it, and
+                            // therefore unreachable by the harness. The empty string
+                            // is what decides whether the row appears at all.
                             Text {
+                                id: hyprSectionNote
                                 textFormat: Text.PlainText
                                 width: body.width
-                                visible: !hyprSection.section.present
-                                         || hyprSection.section.truncated
-                                         || (hyprSection.section.entries || []).length === 0
-                                text: !hyprSection.section.present
-                                      ? "Not found: " + String(hyprSection.section.path)
-                                      : hyprSection.section.truncated
-                                        ? "This file is larger than this panel reads; "
-                                          + "what is shown is the beginning of it."
-                                        : "No line in this file is one this panel recognises."
+                                text: Model.hyprSectionNoteText(hyprSection.section)
+                                visible: hyprSectionNote.text !== ""
                                 color: hyprSection.section.truncated ? root.warn : root.fg
+                                opacity: 0.8
+                                font.family: root.fontFam
+                                font.pixelSize: Style.font.caption
+                                wrapMode: Text.WordWrap
+                            }
+
+                            // How many of this section's entries can be edited, and
+                            // -- when any cannot -- that they are left alone. Only
+                            // autostart.lua has anything to say here; the other two
+                            // sections get "" and the row does not appear.
+                            Text {
+                                id: hyprSectionEditableNote
+                                textFormat: Text.PlainText
+                                width: body.width
+                                text: Model.hyprSectionIsWritable(hyprSection.section)
+                                      ? Model.hyprAutostartNoteText(root.hyprSections) : ""
+                                visible: hyprSectionEditableNote.text !== ""
+                                color: root.fg
                                 opacity: 0.8
                                 font.family: root.fontFam
                                 font.pixelSize: Style.font.caption
@@ -1155,15 +1300,101 @@ Panel {
                                         (hyprSection.section.entries || [])[index]
                                         || ({ line: 0, raw: "", editable: false, reason: "" })
 
-                                    Text {
-                                        textFormat: Text.PlainText
+                                    // The entry line, and -- only for an editable
+                                    // entry of the ONE writable section -- its two
+                                    // controls. A non-editable entry gets no button
+                                    // at all: the plugin does not offer an operation
+                                    // it refuses to perform, and the refusal is said
+                                    // in words below rather than discovered by a
+                                    // click that does nothing.
+                                    Row {
                                         width: body.width
-                                        text: Model.hyprEntryText(hyprEntryRow.entry)
-                                        color: root.fg
-                                        opacity: hyprEntryRow.entry.editable ? 1.0 : 0.75
-                                        font.family: root.fontFam
-                                        font.pixelSize: Style.font.body
-                                        wrapMode: Text.WrapAnywhere
+                                        spacing: Style.spacing.controlGap
+
+                                        readonly property bool controlled:
+                                            root.autostartWritable
+                                            && hyprEntryRow.entry.editable === true
+                                            && hyprEntryRow.entry.kind === "autostart"
+
+                                        Text {
+                                            textFormat: Text.PlainText
+                                            width: parent.controlled
+                                                   ? Math.max(Style.space(60),
+                                                              body.width
+                                                              - changeEntryButton.implicitWidth
+                                                              - removeEntryButton.implicitWidth
+                                                              - 2 * parent.spacing)
+                                                   : body.width
+                                            text: Model.hyprEntryText(hyprEntryRow.entry)
+                                            color: root.fg
+                                            opacity: hyprEntryRow.entry.editable ? 1.0 : 0.75
+                                            font.family: root.fontFam
+                                            font.pixelSize: Style.font.body
+                                            wrapMode: Text.WrapAnywhere
+                                        }
+
+                                        Button {
+                                            id: changeEntryButton
+                                            visible: parent.controlled
+                                            text: root.autostartEditLine === hyprEntryRow.entry.line
+                                                  ? "Cancel" : "Change"
+                                            foreground: root.fg
+                                            fontFamily: root.fontFam
+                                            bordered: true
+                                            enabled: !root.autostartBusy
+                                            anchors.verticalCenter: parent.verticalCenter
+                                            onClicked: root.autostartEdit(hyprEntryRow.entry)
+                                        }
+
+                                        Button {
+                                            id: removeEntryButton
+                                            visible: parent.controlled
+                                            text: "Remove"
+                                            foreground: root.fg
+                                            fontFamily: root.fontFam
+                                            bordered: true
+                                            enabled: !root.autostartBusy
+                                            anchors.verticalCenter: parent.verticalCenter
+                                            onClicked: root.autostartRemove(hyprEntryRow.entry.line)
+                                        }
+                                    }
+
+                                    // The inline change editor, at the row. One at a
+                                    // time, and the field starts from the command the
+                                    // reader took out of the line.
+                                    Row {
+                                        width: body.width
+                                        spacing: Style.spacing.controlGap
+                                        visible: root.autostartWritable
+                                                 && root.autostartEditLine === hyprEntryRow.entry.line
+
+                                        TextField {
+                                            width: Math.max(Style.space(80),
+                                                            body.width
+                                                            - saveEntryButton.implicitWidth
+                                                            - parent.spacing)
+                                            placeholderText: "Command"
+                                            text: root.autostartEditCommand
+                                            foreground: root.fg
+                                            // onTextEdited, not onTextChanged: `text` is
+                                            // bound to the property the handler writes
+                                            // back into, and onTextChanged would close
+                                            // that loop on itself. The same measurement
+                                            // as the program rows below.
+                                            onTextEdited: root.autostartEditCommand = text
+                                            onActiveFocusChanged: root.noteEditorFocus(activeFocus)
+                                        }
+
+                                        Button {
+                                            id: saveEntryButton
+                                            text: "Save"
+                                            foreground: root.fg
+                                            fontFamily: root.fontFam
+                                            bordered: true
+                                            enabled: !root.autostartBusy
+                                            anchors.verticalCenter: parent.verticalCenter
+                                            onClicked: root.autostartChange()
+                                        }
                                     }
 
                                     // The mark, and the reason in English. A code is
@@ -1181,6 +1412,157 @@ Panel {
                                         font.pixelSize: Style.font.caption
                                         wrapMode: Text.WordWrap
                                     }
+                                }
+                            }
+
+                            // --- ADD, and it is the whole write surface for this
+                            // --- section besides the two buttons on each row -----
+                            //
+                            // Only for the ONE writable section, only while the read
+                            // that produced it is current. A new line goes to the END
+                            // of the file in the style the file already uses; nothing
+                            // is sorted into one of the user's German comment
+                            // sections, because guessing which one a program belongs
+                            // under is exactly the surprise this design avoids.
+                            Column {
+                                id: autostartAdd
+                                width: body.width
+                                spacing: Style.spacing.xs
+                                visible: Model.hyprSectionIsWritable(hyprSection.section)
+
+                                Row {
+                                    width: autostartAdd.width
+                                    spacing: Style.spacing.controlGap
+
+                                    TextField {
+                                        width: Math.max(Style.space(80),
+                                                        autostartAdd.width
+                                                        - autostartAddButton.implicitWidth
+                                                        - autostartPickButton.implicitWidth
+                                                        - 2 * parent.spacing)
+                                        placeholderText: "Command to add"
+                                        text: root.autostartNewCommand
+                                        foreground: root.fg
+                                        onTextEdited: root.autostartNewCommand = text
+                                        onActiveFocusChanged: root.noteEditorFocus(activeFocus)
+                                    }
+
+                                    Button {
+                                        id: autostartPickButton
+                                        text: root.autostartAddOpen ? "Close list" : "Applications"
+                                        foreground: root.fg
+                                        fontFamily: root.fontFam
+                                        bordered: true
+                                        anchors.verticalCenter: parent.verticalCenter
+                                        onClicked: {
+                                            root.autostartAddOpen = !root.autostartAddOpen
+                                            if (root.autostartAddOpen) root.startAppsRead()
+                                        }
+                                    }
+
+                                    Button {
+                                        id: autostartAddButton
+                                        text: "Add"
+                                        foreground: root.fg
+                                        fontFamily: root.fontFam
+                                        bordered: true
+                                        enabled: !root.autostartBusy
+                                        anchors.verticalCenter: parent.verticalCenter
+                                        onClicked: root.autostartAdd()
+                                    }
+                                }
+
+                                // The installed applications, the same list and the
+                                // same Process the old half's picker used. Picking one
+                                // FILLS THE FIELD rather than writing: the command it
+                                // derives from Exec= is a guess worth showing to the
+                                // user before it lands in a file that runs at login.
+                                Text {
+                                    textFormat: Text.PlainText
+                                    width: autostartAdd.width
+                                    visible: root.autostartAddOpen
+                                    text: root.appsPending
+                                          ? "Reading the installed applications..."
+                                          : "Pick one to fill the field, then press Add"
+                                    color: root.fg
+                                    opacity: 0.7
+                                    font.family: root.fontFam
+                                    font.pixelSize: Style.font.caption
+                                    wrapMode: Text.WordWrap
+                                }
+
+                                Text {
+                                    textFormat: Text.PlainText
+                                    width: autostartAdd.width
+                                    visible: root.autostartAddOpen && !root.appsPending
+                                             && root.apps.length === 0
+                                    text: "No installed applications were found."
+                                    color: root.fg
+                                    opacity: 0.7
+                                    font.family: root.fontFam
+                                    font.pixelSize: Style.font.caption
+                                    wrapMode: Text.WordWrap
+                                }
+
+                                Repeater {
+                                    model: root.autostartAddOpen ? root.apps : []
+
+                                    delegate: Row {
+                                        id: autostartAppEntry
+                                        required property var modelData
+                                        width: autostartAdd.width
+                                        spacing: Style.spacing.controlGap
+
+                                        Button {
+                                            text: String(autostartAppEntry.modelData.name
+                                                         || "(no name)")
+                                            foreground: root.fg
+                                            fontFamily: root.fontFam
+                                            leftAlign: true
+                                            width: Math.max(Style.space(80),
+                                                            autostartAdd.width - Style.space(180))
+                                            anchors.verticalCenter: parent.verticalCenter
+                                            onClicked: {
+                                                root.autostartNewCommand =
+                                                    Model.commandFromApp(autostartAppEntry.modelData)
+                                                root.autostartAddOpen = false
+                                            }
+                                        }
+
+                                        Text {
+                                            textFormat: Text.PlainText
+                                            text: Model.commandFromApp(autostartAppEntry.modelData)
+                                            color: root.fg
+                                            opacity: 0.6
+                                            font.family: root.fontFam
+                                            font.pixelSize: Style.font.caption
+                                            elide: Text.ElideRight
+                                            width: Style.space(170)
+                                            anchors.verticalCenter: parent.verticalCenter
+                                        }
+                                    }
+                                }
+
+                                Text {
+                                    textFormat: Text.PlainText
+                                    width: autostartAdd.width
+                                    visible: root.autostartError !== ""
+                                    text: root.autostartError
+                                    color: root.warn
+                                    font.family: root.fontFam
+                                    font.pixelSize: Style.font.caption
+                                    wrapMode: Text.WordWrap
+                                }
+
+                                Text {
+                                    textFormat: Text.PlainText
+                                    width: autostartAdd.width
+                                    visible: root.autostartMessage !== ""
+                                    text: root.autostartMessage
+                                    color: root.fg
+                                    font.family: root.fontFam
+                                    font.pixelSize: Style.font.caption
+                                    wrapMode: Text.WordWrap
                                 }
                             }
                         }

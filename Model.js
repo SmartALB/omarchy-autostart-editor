@@ -470,6 +470,19 @@ function stripFieldCodes(exec) {
     return out.replace(/\s+/g, " ").replace(/^ | $/g, "");
 }
 
+// The command line an installed application declares, cleaned of the desktop
+// entry field codes. ONE place, because two callers now need exactly the same
+// derivation: the old half's programFromApp and the autostart panel's
+// application picker, which fills the add field with it.
+//
+// It is a GUESS -- Exec= is a command line for a file manager to run, not
+// necessarily the one a user wants at login -- which is why the picker fills
+// the field with it instead of writing it, and shows it beside the name.
+function commandFromApp(app) {
+    var source = app || {};
+    return stripFieldCodes(String(source.exec === undefined ? "" : source.exec));
+}
+
 // --- adding entries -------------------------------------------------------
 //
 // The three ways a program gets into the list -- picked from the installed
@@ -572,7 +585,7 @@ function programFromApp(app, existing) {
         id: newId(existing),
         name: String(source.name === undefined ? "" : source.name).substring(0, MAX_NAME),
         enabled: false,
-        command: stripFieldCodes(String(source.exec === undefined ? "" : source.exec)),
+        command: commandFromApp(source),
         "class": pattern,
         placement: { kind: "none" }
     };
@@ -1147,6 +1160,88 @@ function hyprEntry(file, lineNumber, raw, name, kind) {
              editable: false, reason: null };
 }
 
+// --- Lua long brackets, which is how a line can be code and yet not run ---
+//
+// A LINE-BY-LINE parser cannot see a comment that spans lines, and this one
+// could not:
+//
+//     --[[
+//     o.launch_on_start("nimbus")
+//     ]]
+//
+// The middle line's text begins with a call this reader knows, so it came
+// back as an editable entry -- a program the user had deliberately switched
+// off, offered as one that is running. On its own that was a display defect.
+// With the writer in place it is worse: changing that entry would rewrite a
+// line inside a comment, and removing it would delete a line the user was
+// keeping. Found in review of task 18 (finding 3), before any surgery
+// shipped.
+//
+// Neither the user's three files nor Omarchy's entire default tree contains a
+// single long bracket -- the reviewer grepped both -- so this is prevention,
+// and its fixtures are constructed rather than found.
+//
+// The level of a long bracket at `at`, or -1 for none: `[[` is level 0,
+// `[=[` is 1, `[==[` is 2, and the same shape with `]` closes it. Lua
+// requires the closing level to MATCH, which is the whole point of the
+// equals signs.
+function hyprBracketLevelAt(line, at, bracket) {
+    if (line.charAt(at) !== bracket) return -1;
+    var i = at + 1, equals = 0;
+    while (line.charAt(i) === "=") { equals += 1; i += 1; }
+    if (line.charAt(i) !== bracket) return -1;
+    return equals;
+}
+
+// For each line, whether it BEGINS inside a long bracket -- a block comment
+// or a long string. Such a line is not code, so it is not an entry at all,
+// exactly like a line starting with `--`.
+//
+// A character walk over the whole text, not a regular expression: this has
+// to carry state across lines, and it has to skip quoted strings (a `"--[["`
+// inside a string opens nothing) and stop at a line comment (a `--[[` after
+// a `--` is comment text). Quoted strings are skipped with luaStringAt, the
+// same scanner the value reader uses.
+//
+// FAIL-CLOSED where it cannot tell: a quoted string luaStringAt refuses is
+// walked one character further rather than skipped, so an unterminated
+// literal containing a bracket opener puts the reader INSIDE a bracket and
+// the following lines become non-entries. An entry that disappears is
+// visible in the panel and safe; an entry wrongly offered as editable is the
+// defect this exists to close.
+function hyprLineStartsInBracket(lines) {
+    var flags = [];
+    var level = -1;   // -1 = code; 0 and up = inside a bracket of that level
+    for (var n = 0; n < lines.length; n++) {
+        var line = String(lines[n]);
+        flags.push(level >= 0);
+        var i = 0;
+        while (i < line.length) {
+            if (level >= 0) {
+                var closing = hyprBracketLevelAt(line, i, "]");
+                if (closing === level) { level = -1; i += closing + 2; continue; }
+                i += 1;
+                continue;
+            }
+            var c = line.charAt(i);
+            if (c === "\"" || c === "'") {
+                var str = luaStringAt(line, i);
+                i = str ? str.next : i + 1;
+                continue;
+            }
+            if (c === "-" && line.charAt(i + 1) === "-") {
+                var comment = hyprBracketLevelAt(line, i + 2, "[");
+                if (comment >= 0) { level = comment; i += 4 + comment; continue; }
+                break;   // a line comment: everything after it is comment text
+            }
+            var long_ = hyprBracketLevelAt(line, i, "[");
+            if (long_ >= 0) { level = long_; i += 2 + long_; continue; }
+            i += 1;
+        }
+    }
+    return flags;
+}
+
 // Line splitting for all three parsers. `raw` is the element of THIS array
 // at index line-1, which is the round-trip guarantee the writer rests on --
 // comment lines and blank lines are counted like every other line, because a
@@ -1175,9 +1270,11 @@ var AUTOSTART_CALLS = ["o.launch_on_start", "o.exec_on_start"];
 function parseAutostartLua(text, fileName) {
     var name = fileName || "autostart.lua";
     var lines = hyprLines(text);
+    var inBracket = hyprLineStartsInBracket(lines);
     var entries = [];
     var limit = Math.min(lines.length, MAX_HYPR_LINES);
     for (var n = 0; n < limit; n++) {
+        if (inBracket[n]) continue;   // inside a block comment or a long string
         var raw = lines[n];
         var call = hyprCallOnLine(raw, AUTOSTART_CALLS);
         if (!call) continue;
@@ -1223,9 +1320,11 @@ function parseAutostartLua(text, fileName) {
 function parseWindowRulesLua(text, fileName) {
     var name = fileName || "windowrules.lua";
     var lines = hyprLines(text);
+    var inBracket = hyprLineStartsInBracket(lines);
     var entries = [];
     var limit = Math.min(lines.length, MAX_HYPR_LINES);
     for (var n = 0; n < limit; n++) {
+        if (inBracket[n]) continue;   // inside a block comment or a long string
         var raw = lines[n];
         var call = hyprCallOnLine(raw, ["o.window"]);
         if (!call) continue;
@@ -1279,9 +1378,11 @@ function parseWindowRulesLua(text, fileName) {
 function parseWorkspacesLua(text, fileName) {
     var name = fileName || "workspaces.lua";
     var lines = hyprLines(text);
+    var inBracket = hyprLineStartsInBracket(lines);
     var entries = [];
     var limit = Math.min(lines.length, MAX_HYPR_LINES);
     for (var n = 0; n < limit; n++) {
+        if (inBracket[n]) continue;   // inside a block comment or a long string
         var raw = lines[n];
         var call = hyprCallOnLine(raw, ["hl.workspace_rule"]);
         if (!call) continue;
@@ -1346,6 +1447,14 @@ function parseHyprFiles(files) {
             truncated: f.truncated === true,
             mtime: Number(f.mtime || 0),
             lineCount: present ? hyprLines(f.content).length : 0,
+            // THE BYTES, carried through verbatim. autostartApply() needs the
+            // text it is doing surgery on, and the only text it may use is the
+            // one the entries' `line` and `raw` were derived from -- taking
+            // the file's content from a second read would be taking it from a
+            // possibly different file. An absent file has no content, and ""
+            // is not the same claim as "the file is empty": `present` is what
+            // says which.
+            content: present ? String(f.content || "") : "",
             entries: present ? parse(String(f.content || ""), fileName) : []
         });
     }
@@ -1373,8 +1482,96 @@ function hyprEditableCount(sections) {
     return total;
 }
 
+// The section by name, or null. The panel asks for "autostart.lua" by the
+// name in HYPR_FILE_NAMES rather than by an index, because the order of the
+// sections is parseHyprFiles' business and not the panel's.
+function hyprSectionNamed(sections, name) {
+    var list = sections || [];
+    for (var i = 0; i < list.length; i++) {
+        if (list[i] && String(list[i].name) === String(name)) return list[i];
+    }
+    return null;
+}
+
+// Which section this plugin may WRITE. Exactly one, named once: autostart.lua.
+// windowrules.lua and workspaces.lua are read and shown and nothing else, and
+// a section that is absent or truncated is not writable either -- line surgery
+// against a partial read would target line numbers the file does not have.
+//
+// A predicate rather than a `name === "autostart.lua"` comparison in the
+// panel: finding 1 of the task 18 review was exactly that comparison, made
+// where no suite can execute it.
+function hyprSectionIsWritable(section) {
+    var s = section || {};
+    if (String(s.name) !== "autostart.lua") return false;
+    if (s.present !== true) return false;
+    if (s.truncated === true) return false;
+    return true;
+}
+
+// The bar widget's two numbers. Finding 1 of the task 18 review: the panel
+// classified the sections itself and summed them in QML, where no suite can
+// execute it, while these two counters already existed here unused.
+//
+// Programs are the autostart entries; placements are everything else, which
+// is what hyprEntryCount already counts across all three sections. Derived
+// by subtraction on purpose: a fourth file added to HYPR_FILE_NAMES lands in
+// "placements" automatically instead of silently counting as nothing.
+function hyprProgramCount(sections) {
+    var section = hyprSectionNamed(sections, "autostart.lua");
+    return section ? (section.entries || []).length : 0;
+}
+
+function hyprPlacementCount(sections) {
+    return hyprEntryCount(sections) - hyprProgramCount(sections);
+}
+
+// The one note under a section header, or "" when the section has nothing to
+// say. Finding 2 of the task 18 review: these three sentences were written
+// inline in Panel.qml, sixty lines under a comment forbidding exactly that,
+// and so were the only sentences in that section the harness could not
+// reach.
+//
+// The order is the order of severity: a file that is not there cannot be
+// truncated, and a truncated file's entry list is not the whole file's.
+function hyprSectionNoteText(section) {
+    var s = section || {};
+    if (s.present !== true) return "Not found: " + String(s.path === undefined ? "" : s.path);
+    if (s.truncated === true) {
+        return "This file is larger than this panel reads; what is shown is "
+             + "the beginning of it.";
+    }
+    if ((s.entries || []).length === 0) {
+        return "No line in this file is one this panel recognises.";
+    }
+    return "";
+}
+
+// What the autostart section says about itself: how many of its entries this
+// panel can edit, and -- when any cannot -- that they are left alone. The
+// second half is the honest naming of the one real limitation of this task,
+// and hyprEditableCount is what measures it.
+function hyprAutostartNoteText(sections) {
+    var section = hyprSectionNamed(sections, "autostart.lua");
+    if (!section || section.present !== true) return "";
+    var entries = section.entries || [];
+    if (entries.length === 0) return "";
+    var editable = hyprEditableCount([section]);
+    var text = editable + " of " + entries.length + " entries can be changed or "
+             + "removed here.";
+    if (editable < entries.length) {
+        text += " The rest are shown as they stand and left alone -- edit "
+              + "autostart.lua by hand for those.";
+    }
+    return text;
+}
+
 // The one line in the head of the panel. It says two things and no more:
-// that editing is not possible yet, and which files were actually read.
+// which half of this read can be edited, and which files were actually read.
+//
+// autostart.lua is the ONE file this plugin writes -- see autostartApply
+// below. windowrules.lua and workspaces.lua are read and shown and nothing
+// else, and saying so here is what keeps the panel from implying otherwise.
 function hyprHeaderText(sections) {
     var list = sections || [];
     var read = [], absent = [];
@@ -1385,7 +1582,8 @@ function hyprHeaderText(sections) {
             absent.push(list[i].name);
         }
     }
-    var text = "Read only -- editing your Hyprland files is not possible yet. ";
+    var text = "autostart.lua can be edited here; windowrules.lua and "
+             + "workspaces.lua are read only. ";
     text += (read.length === 0) ? "No file was read."
                                 : "Read: " + read.join(", ") + ".";
     if (absent.length > 0) text += " Not found: " + absent.join(", ") + ".";
@@ -1422,4 +1620,291 @@ function hyprEntryText(entry) {
         return prefix + "workspace " + String(e.workspace) + "  \u2192  " + String(e.monitor);
     }
     return prefix + String(e.raw === undefined ? "" : e.raw);
+}
+
+// ==========================================================================
+// WRITING autostart.lua
+// ==========================================================================
+//
+// The write half of the reader above, and it lives here for one reason: the
+// new file content is produced by a PURE FUNCTION -- old text plus one
+// operation gives new text, no file I/O, no QML -- so every surgery case is
+// a unit test with a byte-exact expected result in the one file this project
+// can actually execute. bin/omarchy-autostart-hypr-write does the atomic
+// write, the staleness check and the luac5.1 gate; it never reasons about
+// content.
+//
+// THE FILE RUNS AT EVERY LOGIN. A malformed autostart.lua means the user's
+// programs do not start and Hyprland reports a Lua error at the next login.
+// That is why there are three operations and no more, why each of them
+// touches exactly one line, and why anything that cannot be written back
+// readably is refused rather than encoded.
+
+// Every character a command may contain, expressed as the ones it may not.
+//
+// The `eval` route encodes its payload with luaBytes() because nothing there
+// is ever read by a person. THIS FILE IS READ BY A PERSON: his autostart.lua
+// is hand-maintained and carries his own German section comments, and
+// `o.launch_on_start(string.char(98,114,97,118,101))` in it would be
+// unusable even though it is safe. So the writer emits a real Lua string
+// literal -- and pays for that legibility with an allowlist, because a
+// literal cannot express a line break at all.
+//
+// Refused, and each of them for a reason that is about the FILE, not about
+// taste:
+//   < 0x20        a line break, a carriage return, a tab, a NUL -- a literal
+//                 cannot carry them, and a line break would end the
+//                 statement mid-string
+//   0x7F          DEL
+//   0x80 - 0x9F   the C1 controls, invisible in an editor
+//   U+2028/2029   Unicode line separators, invisible and line-break-shaped
+// Everything else passes, including non-ASCII text: a path with an umlaut in
+// it is written as its own bytes and read back as the same characters.
+function autostartCharRefused(code) {
+    if (code < 0x20) return true;
+    if (code === 0x7F) return true;
+    if (code >= 0x80 && code <= 0x9F) return true;
+    if (code === 0x2028 || code === 0x2029) return true;
+    return false;
+}
+
+// A real Lua string literal: `\\` and `\"`, and nothing else.
+//
+// It THROWS on a character the allowlist refuses rather than returning
+// something, and that is deliberate -- the same shape luaBytes() has. A
+// caller that forgot to ask autostartCommandRefusal() first cannot smuggle a
+// line break into the file by not checking; it gets an exception instead.
+//
+// The two escapes are spelled through BACKSLASH and QUOTE rather than as
+// backslash-heavy literals. Two reasons, and neither is taste: a reader can
+// see which branch does what without counting backslashes, and a mutation
+// probe can address exactly ONE of the two -- with both branches written as
+// literals the two lines are indistinguishable to any pattern short of a
+// line number, and a probe that cannot name one guard cannot prove it holds.
+var BACKSLASH = "\\";
+var QUOTE = "\"";
+
+function luaQuote(s) {
+    var text = String(s);
+    var out = "";
+    for (var i = 0; i < text.length; i++) {
+        var code = text.charCodeAt(i);
+        if (autostartCharRefused(code)) {
+            throw new Error("luaQuote: character not writable as a Lua string literal "
+                            + "at index " + i + ": code " + code);
+        }
+        var c = text.charAt(i);
+        if (c === BACKSLASH) { out += BACKSLASH + BACKSLASH; continue; }
+        if (c === QUOTE) { out += BACKSLASH + QUOTE; continue; }
+        out += c;
+    }
+    return QUOTE + out + QUOTE;
+}
+
+// The one line shape this writer emits, in the style of his own file:
+//   o.launch_on_start("<command>")
+// No indentation, no trailing semicolon, no comment -- exactly what
+// parseAutostartLua reads back as an editable entry with launcher
+// "uwsm-app". The round-trip assertion in the harness is what binds the two.
+function autostartLine(command) {
+    return "o.launch_on_start(" + luaQuote(command) + ")";
+}
+
+// Why an operation was refused. Codes, never shown raw -- see
+// autostartWriteReasonText, and the same two-sided guarantee hyprReasons()
+// has: this list is what autostartApply() can return, and the harness proves
+// every one of them has wording.
+var AUTOSTART_WRITE_REASONS = [
+    "empty-command",         // nothing, or only spaces and tabs
+    "command-too-long",      // past MAX_COMMAND
+    "unwritable-character",  // see autostartCharRefused
+    "no-entry-on-line",      // the line named holds no autostart entry
+    "entry-not-editable",    // it holds one this reader cannot represent
+    "file-too-long",         // more lines than the reader looks at
+    "unknown-operation"      // not add, change or remove
+];
+
+function autostartWriteReasons() { return AUTOSTART_WRITE_REASONS.slice(); }
+
+function autostartWriteReasonText(code) {
+    if (code === undefined || code === null || String(code) === "") {
+        return "This change was refused, and no reason was recorded for it.";
+    }
+    switch (code) {
+    case "empty-command":
+        return "A command line is needed -- this one is empty.";
+    case "command-too-long":
+        return "This command is longer than " + MAX_COMMAND + " characters, "
+             + "which is more than this panel writes into your file.";
+    case "unwritable-character":
+        return "This command contains a line break or a control character, "
+             + "which cannot be written into a Lua string. Shorten or retype "
+             + "it, or edit the file by hand.";
+    case "no-entry-on-line":
+        return "There is no autostart entry on that line any more. Reopen the "
+             + "panel so it reads your file again.";
+    case "entry-not-editable":
+        return "This line is one this panel cannot represent, so it is neither "
+             + "changed nor removed. Edit autostart.lua by hand for it.";
+    case "file-too-long":
+        return "This file has more lines than this panel reads, so it will not "
+             + "edit it.";
+    case "unknown-operation":
+        return "This panel does not know that operation.";
+    }
+    return "This change was refused: " + String(code) + ".";
+}
+
+// What the panel says after a successful write, and it is the whole of what
+// this task promises: the file changed, the desktop did not. No
+// `hyprctl reload`, no `hyprctl eval`, nothing started, nothing killed.
+function autostartWrittenText() {
+    return "Written. This takes effect at your next login -- this panel "
+         + "starts nothing and reloads nothing.";
+}
+
+// The content lines of a file. `hyprLines` splits on "\n", so a file that
+// ends with a newline -- his does, and it is the convention this writer
+// keeps -- yields a trailing empty element that is NOT a line. Dropping
+// exactly one of them is what makes "the file gained one line" mean what it
+// says, here and in oneLineDifference().
+function autostartContentLines(text) {
+    var lines = hyprLines(text);
+    if (lines.length > 0 && lines[lines.length - 1] === "") lines.pop();
+    return lines;
+}
+
+// Content lines back to file text, always terminated by exactly one "\n" --
+// his file's convention, and no blank line at the end. An empty list gives
+// an empty file rather than a lone newline.
+function autostartJoinLines(lines) {
+    if (lines.length === 0) return "";
+    return lines.join("\n") + "\n";
+}
+
+// Is a command writable at all? null when it is, a reason code when it is
+// not. Nothing is trimmed or repaired: a command this refuses is refused,
+// with a sentence that says why, rather than quietly turned into a different
+// command than the one the user typed.
+function autostartCommandRefusal(command) {
+    var text = String(command === undefined || command === null ? "" : command);
+    if (/^[ \t]*$/.test(text)) return "empty-command";
+    if (text.length > MAX_COMMAND) return "command-too-long";
+    for (var i = 0; i < text.length; i++) {
+        if (autostartCharRefused(text.charCodeAt(i))) return "unwritable-character";
+    }
+    return null;
+}
+
+// THE PURE FUNCTION. Old text plus one operation gives new text.
+//
+//   { action: "add",    command: "<command line>" }
+//   { action: "change", line: <1-based>, command: "<command line>" }
+//   { action: "remove", line: <1-based> }
+//
+// Returns { ok: true, text: <new file text> } or { ok: false, error: <code> }.
+//
+// Exactly one line changes. Add appends one as the LAST line -- no section
+// detection, nothing sorted into a "matching" comment block, because
+// guessing which of his German section comments a new program belongs under
+// is exactly the kind of surprise this design exists to avoid. Change
+// replaces the line named and no other. Remove deletes the line named and no
+// other.
+//
+// Change and remove re-read the text they were handed and refuse anything
+// but an editable autostart entry on that line. That refusal is the one the
+// brief names: `o.exec_on_start(o.launch_webapp_sole("Chat", ...))` is
+// SHOWN, and neither changed nor removed, because the plugin does not touch
+// what it cannot represent.
+function autostartApply(text, op) {
+    var source = String(text === undefined || text === null ? "" : text);
+    var operation = op || {};
+    var action = String(operation.action === undefined ? "" : operation.action);
+    var lines = autostartContentLines(source);
+    if (lines.length > MAX_HYPR_LINES) return { ok: false, error: "file-too-long" };
+
+    if (action === "add") {
+        var refusal = autostartCommandRefusal(operation.command);
+        if (refusal) return { ok: false, error: refusal };
+        var appended = lines.slice();
+        appended.push(autostartLine(String(operation.command)));
+        return { ok: true, text: autostartJoinLines(appended) };
+    }
+
+    if (action !== "change" && action !== "remove") {
+        return { ok: false, error: "unknown-operation" };
+    }
+
+    // The line has to be an editable autostart entry of THIS text. Parsing
+    // it again here rather than trusting a `line` the caller carried over
+    // from an older read is the point: the panel's entry list can be stale,
+    // and a stale line number is how a rewrite lands on the wrong line.
+    var wanted = Number(operation.line);
+    if (!isFinite(wanted) || Math.floor(wanted) !== wanted
+        || wanted < 1 || wanted > lines.length) {
+        return { ok: false, error: "no-entry-on-line" };
+    }
+    var entries = parseAutostartLua(source, "autostart.lua");
+    var found = null;
+    for (var i = 0; i < entries.length; i++) {
+        if (entries[i].line === wanted) { found = entries[i]; break; }
+    }
+    if (found === null) return { ok: false, error: "no-entry-on-line" };
+    if (found.editable !== true) return { ok: false, error: "entry-not-editable" };
+    // The reader's own round-trip guarantee, asserted rather than assumed:
+    // `raw` is the element of the split array at index line-1. If it ever
+    // were not, the surgery below would rewrite a line the panel never
+    // showed.
+    if (found.raw !== lines[wanted - 1]) return { ok: false, error: "no-entry-on-line" };
+
+    var out = lines.slice();
+    if (action === "remove") {
+        out.splice(wanted - 1, 1);
+        return { ok: true, text: autostartJoinLines(out) };
+    }
+    var changeRefusal = autostartCommandRefusal(operation.command);
+    if (changeRefusal) return { ok: false, error: changeRefusal };
+    out[wanted - 1] = autostartLine(String(operation.command));
+    return { ok: true, text: autostartJoinLines(out) };
+}
+
+// THE ONE-LINE ASSERTION, as a function rather than as a habit.
+//
+// "Looks right" is not the property; "old and new differ in exactly one
+// line" is. Returns one of:
+//   "same"           byte-identical content lines
+//   "changed:<n>"    line n replaced, nothing else moved
+//   "added:<n>"      one line inserted at n, everything else intact
+//   "removed:<n>"    one line deleted at n, everything else intact
+//   "multiple"       anything else, which is a defect in the writer
+//
+// Linear, not a diff: the three shapes above are the only ones autostartApply
+// can produce, so each is checked for directly. A longest-common-subsequence
+// pass would answer the same question at O(n*m) and would also happily
+// report "one line" for two edits that happen to cancel out in its
+// bookkeeping.
+function oneLineDifference(oldText, newText) {
+    var a = autostartContentLines(String(oldText === undefined || oldText === null ? "" : oldText));
+    var b = autostartContentLines(String(newText === undefined || newText === null ? "" : newText));
+    var i;
+    if (a.length === b.length) {
+        var at = -1;
+        for (i = 0; i < a.length; i++) {
+            if (a[i] === b[i]) continue;
+            if (at !== -1) return "multiple";
+            at = i;
+        }
+        return (at === -1) ? "same" : ("changed:" + (at + 1));
+    }
+    if (b.length === a.length + 1) {
+        for (i = 0; i < a.length; i++) if (a[i] !== b[i]) break;
+        for (var j = i; j < a.length; j++) if (a[j] !== b[j + 1]) return "multiple";
+        return "added:" + (i + 1);
+    }
+    if (a.length === b.length + 1) {
+        for (i = 0; i < b.length; i++) if (a[i] !== b[i]) break;
+        for (var k = i; k < b.length; k++) if (a[k + 1] !== b[k]) return "multiple";
+        return "removed:" + (i + 1);
+    }
+    return "multiple";
 }

@@ -1768,5 +1768,138 @@ else
       "in load(): switch at $gate_line, watchdog.start at $arm_line, dispatchRead at $dispatch_line"
 fi
 
+# --- THE WRITE OF autostart.lua --------------------------------------------
+#
+# The file this writes RUNS AT EVERY LOGIN, so the properties below are the
+# ones no runnable suite can reach: that the panel builds no line itself, that
+# it has exactly one route to disk, and that route is the writer script.
+stripped_panel="$(strip_comments Panel.qml)"
+stripped_model="$(strip_comments Model.js)"
+
+# 30 -- the panel NEVER spells a Lua line. Every byte that reaches
+#       autostart.lua comes out of Model.autostartApply, which is a pure
+#       function with byte-exact assertions; a second producer in QML would be
+#       a producer no suite can execute.
+panel_lua="$(grep -nE 'o\.(launch_on_start|exec_on_start|launch)\(' <<<"$stripped_panel" || true)"
+[[ -z "$panel_lua" ]] && ok "autostart write: Panel.qml spells no Lua line of its own" \
+                      || bad "autostart write: Panel.qml spells no Lua line of its own" "$panel_lua"
+
+# 31 -- and it does not escape anything either: luaQuote lives in Model.js and
+#       is reached only through autostartLine.
+panel_quote="$(grep -nE 'luaQuote|string\.char' <<<"$stripped_panel" || true)"
+[[ -z "$panel_quote" ]] && ok "autostart write: Panel.qml does no Lua escaping of its own" \
+                        || bad "autostart write: Panel.qml does no Lua escaping of its own" "$panel_quote"
+
+# 32 -- exactly ONE assignment to the writer Process's command, and it goes
+#       through run.runnerOut and names the writer script. Two routes to a file
+#       that runs at login is one route too many.
+write_sites="$(grep -cE 'autostartWriteProc\.command[[:space:]]*=' <<<"$stripped_panel" || true)"
+if [[ "$write_sites" != "1" ]]; then
+  bad "autostart write: exactly one command assignment for the writer Process" \
+      "found $write_sites"
+else
+  ok "autostart write: exactly one command assignment for the writer Process"
+fi
+if grep -qE 'omarchy-autostart-hypr-write' <<<"$stripped_panel"; then
+  ok "autostart write: and it names bin/omarchy-autostart-hypr-write"
+else
+  bad "autostart write: and it names bin/omarchy-autostart-hypr-write" \
+      "the writer script is not named anywhere in the code of Panel.qml"
+fi
+
+# 33 -- the content reaches the writer on stdin, shell-quoted through
+#       Model.shellQuote. An unquoted expansion of a file's whole text into a
+#       shell command line is the one mistake here that would be catastrophic
+#       and silent.
+if grep -qE 'Model\.shellQuote\(result\.text\)' <<<"$stripped_panel"; then
+  ok "autostart write: the new content is shell-quoted on its way to stdin"
+else
+  bad "autostart write: the new content is shell-quoted on its way to stdin" \
+      "no Model.shellQuote(result.text) in the code of Panel.qml"
+fi
+
+# 34 -- the panel's write function consults Model.hyprSectionIsWritable before
+#       it does anything, and it calls Model.autostartApply for the content.
+#       Neither may be a name it re-implements.
+write_body="$(fn_body autostartWrite <<<"$stripped_panel")"
+if [[ -z "$write_body" ]]; then
+  bad "autostart write: the write function was found at all" \
+      "autostartWrite() is not in Panel.qml, so every check on it would be vacuous"
+else
+  ok "autostart write: the write function was found at all"
+  if grep -qE 'Model\.hyprSectionIsWritable\(' <<<"$write_body"; then
+    ok "autostart write: it asks Model whether the section may be written"
+  else
+    bad "autostart write: it asks Model whether the section may be written" \
+        "no Model.hyprSectionIsWritable( in autostartWrite()"
+  fi
+  if grep -qE 'Model\.autostartApply\(' <<<"$write_body"; then
+    ok "autostart write: the new content comes from Model.autostartApply"
+  else
+    bad "autostart write: the new content comes from Model.autostartApply" \
+        "no Model.autostartApply( in autostartWrite()"
+  fi
+  # A refusal must not reach the Process. The guard is a `return` between the
+  # apply and the command assignment, so the assignment has to come after a
+  # line that returns on !result.ok.
+  refusal_line="$(grep -nE 'if[[:space:]]*\(!result\.ok\)' <<<"$write_body" | head -1 | cut -d: -f1)"
+  assign_line="$(grep -nE 'autostartWriteProc\.command' <<<"$write_body" | head -1 | cut -d: -f1)"
+  if [[ -n "$refusal_line" && -n "$assign_line" ]] && (( refusal_line < assign_line )); then
+    ok "autostart write: a refusal returns before the Process is armed"
+  else
+    bad "autostart write: a refusal returns before the Process is armed" \
+        "refusal at ${refusal_line:-none}, command assignment at ${assign_line:-none}"
+  fi
+fi
+
+# 35 -- the row controls are gated on the entry being editable AND on the
+#       section being writable. The plugin does not offer an operation it
+#       refuses to perform.
+if grep -qE 'hyprEntryRow\.entry\.editable[[:space:]]*===[[:space:]]*true' <<<"$stripped_panel"; then
+  ok "autostart write: the row controls are gated on entry.editable"
+else
+  bad "autostart write: the row controls are gated on entry.editable" \
+      "no 'hyprEntryRow.entry.editable === true' in the code of Panel.qml"
+fi
+if grep -qE 'root\.autostartWritable' <<<"$stripped_panel"; then
+  ok "autostart write: and on the section being writable"
+else
+  bad "autostart write: and on the section being writable" \
+      "no root.autostartWritable in the code of Panel.qml"
+fi
+
+# 35b -- the bar widget's two numbers are DERIVED IN Model.js. Finding 1 of the
+#        task 18 review was this tally written in the panel, comparing section
+#        names in the one file no suite can execute.
+if grep -qE 'Model\.hyprProgramCount\(' <<<"$stripped_panel" \
+   && grep -qE 'Model\.hyprPlacementCount\(' <<<"$stripped_panel"; then
+  ok "autostart write: the panel's two counts come from Model.js"
+else
+  bad "autostart write: the panel's two counts come from Model.js" \
+      "Model.hyprProgramCount / Model.hyprPlacementCount are not both called in the code of Panel.qml"
+fi
+name_compare="$(grep -nE '===[[:space:]]*"(autostart|windowrules|workspaces)\.lua"' <<<"$stripped_panel" || true)"
+[[ -z "$name_compare" ]] && ok "autostart write: the panel classifies no section by its file name" \
+                         || bad "autostart write: the panel classifies no section by its file name" "$name_compare"
+
+# 36 -- luaQuote is reached through autostartLine and nowhere else, so the
+#       allowlist cannot be bypassed by a second call site that forgot to ask
+#       autostartCommandRefusal first.
+quote_sites="$(grep -cE '(^|[^A-Za-z0-9_.])luaQuote\(' <<<"$stripped_model" || true)"
+if [[ "$quote_sites" == "2" ]]; then
+  ok "autostart write: luaQuote has its definition and exactly one call site"
+else
+  bad "autostart write: luaQuote has its definition and exactly one call site" \
+      "found $quote_sites occurrences in the code of Model.js (expected 2: the definition and autostartLine)"
+fi
+
+# 37 -- nothing in the write path reloads or evaluates anything. A change takes
+#       effect at the next login, and that is the whole promise of this task.
+if [[ -n "${write_body:-}" ]]; then
+  reload_hits="$(grep -nE 'hyprctl|reload|verbFor|evalProc|launchProc' <<<"$write_body" || true)"
+  [[ -z "$reload_hits" ]] && ok "autostart write: the write path reloads and launches nothing" \
+                          || bad "autostart write: the write path reloads and launches nothing" "$reload_hits"
+fi
+
 printf '\nqml structure: total=%d failed=%d\n' "$run" "$failed"
 (( failed == 0 ))

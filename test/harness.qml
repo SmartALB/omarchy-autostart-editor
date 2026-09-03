@@ -1409,8 +1409,11 @@ QtObject {
             check("hypr wording: an unknown code is named, not shown bare",
                   Model.hyprReasonText("brand-new").indexOf("brand-new") >= 0, true);
 
-            check("hypr header: it says editing is not possible yet",
-                  Model.hyprHeaderText(sections).indexOf("not possible yet") >= 0, true);
+            check("hypr header: it says which file can be edited",
+                  Model.hyprHeaderText(sections).indexOf("autostart.lua can be edited here") >= 0,
+                  true);
+            check("hypr header: and that the other two are not",
+                  Model.hyprHeaderText(sections).indexOf("read only") >= 0, true);
             check("hypr header: it names the files it read",
                   Model.hyprHeaderText(sections).indexOf("autostart.lua (7)") >= 0, true);
             check("hypr header: it names the file it did not find",
@@ -1454,6 +1457,491 @@ QtObject {
                   Model.luaStringWhole("\"abc\" .. x"), null);
             check("luaStringAt: something that is not a string at all is refused",
                   Model.luaStringWhole("abc"), null);
+
+            // --- the command an application declares ---------------------------
+            //
+            // One derivation, two callers: programFromApp (the old half) and the
+            // autostart picker, which fills the add field with it rather than
+            // writing it, because Exec= is a guess.
+            check("commandFromApp: the field codes are stripped",
+                  Model.commandFromApp({ exec: "nimbus %U" }), "nimbus");
+            check("commandFromApp: an escaped percent survives",
+                  Model.commandFromApp({ exec: "printf 100%% %f" }), "printf 100%");
+            check("commandFromApp: no exec at all gives an empty command",
+                  Model.commandFromApp({ name: "x" }), "");
+            check("commandFromApp: nothing at all gives an empty command",
+                  Model.commandFromApp(undefined), "");
+            check("commandFromApp: programFromApp gives the same command",
+                  Model.programFromApp({ exec: "nimbus %U", name: "Nimbus" }, []).command,
+                  Model.commandFromApp({ exec: "nimbus %U" }));
+            check("commandFromApp: and what it gives round-trips into a line",
+                  roundTrip(Model.commandFromApp(
+                      { exec: "nimbus --app=https://x/ %U" })), "");
+
+            // --- the bytes the surgery works on --------------------------------
+            //
+            // autostartApply() may only do surgery on the text the entries'
+            // line numbers were derived from, so the section carries it.
+            check("hypr sections: the content is carried through byte for byte",
+                  sections[0].content, AUTOSTART_TEXT);
+            check("hypr sections: an absent file carries no content",
+                  sections[1].content, "");
+            check("hypr sections: the entries agree with the content it carries",
+                  Model.parseAutostartLua(sections[0].content, "autostart.lua")[0].raw,
+                  sections[0].entries[0].raw);
+
+            // --- which section may be written ----------------------------------
+            check("hypr writable: autostart.lua is the one",
+                  Model.hyprSectionIsWritable(sections[0]), true);
+            check("hypr writable: windowrules.lua is not",
+                  Model.hyprSectionIsWritable(sections[1]), false);
+            check("hypr writable: workspaces.lua is not",
+                  Model.hyprSectionIsWritable(sections[2]), false);
+            check("hypr writable: an absent autostart.lua is not",
+                  Model.hyprSectionIsWritable({ name: "autostart.lua", present: false }), false);
+            check("hypr writable: a truncated autostart.lua is not",
+                  Model.hyprSectionIsWritable({ name: "autostart.lua", present: true,
+                                                truncated: true }), false);
+            check("hypr writable: nothing at all is not",
+                  Model.hyprSectionIsWritable(undefined), false);
+
+            // --- the counting the panel used to do itself ---------------------
+            //
+            // Finding 1 of the task 18 review: the bar widget's two numbers were
+            // derived in Panel.qml by comparing section names, where nothing can
+            // execute them. They are derived here now, and these are the
+            // assertions that were impossible before.
+            check("hypr counts: the programs are the autostart entries",
+                  Model.hyprProgramCount(sections), 7);
+            check("hypr counts: the placements are everything else",
+                  Model.hyprPlacementCount(sections), 9);
+            check("hypr counts: the two halves add up to the total",
+                  Model.hyprProgramCount(sections) + Model.hyprPlacementCount(sections),
+                  Model.hyprEntryCount(sections));
+            check("hypr counts: a section that is not there counts as none",
+                  Model.hyprProgramCount(Model.parseHyprFiles(undefined)), 0);
+            check("hypr counts: the section is found by name, not by position",
+                  Model.hyprSectionNamed(sections, "workspaces.lua").name, "workspaces.lua");
+            check("hypr counts: a name no section carries gives null",
+                  Model.hyprSectionNamed(sections, "bindings.lua"), null);
+
+            // --- the three section notes ---------------------------------------
+            //
+            // Finding 2 of the task 18 review: these three sentences were inline
+            // in Panel.qml. The empty string is the fourth case and the one that
+            // decides whether the note is shown at all.
+            check("hypr note: an absent file names its path",
+                  Model.hyprSectionNoteText(sections[1]), "Not found: /h/windowrules.lua");
+            check("hypr note: a truncated file says what is shown",
+                  Model.hyprSectionNoteText(sections[2]).indexOf("larger than this panel reads") >= 0,
+                  true);
+            check("hypr note: a file with nothing recognised says so",
+                  Model.hyprSectionNoteText({ name: "autostart.lua", present: true,
+                                              truncated: false, entries: [] }),
+                  "No line in this file is one this panel recognises.");
+            check("hypr note: a file with entries has nothing to add",
+                  Model.hyprSectionNoteText(sections[0]), "");
+            check("hypr note: an absent path does not print undefined",
+                  Model.hyprSectionNoteText({ present: false }).indexOf("undefined"), -1);
+
+            check("hypr autostart note: it counts what can be edited",
+                  Model.hyprAutostartNoteText(sections).indexOf("6 of 7 entries") >= 0, true);
+            check("hypr autostart note: and names the limitation of the rest",
+                  Model.hyprAutostartNoteText(sections).indexOf("by hand") >= 0, true);
+            check("hypr autostart note: with everything editable it does not mention hand editing",
+                  Model.hyprAutostartNoteText(Model.parseHyprFiles(
+                      [{ name: "autostart.lua", path: "/h/a.lua", present: true, mtime: 1,
+                         truncated: false, content: "o.launch_on_start(\"nimbus\")\n" }]))
+                       .indexOf("by hand"), -1);
+            check("hypr autostart note: an absent file says nothing at all",
+                  Model.hyprAutostartNoteText(Model.parseHyprFiles(undefined)), "");
+
+            // --- a Lua block comment is not code -------------------------------
+            //
+            // Finding 3 of the task 18 review, and it GATED the writer: a rule
+            // inside `--[[ ... ]]` came back editable:true, so changing it would
+            // have rewritten a line the user had deliberately switched off and
+            // removing it would have deleted a line he was keeping. The line
+            // number and the raw text were always right, so no neighbour was
+            // ever at risk -- but the entry itself should never have been
+            // offered. Neither his files nor Omarchy's default tree contains a
+            // long bracket, so every fixture here is constructed.
+            var blockCommented = Model.parseAutostartLua(
+                "o.launch_on_start(\"one\")\n--[[\no.launch_on_start(\"two\")\n]]\n"
+                + "o.launch_on_start(\"three\")\n", "autostart.lua");
+            check("hypr bracket: a line inside a block comment is not an entry",
+                  blockCommented.length, 2);
+            check("hypr bracket: the live lines are the ones outside it",
+                  blockCommented[0].command + "," + blockCommented[1].command, "one,three");
+            check("hypr bracket: and their line numbers still count the comment lines",
+                  blockCommented[0].line + "," + blockCommented[1].line, "1,5");
+            check("hypr bracket: a levelled block comment is recognised too",
+                  Model.parseAutostartLua(
+                      "--[==[\no.launch_on_start(\"x\")\n]==]\n", "autostart.lua").length, 0);
+            check("hypr bracket: a closer at the wrong level does not end it",
+                  Model.parseAutostartLua(
+                      "--[==[\n]]\no.launch_on_start(\"x\")\n]==]\n", "autostart.lua").length, 0);
+            check("hypr bracket: a long STRING spanning lines is not code either",
+                  Model.parseAutostartLua(
+                      "local s = [[\no.launch_on_start(\"x\")\n]]\n", "autostart.lua").length, 0);
+            check("hypr bracket: a bracket opener inside a quoted string opens nothing",
+                  Model.parseAutostartLua(
+                      "o.launch_on_start(\"a--[[b\")\no.launch_on_start(\"y\")\n",
+                      "autostart.lua").length, 2);
+            check("hypr bracket: a block comment opened and closed on one line ends there",
+                  Model.parseAutostartLua(
+                      "--[[ off ]]\no.launch_on_start(\"y\")\n", "autostart.lua").length, 1);
+            check("hypr bracket: a plain line comment still ends at the line",
+                  Model.parseAutostartLua(
+                      "-- o.launch_on_start(\"off\")\no.launch_on_start(\"y\")\n",
+                      "autostart.lua").length, 1);
+            check("hypr bracket: window rules get the same treatment",
+                  Model.parseWindowRulesLua(
+                      "--[[\no.window(\"x\", { workspace = \"2\" })\n]]\n").length, 0);
+            check("hypr bracket: and so do workspace rules",
+                  Model.parseWorkspacesLua(
+                      "--[[\nhl.workspace_rule({ workspace = \"1\", monitor = \"DP-4\" })\n]]\n").length,
+                  0);
+            check("hypr bracket: the level of `[[` is 0",
+                  Model.hyprBracketLevelAt("[[x", 0, "["), 0);
+            check("hypr bracket: the level of `[==[` is 2",
+                  Model.hyprBracketLevelAt("[==[x", 0, "["), 2);
+            check("hypr bracket: a lone `[` is not a long bracket",
+                  Model.hyprBracketLevelAt("[x]", 0, "["), -1);
+
+            // ==================================================================
+            // WRITING autostart.lua
+            // ==================================================================
+            //
+            // THE FILE RUNS AT EVERY LOGIN, so every case below asserts the
+            // WHOLE new text byte for byte, and then asserts separately that old
+            // and new differ in exactly one line. "Looks right" is not the
+            // property; those two together are.
+            //
+            // The fixture is AUTOSTART_LINES -- the user's own 21-line file,
+            // byte-identical to it (the task 18 review verified that), with the
+            // trailing "" that makes AUTOSTART_TEXT end in exactly one newline.
+            var LIVE = AUTOSTART_LINES.slice(0, 21);   // the 21 content lines
+
+            // --- add: one line, appended, nothing sorted anywhere -------------
+            var added = Model.autostartApply(AUTOSTART_TEXT,
+                                             { action: "add", command: "obsidian" });
+            check("autostart add: it succeeds", added.ok, true);
+            check("autostart add: the whole new text, byte for byte",
+                  added.text,
+                  LIVE.concat(["o.launch_on_start(\"obsidian\")", ""]).join("\n"));
+            check("autostart add: old and new differ in exactly ONE line, the new last one",
+                  Model.oneLineDifference(AUTOSTART_TEXT, added.text), "added:22");
+            check("autostart add: the file still ends with exactly one newline",
+                  /[^\n]\n$/.test(added.text), true);
+            check("autostart add: and the new line is the last one",
+                  added.text.split("\n")[21], "o.launch_on_start(\"obsidian\")");
+            check("autostart add: the reader takes the new line back as an entry",
+                  Model.parseAutostartLua(added.text, "autostart.lua").length, 8);
+            check("autostart add: and as an editable one",
+                  Model.parseAutostartLua(added.text, "autostart.lua")[7].editable, true);
+            check("autostart add: with the command that was asked for",
+                  Model.parseAutostartLua(added.text, "autostart.lua")[7].command, "obsidian");
+
+            // --- change: exactly the line named, no other ---------------------
+            var changedLive = LIVE.slice();
+            changedLive[3] = "o.launch_on_start(\"notes-app --disable-gpu\")";
+            var changed = Model.autostartApply(
+                AUTOSTART_TEXT,
+                { action: "change", line: 4, command: "notes-app --disable-gpu" });
+            check("autostart change: it succeeds", changed.ok, true);
+            check("autostart change: the whole new text, byte for byte",
+                  changed.text, changedLive.concat([""]).join("\n"));
+            check("autostart change: old and new differ in exactly ONE line, line 4",
+                  Model.oneLineDifference(AUTOSTART_TEXT, changed.text), "changed:4");
+            check("autostart change: the line count is unchanged",
+                  changed.text.split("\n").length, AUTOSTART_TEXT.split("\n").length);
+            check("autostart change: his German comment on line 3 is untouched",
+                  changed.text.split("\n")[2], "-- Dienstliche Kommunikation");
+
+            // --- remove: exactly the line named, no other ---------------------
+            var removedLive = LIVE.slice();
+            removedLive.splice(11, 1);                 // line 12: o.launch_on_start("nimbus")
+            var removed = Model.autostartApply(AUTOSTART_TEXT,
+                                               { action: "remove", line: 12 });
+            check("autostart remove: it succeeds", removed.ok, true);
+            check("autostart remove: the whole new text, byte for byte",
+                  removed.text, removedLive.concat([""]).join("\n"));
+            check("autostart remove: old and new differ in exactly ONE line, line 12",
+                  Model.oneLineDifference(AUTOSTART_TEXT, removed.text), "removed:12");
+            check("autostart remove: the file is one line shorter",
+                  removed.text.split("\n").length,
+                  AUTOSTART_TEXT.split("\n").length - 1);
+            check("autostart remove: the blank line that followed it is still there",
+                  removed.text.split("\n")[11], "");
+            check("autostart remove: and the entry is gone from the reader's answer",
+                  Model.parseAutostartLua(removed.text, "autostart.lua").length, 6);
+            check("autostart remove: the file still ends with exactly one newline",
+                  /[^\n]\n$/.test(removed.text), true);
+
+            // --- THE NON-EDITABLE ENTRY, which is his Chat line -----------
+            //
+            // Line 8 of his file:
+            //   o.exec_on_start(o.launch_webapp_sole("Chat", "https://..."))
+            // The plugin SHOWS it and does not touch it. Neither operation may
+            // reach it, and neither may return any text at all -- a refusal that
+            // still carried a candidate would be one accidental write away from
+            // deleting a line whose meaning this plugin does not understand.
+            var refusedChange = Model.autostartApply(AUTOSTART_TEXT,
+                                                     { action: "change", line: 8, command: "x" });
+            var refusedRemove = Model.autostartApply(AUTOSTART_TEXT,
+                                                     { action: "remove", line: 8 });
+            check("autostart non-editable: change is refused", refusedChange.ok, false);
+            check("autostart non-editable: change says why", refusedChange.error,
+                  "entry-not-editable");
+            check("autostart non-editable: change produces no text at all",
+                  refusedChange.text, undefined);
+            check("autostart non-editable: remove is refused", refusedRemove.ok, false);
+            check("autostart non-editable: remove says why", refusedRemove.error,
+                  "entry-not-editable");
+            check("autostart non-editable: remove produces no text at all",
+                  refusedRemove.text, undefined);
+            check("autostart non-editable: the line it protects is the Chat one",
+                  AUTOSTART_LINES[7],
+                  "o.exec_on_start(o.launch_webapp_sole(\"Chat\", \"https://chat.example.org/\"))");
+            check("autostart non-editable: a commented-out line cannot be reached either",
+                  Model.autostartApply("--[[\no.launch_on_start(\"x\")\n]]\n",
+                                       { action: "remove", line: 2 }).error,
+                  "no-entry-on-line");
+
+            // --- lines that are not entries -----------------------------------
+            check("autostart line: a comment line holds no entry",
+                  Model.autostartApply(AUTOSTART_TEXT, { action: "remove", line: 3 }).error,
+                  "no-entry-on-line");
+            check("autostart line: a blank line holds no entry",
+                  Model.autostartApply(AUTOSTART_TEXT, { action: "remove", line: 2 }).error,
+                  "no-entry-on-line");
+            check("autostart line: line 0 is not a line",
+                  Model.autostartApply(AUTOSTART_TEXT, { action: "remove", line: 0 }).error,
+                  "no-entry-on-line");
+            check("autostart line: a line past the end is not a line",
+                  Model.autostartApply(AUTOSTART_TEXT, { action: "remove", line: 999 }).error,
+                  "no-entry-on-line");
+            check("autostart line: a fractional line number is not a line",
+                  Model.autostartApply(AUTOSTART_TEXT, { action: "remove", line: 4.5 }).error,
+                  "no-entry-on-line");
+            check("autostart line: no line number at all is not a line",
+                  Model.autostartApply(AUTOSTART_TEXT, { action: "remove" }).error,
+                  "no-entry-on-line");
+            check("autostart operation: an operation this writer does not know is refused",
+                  Model.autostartApply(AUTOSTART_TEXT, { action: "reorder", line: 4 }).error,
+                  "unknown-operation");
+            check("autostart operation: no operation at all is refused",
+                  Model.autostartApply(AUTOSTART_TEXT, undefined).error, "unknown-operation");
+
+            // --- THE ESCAPING ROUND TRIP --------------------------------------
+            //
+            // Write the command, read the generated line back with
+            // parseAutostartLua, and require the command to come out identical.
+            // A readable escaper is only worth having if it is reversible, and
+            // the reader is the thing that has to reverse it -- so the proof
+            // goes through the reader rather than through a second escaper
+            // written to agree with the first.
+            //
+            // One helper, one check() per input: the assertion-count guard
+            // requires countable call sites, so no loop.
+            // Split in two so the proof can be turned on itself: roundTripWith
+            // takes the LINE, so a line that was not generated from the command
+            // can be handed to the same comparison. A proof that cannot fail is
+            // not a proof, and this project has shipped one of those before.
+            function roundTripWith(line, command) {
+                var back = Model.parseAutostartLua(line + "\n", "autostart.lua");
+                if (back.length !== 1) return "parsed " + back.length + " entries";
+                if (back[0].editable !== true) return "not editable: " + back[0].reason;
+                if (back[0].launcher !== "uwsm-app") return "launcher " + back[0].launcher;
+                if (back[0].command !== command) return "came back as " + back[0].command;
+                return "";
+            }
+            function roundTrip(command) {
+                return roundTripWith(Model.autostartLine(command), command);
+            }
+            check("autostart escape round trip: a single quote",
+                  roundTrip("nimbus --app='https://example.com/x'"), "");
+            check("autostart escape round trip: a double quote",
+                  roundTrip("sh -c \"echo hi\""), "");
+            check("autostart escape round trip: a backslash",
+                  roundTrip("wine C:\\dir\\app.exe"), "");
+            check("autostart escape round trip: a command substitution",
+                  roundTrip("nimbus --user-data-dir=$(mktemp -d)"), "");
+            check("autostart escape round trip: a semicolon",
+                  roundTrip("sh -c 'a; b'"), "");
+            check("autostart escape round trip: a percent sign",
+                  roundTrip("printf 100% done"), "");
+            check("autostart escape round trip: arguments and a --flag=value",
+                  roundTrip("nimbus --app=https://mail.example.com/mail/ --new-window"),
+                  "");
+            check("autostart escape round trip: all of them at once",
+                  roundTrip("sh -c 'printf \"%s\\n\" $(echo a;b)' --flag=v"), "");
+            check("autostart escape round trip: the proof itself notices a mangled line",
+                  roundTripWith("o.launch_on_start(\"other\")", "nimbus"),
+                  "came back as other");
+            check("autostart escape round trip: and a line it cannot read at all",
+                  roundTripWith("o.exec_on_start(o.launch_webapp_sole(\"a\", \"b\"))", "a")
+                      .indexOf("not editable") >= 0, true);
+
+            // The generated line, spelled out once so the shape is not only
+            // asserted through the reader.
+            check("autostart line: the shape it writes",
+                  Model.autostartLine("nimbus"), "o.launch_on_start(\"nimbus\")");
+            check("autostart line: a double quote is escaped, not encoded",
+                  Model.autostartLine("a\"b"), "o.launch_on_start(\"a\\\"b\")");
+            check("autostart line: a backslash is escaped",
+                  Model.autostartLine("a\\b"), "o.launch_on_start(\"a\\\\b\")");
+            check("autostart line: nothing else is escaped, so a person can read it",
+                  Model.autostartLine("nimbus --app=https://x/?a=1&b=2"),
+                  "o.launch_on_start(\"nimbus --app=https://x/?a=1&b=2\")");
+            check("autostart line: it is not the byte encoding the eval route uses",
+                  Model.autostartLine("nimbus").indexOf("string.char"), -1);
+
+            // --- what is refused, and it is refused rather than encoded -------
+            check("autostart refusal: an empty command",
+                  Model.autostartCommandRefusal(""), "empty-command");
+            check("autostart refusal: a command of only spaces and tabs",
+                  Model.autostartCommandRefusal(" \t "), "empty-command");
+            check("autostart refusal: a line break",
+                  Model.autostartCommandRefusal("a\nb"), "unwritable-character");
+            check("autostart refusal: a carriage return",
+                  Model.autostartCommandRefusal("a\rb"), "unwritable-character");
+            check("autostart refusal: a tab inside the command",
+                  Model.autostartCommandRefusal("a\tb"), "unwritable-character");
+            check("autostart refusal: a NUL byte",
+                  Model.autostartCommandRefusal("a" + String.fromCharCode(0) + "b"),
+                  "unwritable-character");
+            check("autostart refusal: a control character",
+                  Model.autostartCommandRefusal("a" + String.fromCharCode(7) + "b"),
+                  "unwritable-character");
+            check("autostart refusal: a DEL",
+                  Model.autostartCommandRefusal("a" + String.fromCharCode(127) + "b"),
+                  "unwritable-character");
+            check("autostart refusal: a Unicode line separator",
+                  Model.autostartCommandRefusal("a" + String.fromCharCode(0x2028) + "b"),
+                  "unwritable-character");
+            check("autostart refusal: one character too long",
+                  Model.autostartCommandRefusal(new Array(502).join("x")),
+                  "command-too-long");
+            check("autostart refusal: exactly at the cap is allowed",
+                  Model.autostartCommandRefusal(new Array(501).join("x")), null);
+            check("autostart refusal: an ordinary command is not refused",
+                  Model.autostartCommandRefusal("nimbus --app=https://x/"), null);
+            check("autostart refusal: non-ASCII text is written, not refused",
+                  Model.autostartCommandRefusal("nimbus --app=https://x/\u00fcber"), null);
+            check("autostart refusal: and it round-trips",
+                  roundTrip("nimbus /home/user/B\u00fccher/a.pdf"), "");
+            check("autostart refusal: add carries the refusal through",
+                  Model.autostartApply(AUTOSTART_TEXT, { action: "add", command: "a\nb" }).error,
+                  "unwritable-character");
+            check("autostart refusal: and produces no text",
+                  Model.autostartApply(AUTOSTART_TEXT, { action: "add", command: "" }).text,
+                  undefined);
+            check("autostart refusal: change carries it through too",
+                  Model.autostartApply(AUTOSTART_TEXT,
+                                       { action: "change", line: 4, command: "" }).error,
+                  "empty-command");
+            check("autostart refusal: a refused change leaves the editable check passed first",
+                  Model.autostartApply(AUTOSTART_TEXT,
+                                       { action: "change", line: 8, command: "" }).error,
+                  "entry-not-editable");
+
+            // luaQuote THROWS rather than returning something, so a call site
+            // that forgot to ask autostartCommandRefusal() first cannot smuggle
+            // a line break into a file that runs at login.
+            checkThrows("autostart escape: luaQuote refuses a line break outright",
+                        function() { Model.luaQuote("a\nb"); },
+                        /not writable as a Lua string literal/);
+            checkThrows("autostart escape: and a NUL",
+                        function() { Model.luaQuote(String.fromCharCode(0)); },
+                        /not writable as a Lua string literal/);
+            check("autostart escape: but it quotes what it accepts",
+                  Model.luaQuote("a\"b\\c"), "\"a\\\"b\\\\c\"");
+
+            // --- the one-line assertion's own proof ---------------------------
+            //
+            // The assertion every surgery case above rests on. If it reported
+            // "one line" for two edits, every one of those cases would be
+            // decoration -- so it is tested against inputs that differ in two.
+            check("one line difference: identical text",
+                  Model.oneLineDifference(AUTOSTART_TEXT, AUTOSTART_TEXT), "same");
+            check("one line difference: two changed lines is not one",
+                  Model.oneLineDifference("a\nb\nc\n", "a\nB\nC\n"), "multiple");
+            check("one line difference: two added lines is not one",
+                  Model.oneLineDifference("a\nb\n", "a\nb\nc\nd\n"), "multiple");
+            check("one line difference: two removed lines is not one",
+                  Model.oneLineDifference("a\nb\nc\nd\n", "a\nb\n"), "multiple");
+            check("one line difference: an insert plus a change is not one",
+                  Model.oneLineDifference("a\nb\nc\n", "a\nX\nb\nC\n"), "multiple");
+            check("one line difference: a line inserted in the middle",
+                  Model.oneLineDifference("a\nb\nc\n", "a\nX\nb\nc\n"), "added:2");
+            check("one line difference: a line removed from the middle",
+                  Model.oneLineDifference("a\nb\nc\n", "a\nc\n"), "removed:2");
+            check("one line difference: a line changed at the front",
+                  Model.oneLineDifference("a\nb\n", "A\nb\n"), "changed:1");
+            check("one line difference: a trailing newline is not a line",
+                  Model.oneLineDifference("a\nb\n", "a\nb"), "same");
+            check("one line difference: a swap of two lines is not one line",
+                  Model.oneLineDifference("a\nb\n", "b\na\n"), "multiple");
+
+            // --- the edges of the file itself ---------------------------------
+            check("autostart edge: an empty file gains its first line",
+                  Model.autostartApply("", { action: "add", command: "nimbus" }).text,
+                  "o.launch_on_start(\"nimbus\")\n");
+            check("autostart edge: and that is one line added",
+                  Model.oneLineDifference("", Model.autostartApply(
+                      "", { action: "add", command: "nimbus" }).text), "added:1");
+            check("autostart edge: a file with no final newline gets one",
+                  Model.autostartApply("o.launch_on_start(\"a\")",
+                                       { action: "add", command: "b" }).text,
+                  "o.launch_on_start(\"a\")\no.launch_on_start(\"b\")\n");
+            check("autostart edge: and that is still one line added",
+                  Model.oneLineDifference("o.launch_on_start(\"a\")",
+                      Model.autostartApply("o.launch_on_start(\"a\")",
+                                           { action: "add", command: "b" }).text),
+                  "added:2");
+            check("autostart edge: removing the only line leaves an empty file",
+                  Model.autostartApply("o.launch_on_start(\"a\")\n",
+                                       { action: "remove", line: 1 }).text, "");
+            // The line cap comes from Model.js rather than being spelled again
+            // here: an Array of n joined with "x\n" gives n-1 content lines.
+            var atLineCap   = new Array(Model.MAX_HYPR_LINES + 1).join("x\n");
+            var pastLineCap = new Array(Model.MAX_HYPR_LINES + 2).join("x\n");
+            check("autostart edge: the two cap fixtures really straddle the cap",
+                  Model.autostartContentLines(atLineCap).length + ","
+                  + Model.autostartContentLines(pastLineCap).length,
+                  Model.MAX_HYPR_LINES + "," + (Model.MAX_HYPR_LINES + 1));
+            check("autostart edge: a file longer than the reader looks at is not edited",
+                  Model.autostartApply(pastLineCap,
+                                       { action: "add", command: "nimbus" }).error,
+                  "file-too-long");
+            check("autostart edge: a file exactly at the cap still is",
+                  Model.autostartApply(atLineCap,
+                                       { action: "add", command: "nimbus" }).ok, true);
+
+            // --- the refusal wording ------------------------------------------
+            //
+            // The same two-sided guarantee hyprReasonText has: every code
+            // autostartApply can return has plain wording, and the assertions
+            // above are what prove the list is the set it actually returns.
+            check("autostart wording: every refusal code has plain wording",
+                  unwordedAmong(Model.autostartWriteReasons(),
+                                Model.autostartWriteReasonText), "");
+            check("autostart wording: the list it checks is not empty",
+                  Model.autostartWriteReasons().length, 7);
+            check("autostart wording: an absent code does not print undefined",
+                  Model.autostartWriteReasonText(undefined).indexOf("undefined"), -1);
+            check("autostart wording: an unknown code is named, not shown bare",
+                  Model.autostartWriteReasonText("brand-new").indexOf("brand-new") >= 0, true);
+            check("autostart wording: the non-editable refusal names hand editing",
+                  Model.autostartWriteReasonText("entry-not-editable").indexOf("by hand") >= 0,
+                  true);
+            check("autostart wording: what happens after a write is the next login",
+                  Model.autostartWrittenText().indexOf("next login") >= 0, true);
+            check("autostart wording: and that nothing is started or reloaded",
+                  Model.autostartWrittenText().indexOf("starts nothing and reloads nothing") >= 0,
+                  true);
 
             // --- the cutover, asserted rather than assumed -------------------------
             //
