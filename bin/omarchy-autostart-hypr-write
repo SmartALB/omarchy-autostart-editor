@@ -22,8 +22,61 @@ set -uo pipefail
 
 HYPR_DIR="${XDG_CONFIG_HOME:-$HOME/.config}/hypr"
 TARGET="$HYPR_DIR/autostart.lua"
-BACKUP="$TARGET.bak"
 MAX_BYTES=65536           # the same cap bin/omarchy-autostart-hypr reads with
+
+# A DATED BACKUP PER WRITE, and why the single overwritten one was not enough.
+#
+# This kept exactly one step back, in autostart.lua.bak, overwritten by the
+# next write. Two writes in a row therefore left only the SECOND-TO-LAST state
+# recoverable -- and that is not hypothetical: on 2026-09-03 two writes eight
+# minutes apart made the state before them unreachable, and reasoning about
+# what had happened afterwards was much harder than it needed to be.
+#
+# THE NAME FOLLOWS THE CONVENTION ALREADY IN THAT DIRECTORY. Omarchy's own
+# upgrade wrote autostart.lua.pre-apply.20260828-144312.bak, so a dated
+# ".bak" beside the file is the shape a reader of that directory already
+# knows. What is added is the AUTHOR: "smartalb-autostart" says which of the
+# three writers of that directory made the file, so a later reader can tell
+# ours from Omarchy's and from the user's own.
+#
+#   ours      autostart.lua.smartalb-autostart.20260903-101810.bak
+#   Omarchy's autostart.lua.pre-apply.20260828-144312.bak
+#   legacy    autostart.lua.bak        <- this script's own, before this change
+#
+# THE LAST TWO ARE NOT OURS TO TOUCH. autostart.lua.bak is a state the user may
+# still want, written by an older version of this script, and it is now left
+# exactly where it is: never overwritten, never pruned. Nothing here reads or
+# writes any name but the pattern below.
+#
+# SECONDS, AND SORTABLE BY NAME. `cp -p` preserves the ORIGINAL's mtime onto
+# the backup, so a backup's mtime is the age of the CONTENT it holds and not
+# the moment it was taken -- sorting by mtime would order these wrongly.
+# YYYYMMDD-HHMMSS sorts lexicographically in the same order it sorts
+# chronologically, which is why the pruning below sorts by name.
+BACKUP_AUTHOR="smartalb-autostart"
+BACKUP_GLOB="autostart.lua.$BACKUP_AUTHOR.*.bak"
+# ANCHORED, and the anchors are the whole point: a name that merely CONTAINS
+# the pattern -- "x.autostart.lua.smartalb-autostart.20260903-101810.bak", or
+# ours with ".save" appended -- must not match. The optional "-<n>" is the
+# collision suffix taken by a second write inside the same second.
+BACKUP_RE="^autostart\.lua\.$BACKUP_AUTHOR\.[0-9]{8}-[0-9]{6}(-[0-9]+)?\.bak\$"
+# How many to keep. Unbounded backups turn ~/.config/hypr into a junk drawer;
+# five covers a run of edits in one sitting (the two-writes-in-nine-minutes
+# case above with room to spare) and stops well short of clutter.
+MAX_BACKUPS=5
+
+# A NAMED SEAM, exactly like PROC_DIR in bin/omarchy-autostart-windows and for
+# the same reason: without it the "a backup that cannot be taken aborts the
+# write" guarantee is untestable. A test cannot know which second the writer
+# will land in, so it cannot pre-fill the candidate names, and a test that
+# guesses the second is a test that fails when the clock ticks between two
+# lines of it -- which the first version of this one did.
+#
+# IT WIDENS NOTHING. The value is required to be eight digits, a hyphen and
+# six digits by the same check the clock's own output passes, so it cannot
+# carry a path separator, a "..", or anything but a timestamp -- the backup
+# still lands in $HYPR_DIR under our own pattern or the write is refused.
+STAMP_OVERRIDE="${OMARCHY_AUTOSTART_STAMP:-}"
 
 # One cleanup for the whole script. The trap body must never name a
 # function-local variable: the trap runs at exit, when that local is out of
@@ -104,6 +157,92 @@ check_permissions() {
 # Read at most MAX+1 bytes and reject when the extra byte arrived. Checking
 # the size first and reading afterwards would be a different program: the
 # producer can write more between the two.
+# IS THIS BASENAME ONE OF OURS? The single predicate every removal goes
+# through, and the only thing that decides it is the anchored pattern above.
+# Named and separate so a test can hand it the names it must refuse.
+is_our_backup() {
+    local name="${1:-}"
+    [[ -n "$name" ]] || return 1
+    # A basename, never a path: everything below derives one, and a separator
+    # here would mean the derivation broke rather than that the name is odd.
+    [[ "$name" != */* && "$name" != "." && "$name" != ".." ]] || return 1
+    [[ "$name" =~ $BACKUP_RE ]]
+}
+
+# THE ONLY THING IN THIS SCRIPT THAT DELETES A FILE OF THE USER'S, and it gets
+# the same treatment as the installer's scratch removal: it may only ever
+# remove a file whose name matches OUR exact pattern, in the one directory,
+# and it refuses rather than guesses.
+#
+# Five conditions, all by construction:
+#   * the basename matches the anchored pattern -- so autostart.lua itself,
+#     autostart.lua.bak, Omarchy's .pre-apply.*.bak, and any name that merely
+#     contains our pattern are all refused;
+#   * it is taken as a basename and joined to $HYPR_DIR here, so no caller can
+#     hand this a path that leads somewhere else;
+#   * never a symlink -- removing one is removing whatever it points at as far
+#     as the user is concerned, and the target may not be ours at all;
+#   * never a directory;
+#   * it must exist as a plain file, so "removed" is never reported for
+#     something that was not there.
+remove_our_backup() {
+    local name="${1:-}" path
+    is_our_backup "$name" || return 1
+    path="$HYPR_DIR/$name"
+    [[ ! -h "$path" ]] || return 1
+    [[ -f "$path" ]] || return 1
+    rm -f -- "$path"
+}
+
+# Keep the newest MAX_BACKUPS of OUR backups and remove the rest.
+#
+# Failure here is deliberately NOT an error the caller sees: the write has
+# already succeeded and the user's file is in place, so a backup that could
+# not be pruned is clutter, not damage. Refusing the write over it would be
+# the worse outcome.
+prune_our_backups() {
+    local f base names=() sorted=() i
+    for f in "$HYPR_DIR/"$BACKUP_GLOB; do
+        # An unmatched glob stays literal, so the existence test is what makes
+        # "no backups yet" an empty list rather than one bogus entry.
+        [[ -e "$f" ]] || continue
+        base="${f##*/}"
+        is_our_backup "$base" || continue
+        names+=("$base")
+    done
+    (( ${#names[@]} > MAX_BACKUPS )) || return 0
+    # By NAME, newest first -- see the comment on BACKUP_AUTHOR for why not by
+    # mtime.
+    mapfile -t sorted < <(printf '%s\n' "${names[@]}" | sort -r)
+    for (( i = MAX_BACKUPS; i < ${#sorted[@]}; i++ )); do
+        remove_our_backup "${sorted[$i]}" || true
+    done
+    return 0
+}
+
+# The name this write's backup gets. Free by construction: if the second-
+# resolution stamp is already taken -- two writes inside one second -- a
+# counter is appended rather than the existing backup being overwritten,
+# because silently replacing a saved state is the defect this whole change
+# exists to remove. Returning nothing means no free name was found, and the
+# caller treats that as a failed backup, which aborts the write.
+backup_name_for_now() {
+    local stamp base n
+    if [[ -n "$STAMP_OVERRIDE" ]]; then
+        stamp="$STAMP_OVERRIDE"
+    else
+        stamp="$(date +%Y%m%d-%H%M%S 2>/dev/null)" || return 1
+    fi
+    [[ "$stamp" =~ ^[0-9]{8}-[0-9]{6}$ ]] || return 1
+    base="autostart.lua.$BACKUP_AUTHOR.$stamp.bak"
+    if [[ ! -e "$HYPR_DIR/$base" ]]; then printf '%s\n' "$base"; return 0; fi
+    for (( n = 2; n <= 50; n++ )); do
+        base="autostart.lua.$BACKUP_AUTHOR.$stamp-$n.bak"
+        if [[ ! -e "$HYPR_DIR/$base" ]]; then printf '%s\n' "$base"; return 0; fi
+    done
+    return 1
+}
+
 read_bounded() {
     local src="$1" dst="$2" size
     head -c $((MAX_BYTES + 1)) "$src" > "$dst" \
@@ -198,13 +337,20 @@ cmd_write() {
     fi
 
     # THE ONLY WAY BACK. ~/.config/hypr is not under version control -- checked
-    # -- so this copy is it. One step back, overwritten each time.
+    # -- so this copy is it. One dated copy per write, the newest MAX_BACKUPS
+    # kept; see the comment on BACKUP_AUTHOR for the naming and for what this
+    # replaced.
     #
-    # A failed backup is a refusal, not a warning: writing without one would
-    # leave the user with no way to undo a change to a file that decides
-    # whether his session starts what it should.
-    cp -p -- "$TARGET" "$BACKUP" \
-        || err "write-failed" "could not back $TARGET up to $BACKUP; nothing was written"
+    # A failed backup is a refusal, not a warning, and that has not changed:
+    # writing without one would leave the user with no way to undo a change to
+    # a file that decides whether his session starts what it should. A name
+    # that cannot be found free counts as a failed backup for the same reason.
+    local backup_base backup_path
+    backup_base="$(backup_name_for_now)" \
+        || err "write-failed" "could not find a free backup name in $HYPR_DIR; nothing was written"
+    backup_path="$HYPR_DIR/$backup_base"
+    cp -p -- "$TARGET" "$backup_path" \
+        || err "write-failed" "could not back $TARGET up to $backup_path; nothing was written"
 
     mv -f -- "$STAGEFILE" "$TARGET" || err "write-failed" "could not publish $TARGET"
     # Published: the staged path no longer exists, so take it out of cleanup's
@@ -215,7 +361,13 @@ cmd_write() {
     mtime="$(stat -c %Y "$TARGET" 2>/dev/null)" \
         || err "write-failed" "$TARGET vanished immediately after it was written"
     [[ "$mtime" =~ ^[0-9]+$ ]] || err "write-failed" "implausible modification time"
-    ok --argjson m "$mtime" --arg b "$BACKUP" '{ok:true,mtime:$m,backup:$b}'
+
+    # AFTER the publish, never before: pruning is housekeeping over states that
+    # are already saved, and doing it first would remove a backup to make room
+    # for one that might then fail to be taken.
+    prune_our_backups
+
+    ok --argjson m "$mtime" --arg b "$backup_path" '{ok:true,mtime:$m,backup:$b}'
 }
 
 usage() {

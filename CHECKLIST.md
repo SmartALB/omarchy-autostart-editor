@@ -140,8 +140,10 @@ Run `omarchy-restart-shell` first and wait about 8 seconds. The inotify watcher
 reloads the shell after any change under the plugin directory and takes running
 `Process` objects with it; measuring before it has settled measures the reload.
 
-Back up your `autostart.lua` by hand before starting: the plugin keeps one
-step (`autostart.lua.bak`), and this walkthrough writes more than once.
+The plugin now keeps a dated backup per write and prunes to the newest five,
+so this walkthrough -- which writes more than once -- no longer costs you the
+state it started from. Back the file up by hand anyway if you care about it:
+five writes is five, and this list has more steps than that.
 
 1. The widget is visible in the bar, and its tooltip names the number of
    entries your `autostart.lua` actually has -- count them yourself. Before
@@ -181,11 +183,13 @@ step (`autostart.lua.bak`), and this walkthrough writes more than once.
    gives its entry count. If the file does not exist it must say so rather
    than showing an empty panel.
 6. **Add** a command by typing it. The line appears as the **last** line of
-   the file, nothing else in the file moved, and `autostart.lua.bak` holds the
-   previous content:
+   the file, nothing else in the file moved, and a **dated backup** named
+   after this plugin holds the previous content:
 
    ```bash
-   diff ~/.config/hypr/autostart.lua.bak ~/.config/hypr/autostart.lua
+   ls -1t ~/.config/hypr/autostart.lua.smartalb-autostart.*.bak | head -1
+   diff "$(ls -1 ~/.config/hypr/autostart.lua.smartalb-autostart.*.bak | tail -1)" \
+        ~/.config/hypr/autostart.lua
    ```
 
    Exactly one added line, and no other difference.
@@ -310,5 +314,23 @@ within one filesystem either happens or does not.
 
 *Exercise:* not easily forced by hand. What can be checked is the aftermath of
 every write in part B: `autostart.lua` is either the old content or the new
-one, never a partial file, and `autostart.lua.bak` always holds the content
-from before the last write.
+one, never a partial file, and the newest dated backup always holds the
+content from before the last write.
+
+### C7. Do the backups stay bounded, and do they leave the neighbours alone?
+
+Write from the panel more than five times, then look at the directory:
+
+```bash
+ls -1 ~/.config/hypr/ | grep -E 'autostart\.lua.*\.bak'
+```
+
+There must be at most five `autostart.lua.smartalb-autostart.*.bak` files --
+and any `autostart.lua.bak` from an older version of this plugin, plus
+Omarchy's `autostart.lua.pre-apply.*.bak`, must still be there untouched.
+Those two are not ours to remove and the pruner refuses them by name; the
+shell suite hands it both, along with a directory and a symlink named like
+ours, and requires every one to be refused.
+
+*If one of them disappears:* stop and report it. That is a file nobody can get
+back.

@@ -452,8 +452,76 @@ probe "writer: a file that changed on disk is refused" "$SHELL_SUITE" bin/omarch
   's|\[\[ "$current" == "$expect_mtime" \]\]|[[ "$current" == "$current" ]]|'
 
 # THE ONLY WAY BACK: ~/.config/hypr is not under version control.
+# THE BACKUP ITSELF. The variable it copies to is now a dated name computed
+# per write, so the old pattern -- cp -p -- "$TARGET" "$BACKUP" -- matches
+# nothing and this probe reported "the mutation changed nothing" the moment the
+# dating landed.
 probe "writer: the backup is taken before the replacement" "$SHELL_SUITE" bin/omarchy-autostart-hypr-write \
-  's|cp -p -- "$TARGET" "$BACKUP"|true|'
+  's|cp -p -- "$TARGET" "$backup_path"|true|'
+
+# --- the dated backups, and the pruning that deletes in the user's directory -
+#
+# The naming is trivial; the pruning is not. It removes files from
+# ~/.config/hypr, so each condition that decides WHICH files gets its own
+# probe -- an absence guard nobody has watched refuse anything is a guard
+# nobody knows works, which is what the install probes taught earlier in this
+# task.
+
+# THE ANCHORS ARE THE WHOLE GUARD. Without them the pattern MATCHES INSIDE a
+# longer name, so "x.autostart.lua.smartalb-autostart.<stamp>.bak" and ours
+# with ".save" appended both become removable.
+probe "backups: the name pattern must be anchored at both ends" "$SHELL_SUITE" bin/omarchy-autostart-hypr-write \
+  's|^BACKUP_RE="\^autostart|BACKUP_RE="autostart|; s|(-\[0-9\]+)?\\\.bak\\\$"$|(-[0-9]+)?\\.bak"|'
+
+probe "backups: a symlink named like ours must not be removed" "$SHELL_SUITE" bin/omarchy-autostart-hypr-write \
+  's|^    \[\[ ! -h "$path" \]\] \|\| return 1$|    [[ 1 -eq 1 ]] \|\| return 1|'
+
+# NOT ONLY A DIRECTORY. `rm -f` refuses a directory on its own, so relaxing
+# this guard to `-e` changes nothing for one and the probe reported green. What
+# `-f` actually buys is everything else that is not a plain file: a FIFO named
+# like one of ours IS removed by `rm -f`, and the refusal fixture carries one,
+# which is what makes this guard observable at all.
+probe "backups: anything that is not a plain file must not be removed" "$SHELL_SUITE" bin/omarchy-autostart-hypr-write \
+  's|^    \[\[ -f "$path" \]\] \|\| return 1$|    [[ -e "$path" ]] \|\| return 1|'
+
+probe "backups: every removal must go through the name check" "$SHELL_SUITE" bin/omarchy-autostart-hypr-write \
+  's|^    is_our_backup "$name" \|\| return 1$|    is_our_backup "$name" \|\| true|'
+
+probe "backups: the count must actually be capped" "$SHELL_SUITE" bin/omarchy-autostart-hypr-write \
+  's|^    (( ${#names\[@\]} > MAX_BACKUPS )) \|\| return 0$|    return 0|'
+
+# Keeping the OLDEST would satisfy a bare count, which is why the cap test
+# asserts which five survive rather than how many.
+probe "backups: the ones kept must be the newest" "$SHELL_SUITE" bin/omarchy-autostart-hypr-write \
+  's@ | sort -r)@ | sort)@'
+
+# A name that does not carry the date is a name the next write overwrites,
+# which is the single-backup behaviour this change removed.
+probe "backups: the name must carry the date" "$SHELL_SUITE" bin/omarchy-autostart-hypr-write \
+  's|base="autostart.lua.$BACKUP_AUTHOR.$stamp.bak"|base="autostart.lua.$BACKUP_AUTHOR.fixed.bak"|'
+
+# A second write inside the same second must not silently replace the backup
+# the first one took.
+probe "backups: a same-second collision must not overwrite a saved state" "$SHELL_SUITE" bin/omarchy-autostart-hypr-write \
+  's@if \[\[ ! -e "$HYPR_DIR/$base" \]\]; then printf@if true; then printf@'
+
+# AND A BACKUP THAT COULD NOT BE TAKEN MUST STILL ABORT THE WRITE.
+#
+# BOTH refusals at once, and that is not laziness. The two branches are
+# redundant on purpose -- a name that cannot be found free leaves backup_base
+# empty, and the `cp` to "$HYPR_DIR/" then fails and refuses too -- so
+# disarming either ONE leaves the guarantee standing and the probe reported
+# green. Measured, both ways round. A probe that can only be red by disarming
+# the whole guarantee is the honest shape for a guarantee held twice over.
+probe "backups: a failed backup must still abort the write" "$SHELL_SUITE" bin/omarchy-autostart-hypr-write \
+  's@|| err "write-failed" "could not find a free backup name in $HYPR_DIR; nothing was written"@|| backup_base="x"@
+   s@|| err "write-failed" "could not back $TARGET up to $backup_path; nothing was written"@|| true@'
+
+# THE SEAM THAT MAKES THE ABORT TESTABLE MUST NOT WIDEN ANYTHING. It is
+# validated by the same pattern the clock's own output passes; without that
+# check it would be a way to name a backup outside our own pattern.
+probe "backups: the stamp seam must accept nothing but a timestamp" "$SHELL_SUITE" bin/omarchy-autostart-hypr-write \
+  's@    \[\[ "$stamp" =~ \^\[0-9\]{8}-\[0-9\]{6}\$ \]\] || return 1@    [[ -n "$stamp" ]] || return 1@'
 
 probe "writer: a symlink is refused" "$SHELL_SUITE" bin/omarchy-autostart-hypr-write \
   's|^    \[\[ ! -h "$TARGET" \]\] \|\| err "is-a-symlink"|    [[ 1 -eq 1 ]] \|\| err "is-a-symlink"|'

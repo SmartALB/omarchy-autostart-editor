@@ -793,6 +793,28 @@ write_code() { grep -v '^[[:space:]]*#' "$WRITE_BIN"; }
 autostart_path() { printf '%s/hypr/autostart.lua' "$XDG_CONFIG_HOME"; }
 autostart_mtime() { stat -c %Y "$(autostart_path)"; }
 
+# OUR dated backups, and only ours: the glob carries the author segment, so a
+# legacy autostart.lua.bak and Omarchy's .pre-apply.*.bak are outside every
+# helper below by construction -- which is what lets the assertions say
+# "backups" and mean the ones this plugin took.
+#
+# Sorted by NAME, not by mtime, for the reason the writer documents: `cp -p`
+# gives each backup the mtime of the CONTENT it holds, not of the moment it
+# was taken, so mtime order is the wrong order. YYYYMMDD-HHMMSS sorts
+# lexicographically the way it sorts chronologically.
+our_backups() {
+    local f out=()
+    for f in "$(hypr_dir)"/autostart.lua.smartalb-autostart.*.bak; do
+        [[ -e "$f" ]] || continue
+        out+=("$f")
+    done
+    (( ${#out[@]} > 0 )) || return 0
+    printf '%s\n' "${out[@]}" | sort
+}
+backup_count()  { our_backups | grep -c . || true; }
+newest_backup() { our_backups | tail -1; }
+oldest_backup() { our_backups | head -1; }
+
 # The user's own file, and the reason it is spelled out rather than copied
 # from ~/.config/hypr: a test must never READ from there either, so that a
 # change to his file cannot change what this suite asserts.
@@ -861,22 +883,271 @@ test_write_publishes_a_good_candidate() {
 test_write_backs_the_old_content_up() {
     setup_sandbox
     write_autostart_fixture
-    write_good_candidate | "$WRITE_BIN" write --expect-mtime "$(autostart_mtime)" >/dev/null
-    assert_eq "write: the backup exists" \
-              "$([[ -f "$(autostart_path).bak" ]] && echo yes || echo no)" "yes"
+    local answer
+    answer="$(write_good_candidate | "$WRITE_BIN" write --expect-mtime "$(autostart_mtime)")"
+    assert_eq "write: a backup exists" \
+              "$([[ -f "$(newest_backup)" ]] && echo yes || echo no)" "yes"
     assert_eq "write: and it holds the content that was replaced" \
-              "$(cmp -s "$SANDBOX/before.lua" "$(autostart_path).bak" \
+              "$(cmp -s "$SANDBOX/before.lua" "$(newest_backup)" \
                  && echo identical || echo DIFFERENT)" "identical"
+    # The envelope names the file it actually wrote, checked against the file
+    # on disk rather than against a name this test rebuilds -- a test that
+    # recomputed the dated name would be asserting its own arithmetic.
     assert_eq "write: the answer names the backup it took" \
-              "$(write_good_candidate | "$WRITE_BIN" write --expect-mtime "$(autostart_mtime)" \
-                 | jq -r .backup)" "$(autostart_path).bak"
-    # One step back, overwritten: after a second write the backup is the file
-    # as it stood before THAT write, not the original from two writes ago.
+              "$(jq -r .backup <<<"$answer")" "$(newest_backup)"
+    assert_eq "write: and that one write took exactly one backup" \
+              "$(backup_count)" "1"
+    # THE LEGACY NAME IS NOT WRITTEN ANY MORE, and not touched either: an
+    # autostart.lua.bak on a user's disk was written by an older version of
+    # this script and is a state they may still want.
+    assert_eq "write: the legacy autostart.lua.bak is not created" \
+              "$([[ -e "$(autostart_path).bak" ]] && echo CREATED || echo absent)" "absent"
+    # A HISTORY, NOT ONE STEP BACK, and this assertion is the inverse of the
+    # one it replaces. "the backup is one step back, not a history" held while
+    # a single autostart.lua.bak was overwritten by each write; two writes in
+    # a row then left only the second-to-last state recoverable, which is what
+    # made the 2026-09-03 incident hard to reason about. Each write now takes
+    # its own dated copy and BOTH states survive.
     cp -p "$(autostart_path)" "$SANDBOX/second-before.lua"
+    sleep 1
     printf '%s\n' 'o.launch_on_start("x")' | "$WRITE_BIN" write --expect-mtime "$(autostart_mtime)" >/dev/null
-    assert_eq "write: the backup is one step back, not a history" \
-              "$(cmp -s "$SANDBOX/second-before.lua" "$(autostart_path).bak" \
+    assert_eq "write: a second write leaves TWO backups, not one" \
+              "$(backup_count)" "2"
+    assert_eq "write: the newest holds the state before the second write" \
+              "$(cmp -s "$SANDBOX/second-before.lua" "$(newest_backup)" \
                  && echo identical || echo DIFFERENT)" "identical"
+    assert_eq "write: and the older one still holds the original" \
+              "$(cmp -s "$SANDBOX/before.lua" "$(oldest_backup)" \
+                 && echo identical || echo DIFFERENT)" "identical"
+    # The name carries the author, so a reader of that directory can tell our
+    # backups from Omarchy's and from the user's own.
+    assert_eq "write: the backup names this plugin as its author" \
+              "$(basename "$(newest_backup)" | grep -cE '^autostart\.lua\.smartalb-autostart\.[0-9]{8}-[0-9]{6}(-[0-9]+)?\.bak$')" "1"
+    teardown_sandbox
+}
+
+# THE CAP. Unbounded dated backups turn ~/.config/hypr into a junk drawer, so
+# the newest few are kept and the rest pruned. Nine writes against a cap of
+# five, and the assertion is on WHICH five survive, not merely how many: a
+# pruner that kept the oldest would satisfy a bare count.
+test_write_keeps_only_the_newest_backups() {
+    setup_sandbox
+    write_autostart_fixture
+    local i
+    for i in 1 2 3 4 5 6 7 8 9; do
+        printf '%s\n' "o.launch_on_start(\"p$i\")" \
+            | "$WRITE_BIN" write --expect-mtime "$(autostart_mtime)" >/dev/null
+        sleep 1.05
+    done
+    assert_eq "write: the number of backups is capped" "$(backup_count)" "5"
+    # The five that survive are the five most recent. Each backup holds the
+    # content from BEFORE its write, so after nine writes the newest backup
+    # holds p8 and the oldest surviving one holds p4.
+    assert_eq "write: the newest surviving backup is the most recent state" \
+              "$(grep -c 'p8' "$(newest_backup)" || true)" "1"
+    assert_eq "write: and the oldest surviving one is five steps back, not the first" \
+              "$(grep -c 'p4' "$(oldest_backup)" || true)" "1"
+    assert_eq "write: the earliest states really are gone, not merely unlisted" \
+              "$(grep -l 'p1' "$(hypr_dir)"/autostart.lua.smartalb-autostart.*.bak 2>/dev/null | wc -l)" "0"
+    teardown_sandbox
+}
+
+# THE PRUNER DELETES FILES IN THE USER'S CONFIGURATION DIRECTORY, so it gets
+# the same treatment as the installer's scratch removal: it may only ever
+# remove a file whose name matches OUR exact pattern, and it must refuse
+# rather than guess.
+#
+# THIS IS THE POINT OF THE CHANGE; the dating itself is trivial. Two of the
+# names below are real files that exist in the user's directory right now --
+# autostart.lua.bak, written by an older version of this very script, and
+# Omarchy's autostart.lua.pre-apply.20260828-144312.bak -- and deleting either
+# would destroy a state nobody can get back.
+#
+# The two guarded functions are lifted out of the script and asked directly,
+# because nothing an ordinary write does hands them a name they would refuse:
+# the pruner derives its candidates from its own glob. A guard nobody has seen
+# refuse anything is a guard nobody knows works, which is exactly what the
+# install probe taught earlier in this task.
+test_the_pruner_refuses_every_name_that_is_not_ours() {
+    setup_sandbox
+    local fn
+    fn="$(sed -n '/^BACKUP_AUTHOR=/,/^MAX_BACKUPS=/p;/^is_our_backup() {/,/^}/p;/^remove_our_backup() {/,/^}/p' "$WRITE_BIN")"
+    assert_eq "pruner: the guards could be read out of the script" \
+              "$([[ -n "$fn" ]] && grep -q 'rm -f' <<<"$fn" && grep -q 'BACKUP_RE=' <<<"$fn" \
+                 && echo found || echo NOT-FOUND)" "found"
+
+    local d="$SANDBOX/hypr"
+    mkdir -p "$d"
+    # The names that must be refused, and every one of them is a real shape.
+    local ours="autostart.lua.smartalb-autostart.20260903-101810.bak"
+    local ours2="autostart.lua.smartalb-autostart.20260903-101810-2.bak"
+    printf 'x\n' > "$d/autostart.lua"
+    printf 'x\n' > "$d/autostart.lua.bak"                                    # ours, but the LEGACY name
+    printf 'x\n' > "$d/autostart.lua.pre-apply.20260828-144312.bak"          # Omarchy's
+    printf 'x\n' > "$d/windowrules.lua"                                      # another file of theirs
+    printf 'x\n' > "$d/$ours.save"                                           # CONTAINS our pattern
+    printf 'x\n' > "$d/x.$ours"                                              # contains it, prefixed
+    printf 'x\n' > "$d/autostart.lua.smartalb-autostart.2026090-101810.bak"  # a digit short
+    printf 'x\n' > "$d/autostart.lua.smartalb-autostart.20260903-101810.BAK" # wrong case
+    mkdir -p "$d/autostart.lua.smartalb-autostart.20260903-999999.bak"        # a DIRECTORY named like ours
+    # A FIFO, and it is the one that makes the "plain file" guard observable:
+    # `rm -f` refuses a directory on its own, but it REMOVES a fifo, so
+    # without the -f test this one would be deleted.
+    mkfifo "$d/autostart.lua.smartalb-autostart.20260903-777777.bak"
+    ln -s "$d/autostart.lua" "$d/autostart.lua.smartalb-autostart.20260903-888888.bak"  # a SYMLINK named like ours
+    # ... and the two that must be accepted.
+    printf 'x\n' > "$d/$ours"
+    printf 'x\n' > "$d/$ours2"
+
+    local verdicts
+    verdicts="$(
+        HYPR_DIR="$d"
+        eval "$fn"
+        for n in "autostart.lua" \
+                 "autostart.lua.bak" \
+                 "autostart.lua.pre-apply.20260828-144312.bak" \
+                 "windowrules.lua" \
+                 "$ours.save" \
+                 "x.$ours" \
+                 "autostart.lua.smartalb-autostart.2026090-101810.bak" \
+                 "autostart.lua.smartalb-autostart.20260903-101810.BAK" \
+                 "autostart.lua.smartalb-autostart.20260903-999999.bak" \
+                 "autostart.lua.smartalb-autostart.20260903-888888.bak" \
+                 "autostart.lua.smartalb-autostart.20260903-777777.bak" \
+                 "../autostart.lua" \
+                 "" \
+                 "$ours" \
+                 "$ours2"; do
+            if remove_our_backup "$n" 2>/dev/null; then echo removed; else echo refused; fi
+        done
+    )"
+    local expected="refused refused refused refused refused refused refused refused refused refused refused refused refused removed removed"
+    assert_eq "pruner: every name that is not ours is refused, and both of ours accepted" \
+              "$(tr '\n' ' ' <<<"$verdicts" | sed 's/ *$//')" "$expected"
+
+    # A refusal is a refusal, not a deletion that reported failure. The two
+    # files a user could never get back are named individually, because those
+    # are the two that matter.
+    assert_eq "pruner: the user's own autostart.lua is still there" \
+              "$([[ -f "$d/autostart.lua" ]] && echo intact || echo DELETED)" "intact"
+    assert_eq "pruner: the LEGACY autostart.lua.bak is still there" \
+              "$([[ -f "$d/autostart.lua.bak" ]] && echo intact || echo DELETED)" "intact"
+    assert_eq "pruner: Omarchy's own pre-apply backup is still there" \
+              "$([[ -f "$d/autostart.lua.pre-apply.20260828-144312.bak" ]] && echo intact || echo DELETED)" "intact"
+    assert_eq "pruner: every other refused name is still there" \
+              "$([[ -f "$d/windowrules.lua" && -f "$d/$ours.save" && -f "$d/x.$ours" \
+                 && -f "$d/autostart.lua.smartalb-autostart.2026090-101810.bak" \
+                 && -f "$d/autostart.lua.smartalb-autostart.20260903-101810.BAK" ]] \
+                 && echo intact || echo DELETED)" "intact"
+    assert_eq "pruner: the directory named like ours was not removed" \
+              "$([[ -d "$d/autostart.lua.smartalb-autostart.20260903-999999.bak" ]] && echo intact || echo DELETED)" "intact"
+    assert_eq "pruner: the symlink named like ours was not removed" \
+              "$([[ -h "$d/autostart.lua.smartalb-autostart.20260903-888888.bak" ]] && echo intact || echo DELETED)" "intact"
+    assert_eq "pruner: the fifo named like ours was not removed either" \
+              "$([[ -p "$d/autostart.lua.smartalb-autostart.20260903-777777.bak" ]] && echo intact || echo DELETED)" "intact"
+    assert_eq "pruner: and what it points at was not removed either" \
+              "$([[ -f "$d/autostart.lua" ]] && echo intact || echo DELETED)" "intact"
+    assert_eq "pruner: the two backups of ours ARE gone" \
+              "$([[ -e "$d/$ours" || -e "$d/$ours2" ]] && echo still-there || echo gone)" "gone"
+    teardown_sandbox
+}
+
+# A BACKUP THAT CANNOT BE TAKEN STILL ABORTS THE WRITE, and this is the
+# reachable half of that guarantee.
+#
+# The `cp` itself cannot be made to fail from a test: the script has already
+# established that the directory is writable (it staged a file there) and that
+# the source is readable, so a probe on that branch reports green for want of
+# an input rather than for want of a guard. What CAN be forced is the other
+# refusal through the same `err`: every candidate backup name taken, so no
+# free name exists. The write must then change nothing at all.
+test_write_aborts_when_no_backup_can_be_taken() {
+    setup_sandbox
+    write_autostart_fixture
+    # The stamp is pinned through the script's own seam, so the second the
+    # clock happens to be in cannot decide whether this test passes. The
+    # first version of this test read `date` itself and raced the writer.
+    local stamp="20991231-235959" n
+    : > "$(hypr_dir)/autostart.lua.smartalb-autostart.$stamp.bak"
+    for (( n = 2; n <= 50; n++ )); do
+        : > "$(hypr_dir)/autostart.lua.smartalb-autostart.$stamp-$n.bak"
+    done
+    # Fail-closed FIRST: if the fixture did not take every candidate name, the
+    # write below would succeed for an ordinary reason and every assertion
+    # after it would be about the wrong thing.
+    assert_eq "write: the fixture really did take every candidate name" \
+              "$(find "$(hypr_dir)" -maxdepth 1 -name "autostart.lua.smartalb-autostart.$stamp*.bak" | wc -l)" "50"
+    local before answer
+    before="$(sha256sum < "$(autostart_path)")"
+    answer="$(printf '%s\n' 'o.launch_on_start("blocked")' \
+              | OMARCHY_AUTOSTART_STAMP="$stamp" "$WRITE_BIN" write \
+                  --expect-mtime "$(autostart_mtime)")"
+    assert_eq "write: with no free backup name the write is refused" \
+              "$(jq -r .ok <<<"$answer")" "false"
+    assert_eq "write: and it says the write failed" \
+              "$(jq -r .error <<<"$answer")" "write-failed"
+    assert_eq "write: the file is byte for byte what it was" \
+              "$(sha256sum < "$(autostart_path)")" "$before"
+    assert_eq "write: and nothing was staged and left behind" \
+              "$(find "$(hypr_dir)" -maxdepth 1 -name '.autostart.lua.*' | wc -l)" "0"
+    teardown_sandbox
+}
+
+# THE SEAM ITSELF CANNOT WIDEN ANYTHING. It exists so the test above is
+# possible, so what it accepts has to be pinned: a value that is not a
+# timestamp must be refused rather than used, or the seam would be a way to
+# name a backup path outside our own pattern.
+test_the_stamp_seam_accepts_nothing_but_a_timestamp() {
+    setup_sandbox
+    write_autostart_fixture
+    local bad answer
+    for bad in "../escape" "20260903-101810/x" "notadate" "2026090-101810" "" "20260903-1018100"; do
+        # The prefix goes on the WRITER, not on the assignment: a bare
+        # `VAR=x answer=$(...)` sets VAR in this shell without exporting it,
+        # so the child never sees it -- which is how the first version of this
+        # test reported the seam as accepting everything.
+        answer="$(printf '%s\n' 'o.launch_on_start("x")' \
+                  | OMARCHY_AUTOSTART_STAMP="$bad" "$WRITE_BIN" write \
+                      --expect-mtime "$(autostart_mtime)")"
+        if [[ -z "$bad" ]]; then
+            # Empty means "no override", which is the ordinary path: the clock
+            # is used and the write succeeds.
+            assert_eq "stamp seam: an empty override falls back to the clock" \
+                      "$(jq -r .ok <<<"$answer")" "true"
+            assert_eq "stamp seam: and the backup it took is one of ours" \
+                      "$(basename "$(jq -r .backup <<<"$answer")" \
+                         | grep -cE '^autostart\.lua\.smartalb-autostart\.[0-9]{8}-[0-9]{6}(-[0-9]+)?\.bak$')" "1"
+            continue
+        fi
+        assert_eq "stamp seam: '$bad' is refused, not used" \
+                  "$(jq -r .ok <<<"$answer")" "false"
+    done
+    # And nothing outside our pattern was created by any of those attempts.
+    assert_eq "stamp seam: no file outside our own pattern was created" \
+              "$(find "$(hypr_dir)" -maxdepth 1 -type f \
+                 ! -name 'autostart.lua' \
+                 ! -name 'autostart.lua.smartalb-autostart.*.bak' | wc -l)" "0"
+    teardown_sandbox
+}
+
+# The pruning must never reach a neighbouring file through the real write
+# path either, not only through the guard in isolation.
+test_writing_never_touches_a_backup_that_is_not_ours() {
+    setup_sandbox
+    write_autostart_fixture
+    printf 'legacy\n'  > "$(hypr_dir)/autostart.lua.bak"
+    printf 'omarchy\n' > "$(hypr_dir)/autostart.lua.pre-apply.20260828-144312.bak"
+    local i
+    for i in 1 2 3 4 5 6 7; do
+        printf '%s\n' "o.launch_on_start(\"q$i\")" \
+            | "$WRITE_BIN" write --expect-mtime "$(autostart_mtime)" >/dev/null
+        sleep 1.05
+    done
+    assert_eq "write: seven writes past the cap left five of ours" "$(backup_count)" "5"
+    assert_eq "write: the legacy autostart.lua.bak is byte for byte what it was" \
+              "$(cat "$(hypr_dir)/autostart.lua.bak")" "legacy"
+    assert_eq "write: and Omarchy's pre-apply backup too" \
+              "$(cat "$(hypr_dir)/autostart.lua.pre-apply.20260828-144312.bak")" "omarchy"
     teardown_sandbox
 }
 
@@ -1117,6 +1388,11 @@ test_write_refuses_when_there_is_no_lua_compiler() {
 
 test_write_publishes_a_good_candidate
 test_write_backs_the_old_content_up
+test_write_keeps_only_the_newest_backups
+test_the_pruner_refuses_every_name_that_is_not_ours
+test_write_aborts_when_no_backup_can_be_taken
+test_the_stamp_seam_accepts_nothing_but_a_timestamp
+test_writing_never_touches_a_backup_that_is_not_ours
 test_write_refuses_a_candidate_that_does_not_compile
 test_write_never_executes_the_candidate
 test_write_refuses_a_stale_expectation

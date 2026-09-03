@@ -87,10 +87,20 @@ Four things stand between a change and your next login:
 3. The candidate is compiled with `luac5.1 -p` **before** anything is renamed
    into place. `-p` parses without executing. A file that would not compile is
    never published, and the original is left byte for byte as it was.
-4. Your file is backed up to `autostart.lua.bak` (one step back, overwritten
-   each time) and replaced by an atomic rename. If its modification time is not
-   the one the panel read, the write is refused: you also edit this file by
-   hand, and a line number from a stale read means a different line.
+4. **Every write takes its own dated backup** and the file is replaced by an
+   atomic rename. The newest five are kept and older ones pruned:
+
+   ```
+   autostart.lua.smartalb-autostart.20260903-101810.bak
+   ```
+
+   The name says who wrote it, so you can tell this plugin's backups from
+   Omarchy's own `autostart.lua.pre-apply.*.bak` and from anything you keep
+   there yourself -- and nothing but that exact pattern is ever pruned. If a
+   backup cannot be taken, the write is refused rather than done without one.
+   If the file's modification time is not the one the panel read, the write is
+   refused too: you also edit this file by hand, and a line number from a
+   stale read means a different line.
 
 A change takes effect **at your next login.** The plugin starts nothing and
 reloads nothing.
@@ -178,8 +188,9 @@ It removes the plugin directory and nothing else -- it refuses to delete
 anything that does not resolve to exactly that directory. Remove the widget
 from your bar in `shell.json` yourself afterwards, then run
 `omarchy-restart-shell`. Your autostart entries are in your own
-`autostart.lua` and keep working without the plugin; the last backup it took,
-if any, is beside it as `autostart.lua.bak`.
+`autostart.lua` and keep working without the plugin; the backups it took, if
+any, are beside it as `autostart.lua.smartalb-autostart.*.bak` and are left
+for you to keep or delete.
 
 ## Where your data lives
 
@@ -188,7 +199,8 @@ file in it:
 
 ```
 ~/.config/hypr/autostart.lua        read, and written one line at a time
-~/.config/hypr/autostart.lua.bak    the previous content, one step back
+~/.config/hypr/autostart.lua.smartalb-autostart.<date>-<time>.bak
+                                    one per write, newest five kept
 ```
 
 That file holds **command lines that are run as you when your session
