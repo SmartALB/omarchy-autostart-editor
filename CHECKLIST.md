@@ -21,11 +21,16 @@ holds the questions that have never been answered on this machine.
 
 ## Part A -- before this can be submitted
 
-### A1. Take `preview.png`
+### A1. Take a preview image -- optional, but worth having
 
-**Not done yet, and nothing in this repository may do it**: it needs a
-screenshot of the panel open in a live shell, and no automated step here is
-allowed to load the plugin into a running session.
+**The marketplace does not require one.** Its guide says a repository
+"optionally contains one root preview", so a submission without one is
+complete. It is still worth having: the preview is what a reviewer and every
+later reader see before they read a word.
+
+**Nothing in this repository may produce it**: it needs a screenshot of the
+panel open in a live shell, and no automated step here is allowed to load the
+plugin into a running session.
 
 1. Install and restart the shell against an `autostart.lua` worth showing:
    **at least four entries, one of them a form the panel marks as not
@@ -37,13 +42,48 @@ allowed to load the plugin into a running session.
    hyprshot -m window -o "$PWD" -f preview.png
    ```
 
-3. Check the image before committing it: no file-system paths, no account
-   names, no employer or customer data, nothing from a private window title.
-   The panel shows command lines, and a command line can carry a token.
-4. Put it at the **repository root**, next to `manifest.json`. Marketplace
-   validation looks there and nowhere else -- an image under `images/` is
-   treated as absent, which is how a submission ends up listed with the
-   generic placeholder.
+3. **Check the image before committing it, and read it with your eyes.** No
+   file-system paths, no account names, no employer or customer data, nothing
+   from a private window title. The panel shows command lines, and a command
+   line can carry a token.
+
+   **This is not a formality, and it has already caught a real one.** On
+   2026-09-03 a `preview.png` was taken of the panel against the owner's own
+   `autostart.lua`. The image showed their work mail host, their messenger
+   webapp URL, their work chat client and their local model runner -- the exact
+   values two rounds of scrubbing had just removed from every file in the
+   tree. The plugin renders your real file, so a screenshot of it publishes
+   what the file contains.
+
+   **No automated check can see this.** Every grep in this repository, and
+   every grep in the audit that scrubbed the tree, reads text; a PNG is
+   opaque to all of them. The suite can only assert that the file exists and
+   is really a PNG. So this step is irreducibly manual, and it is the only
+   thing standing between a scrubbed repository and a screenshot that undoes
+   it.
+
+   The safe way: point the panel at a **neutral** `autostart.lua` first --
+   the fixture in `test/harness.qml` is one, and it was built to look like a
+   real hand-maintained file for exactly this kind of reason -- take the
+   screenshot against that, and put your own file back afterwards. Or ship no
+   preview at all: it is optional.
+4. Put it at the **repository root**, next to `manifest.json`. The root
+   location is the part that matters: a preview under `images/` or anywhere
+   else is not found, and the listing then shows the generic placeholder.
+
+   **Five names are accepted** -- `preview.png`, `preview.jpg`,
+   `preview.jpeg`, `preview.webp`, `preview.avif`. Any one of them will do,
+   and there is **nothing to size or crop**: the marketplace strips the
+   preview's metadata and generates the card and detail images itself. The
+   only input limits are 50 MB and 40 megapixels, which a panel screenshot
+   will not come close to.
+
+   **This repository's own assertion pins `preview.png`**, deliberately: it
+   checks the PNG magic bytes, so it can say "present and really an image"
+   rather than "a file with the right name". If you take one of the other four
+   formats instead, `test_the_preview_is_either_taken_or_still_owed` in
+   `test/run-tests.sh` and the README reference have to be updated together --
+   the suite will tell you, because it couples the two.
 5. **Then add it to the README**, as the fifth line, directly under the
    two-line summary and above `## What it is`:
 
@@ -124,23 +164,62 @@ machine with Omarchy installed.
 
 ### A4. Confirm what you are asserting in the submission
 
-The marketplace asks the submitter to confirm ownership of the plugin **and of
-the preview image**, and to state the plugin's dependencies. Note also that
-approval is for *listing* and is explicitly not a security review -- so the
-claims below have to be true because they are true, not because a reviewer
-checked them:
+**These are the five statements the submission form requires, verbatim.** They
+are what the owner has to confirm, so they are written out here rather than
+paraphrased:
 
-- no elevated rights anywhere, no system-wide tier, no package installation;
-- the expected capability baseline is therefore `installer` and nothing else;
-- the place a reviewer will look first: this plugin **writes a file that runs
-  at every login**. It writes no generated Lua anywhere and pushes nothing
-  into the running compositor -- `luaBytes`, which re-encoded every value as
-  `string.char(...)` bytes for that boundary, is gone with the boundary. What
-  guards the one file it does write is three things: the character allowlist
-  in `Model.autostartCharRefused` (a line break or a control character cannot
-  be written at all), `luaQuote`'s escaping, and the `luac5.1 -p` gate in
-  `bin/omarchy-autostart-hypr-write`, which refuses a candidate that does not
-  compile.
+```
+- [x] The repository is public and contains installation and removal instructions.
+- [x] I have documented the plugin license and any external dependencies.
+- [x] I confirm that I own or have permission to submit this plugin and its preview assets.
+- [x] The plugin does not overwrite user configuration without explicit consent.
+- [x] I understand that approval is for listing and is not a security review.
+```
+
+Where each one is satisfied, so the box is ticked because it is true and not
+because a reviewer checked it:
+
+1. **Public, with install and removal.** `README.md` leads with
+   `omarchy plugin add … --enable` and gives `omarchy plugin remove` plus the
+   developer path from a clone.
+2. **License and dependencies documented.** `LICENSE` is MIT and the manifest
+   says so; *What it needs* in the README names `jq`, `luac5.1`, `realpath`
+   with what it guards, `bash`, `timeout`, the coreutils, and `hyprctl` --
+   and states that nothing is fetched at runtime and no network connection is
+   made.
+3. **Ownership**, including the preview: the screenshot is taken by the owner
+   in step A1, of their own desktop, which is also why step 3 there is a
+   privacy check rather than a formality.
+4. **No overwriting without consent.** The panel writes only when the user
+   presses a control; it edits exactly one file; every write takes a dated
+   backup first and is refused outright if the file changed on disk since the
+   panel read it. It touches no other configuration.
+5. **Listing, not a security review** -- which is precisely why the note below
+   exists.
+
+**The note a reviewer will want, stated plainly.** This plugin **writes a file
+that Hyprland executes at every login**. That is its entire purpose, and the
+README says so in as many words rather than leaving it to be discovered. What
+guards it is three things: the character allowlist in
+`Model.autostartCharRefused` (a line break or a control character cannot be
+written at all), `luaQuote`'s escaping, and the `luac5.1 -p` gate in
+`bin/omarchy-autostart-hypr-write`, which refuses a candidate that does not
+compile. It writes no generated Lua anywhere and pushes nothing into the
+running compositor.
+
+- No elevated rights anywhere, no system-wide tier, no package installation.
+  The expected capability baseline is therefore `installer` and nothing else.
+- The automated security baseline looks for a small set of deterministic
+  patterns: download-to-shell execution, execution from an unpinned external
+  git source, privilege-escalation policy files that waive a password, and
+  privileged process control driven from predictable shared temporary state.
+  This plugin does none of them. (The policy-file one is named around its
+  spelling on purpose -- this repository's own suite greps these documents for
+  privileged verbs and requires zero hits, so prose that spells one out turns
+  it red. `install` carries the same note for the same reason.)
+- The id `smartalb.autostart` is free: absent from the listed IDs and from the
+  retired ones. Retired IDs stay permanently unavailable, so an id is worth
+  getting right once.
 
 ---
 

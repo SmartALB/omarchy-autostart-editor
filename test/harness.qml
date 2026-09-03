@@ -1211,41 +1211,41 @@ QtObject {
             check("webmail case: and the runner-up does NOT carry that token",
                   realApps[1].exec.indexOf("mail.example.com"), -1);
 
-            // --- THE LM STUDIO CASE, named ----------------------------------
+            // --- THE MODELBOX CASE, named ----------------------------------
             //
             // The most important warning in this task: a path that exists
             // today and not after a restart, written into a file nobody looks
             // at again until it silently stops working.
             var modelbox = forWindow("com.example.modelbox",
                                      "/tmp/.mount_modelbFjMMHD/modelbox", "modelbox");
-            check("lm studio case: the running line is warned about",
+            check("modelbox case: the running line is warned about",
                   modelbox[1].warning, "unstable-path");
-            check("lm studio case: it is the running command that carries it",
+            check("modelbox case: it is the running command that carries it",
                   modelbox[1].source + "|" + modelbox[1].command,
                   "running|/tmp/.mount_modelbFjMMHD/modelbox");
-            check("lm studio case: the duplicate warning is not suppressed by it",
+            check("modelbox case: the duplicate warning is not suppressed by it",
                   modelbox[1].warnings.join("+"), "unstable-path+program-already-present");
-            check("lm studio case: the .desktop suggestion above it has no path at all",
+            check("modelbox case: the .desktop suggestion above it has no path at all",
                   modelbox[0].command, "modelbox");
-            check("lm studio case: /tmp is unstable",
+            check("modelbox case: /tmp is unstable",
                   Model.commandIsUnstablePath("/tmp/.mount_x/modelbox"), true);
-            check("lm studio case: /run is unstable",
+            check("modelbox case: /run is unstable",
                   Model.commandIsUnstablePath("/run/user/1000/appimage/thing"), true);
-            check("lm studio case: /proc is unstable",
+            check("modelbox case: /proc is unstable",
                   Model.commandIsUnstablePath("/proc/self/cwd/thing"), true);
-            check("lm studio case: /dev/shm is unstable",
+            check("modelbox case: /dev/shm is unstable",
                   Model.commandIsUnstablePath("/dev/shm/thing"), true);
-            check("lm studio case: a .mount_ segment mid-path is unstable wherever it sits",
+            check("modelbox case: a .mount_ segment mid-path is unstable wherever it sits",
                   Model.commandIsUnstablePath("/home/user/.cache/.mount_abc123/modelbox"), true);
-            check("lm studio case: a mount segment after a space is caught too",
+            check("modelbox case: a mount segment after a space is caught too",
                   Model.commandIsUnstablePath("env FOO=1 .mount_abc/modelbox"), true);
-            check("lm studio case: /usr/bin is not unstable",
+            check("modelbox case: /usr/bin is not unstable",
                   Model.commandIsUnstablePath("/usr/bin/vaultkey"), false);
-            check("lm studio case: a bare program name is not unstable",
+            check("modelbox case: a bare program name is not unstable",
                   Model.commandIsUnstablePath("modelbox"), false);
-            check("lm studio case: /tmpfoo is not /tmp -- the prefix ends at the slash",
+            check("modelbox case: /tmpfoo is not /tmp -- the prefix ends at the slash",
                   Model.commandIsUnstablePath("/tmpfoo/modelbox"), false);
-            check("lm studio case: a mount-like word that is not a path segment is not caught",
+            check("modelbox case: a mount-like word that is not a path segment is not caught",
                   Model.commandIsUnstablePath("nimbus --mount_point=/x"), false);
 
             // --- already-present, against the real fixture ------------------

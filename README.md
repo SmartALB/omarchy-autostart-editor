@@ -109,11 +109,31 @@ reloads nothing.
 
 - Hyprland with Omarchy's Quickshell-based shell (this is a `bar-widget`
   plugin, schema version 1).
-- `hyprctl`, `jq`, `bash`, `timeout`, `luac5.1` -- all of them part of a
-  stock Omarchy install (`luac5.1` ships with `lua51`). `hyprctl` is used for
-  exactly one thing, `hyprctl -j clients`, which reads the list of open
-  windows for the picker. Nothing is fetched at runtime and the plugin makes
-  no network connection at all.
+- **`jq`** for every JSON envelope the helper scripts answer with, and
+  **`luac5.1`** for the syntax gate that refuses a candidate `autostart.lua`
+  before it is written. `luac5.1` ships with `lua51`; `/usr/bin/luac` and
+  `/usr/bin/luac5.4` are accepted as fallbacks, each verified by running it
+  rather than by trusting its name.
+- **`realpath`**, and it is worth naming on its own because it is
+  load-bearing for a refusal rather than a convenience: `install` and
+  `uninstall` resolve a path with `realpath -m` and then require the result to
+  be where it claims to be *before* anything is deleted. Without it both
+  would be running `rm -rf` against a path assembled from variables, which is
+  the shape that once became `rm -rf /` in this project's own test sandbox.
+  (The backup pruner refuses by a different route -- an anchored match on the
+  file name -- and needs no external command for it.)
+- **`bash`, `timeout`, and the usual coreutils** -- `awk`, `chmod`, `cp`,
+  `date`, `env`, `find`, `grep`, `head`, `mktemp`, `mv`, `rm`, `sed`, `stat`.
+  All present on any Omarchy install; none of them is optional and none is
+  fetched.
+- **`hyprctl`** only for the running-programs picker, which reads
+  `hyprctl -j clients`. That picker is switched off in this release, so
+  nothing in this plugin currently calls `hyprctl` at all -- the script that
+  would is still shipped, and would need it.
+
+**Nothing is fetched at runtime and the plugin makes no network connection at
+all.** Every command above is expected to be on the system already; none is
+downloaded, installed or updated by this plugin.
 
 ### When something else is a better fit
 
