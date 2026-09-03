@@ -330,7 +330,7 @@ JSON
 test_windows_three_windows_of_one_process() {
     setup_sandbox; fake_hyprctl_json; fake_proc
     # His three nimbus windows, measured: three classes, one pid, one command
-    # line -- and that line ends in the Webmail flag, so it is WRONG for the
+    # line -- and that line ends in the webmail flag, so it is WRONG for the
     # plain browser window. The script reports what it measured; deciding
     # what it means is Model.js's job and the user's.
     fake_cmdline 1866 /opt/nimbus-bin/nimbus --password-store=gnome-libsecret \
@@ -772,7 +772,7 @@ test_hypr_read_resolves_its_directory_from_the_sandbox
 #
 # THE WRITER, and the file it writes RUNS AT EVERY LOGIN. A malformed
 # autostart.lua means the user's programs do not start and Hyprland reports a
-# Lua error when he logs in, so every refusal below also asserts that THE
+# Lua error at the next login, so every refusal below also asserts that THE
 # ORIGINAL IS BYTE-IDENTICAL afterwards, with `cmp` against a copy taken
 # before the attempt -- not by re-reading a field the script itself produced.
 #
@@ -830,7 +830,7 @@ oldest_backup() { our_backups | head -1; }
 
 # The user's own file, and the reason it is spelled out rather than copied
 # from ~/.config/hypr: a test must never READ from there either, so that a
-# change to his file cannot change what this suite asserts.
+# change to the user's own file cannot change what this suite asserts.
 write_autostart_fixture() {
     mkdir -p "$(hypr_dir)"
     printf '%s\n' \
@@ -859,7 +859,7 @@ assert_original_untouched() {
 }
 
 # No dotfile left beside the user's own configuration after a refusal. The
-# staged replacement lives in his directory by necessity -- a rename is only
+# staged replacement lives in that directory by necessity -- a rename is only
 # atomic within one filesystem -- so the cleanup for it is load-bearing.
 assert_nothing_staged() {
     local name="$1" left

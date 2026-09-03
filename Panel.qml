@@ -222,7 +222,7 @@ Panel {
 
     // "Add from a running program": the window list, and which window's
     // suggestions are unfolded. BY ROW rather than by class, and here that is
-    // not a precaution but a measurement: his three nimbus windows are three
+    // not a precaution but a measurement: three browser windows are three
     // windows with three different classes but one command line, and two
     // Termpane windows share a class outright. Keyed by class, unfolding one
     // would unfold the other.
@@ -303,7 +303,7 @@ Panel {
     // Opening the list needs BOTH reads: the open windows, because a program
     // started since the panel opened must be offerable, and the installed
     // applications, because the .desktop-by-binary route is the one that turns
-    // his Webmail window into `nimbus --app=https://mail.example.com/mail/`
+    // a webmail window into `nimbus --app=https://mail.example.com/mail/`
     // instead of a browser command line that is wrong for it. Without the
     // second read every window would offer nothing but its /proc line -- which
     // is exactly the automatic mapping this task exists not to be.
@@ -352,7 +352,7 @@ Panel {
     // Picking a suggestion FILLS THE FIELD. It does not write: the line that
     // goes into a file which runs at every login is one the user has read
     // first, and that is also the answer to a command line that might carry a
-    // secret -- he decides whether it is written, not the plugin.
+    // secret -- the user decides whether it is written, not the plugin.
     function autostartUseCandidate(command) {
         root.autostartNewCommand = String(command || "")
         root.autostartFromWindowOpen = false
@@ -370,7 +370,7 @@ Panel {
 
     // Open the inline change editor on one row, closing whichever was open.
     // The command it starts from is the one the reader took OUT of the line,
-    // not the raw line: what the user edits is what he sees.
+    // not the raw line: what the user edits is what is on screen.
     // FOCUS FIRST, THEN HIDE, and this is not bookkeeping bolted on beside the
     // real thing -- it is what the real thing was waiting for.
     //
@@ -1058,9 +1058,9 @@ Panel {
                                 // suggestions with the SOURCE named on every
                                 // one of them. A window has a class, not a
                                 // command, so this is a choice and not a
-                                // mapping: three of his windows are three
-                                // windows of one nimbus process, and one of
-                                // them reports a mount path that will not
+                                // mapping: three windows of one browser
+                                // process share one command line, and one
+                                // reports a mount path that will not
                                 // exist after a restart. Picking fills the
                                 // field; the write is still the [Add] button.
                                 Column {

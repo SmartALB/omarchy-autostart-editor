@@ -33,7 +33,7 @@ MAX_WINDOWS=500
 # written even if it were offered, and a TRUNCATED one is worse than none: it
 # looks like a command and is not one. So past the cap the field is empty and
 # the window says it has no offer, rather than offering half a nimbus line.
-# (Measured on his session: the nimbus line is 452 characters.)
+# (Measured on a real session: a browser --app line reached 452 characters.)
 MAX_COMMAND_CHARS=500
 # Only the basename of argv 0 is needed for the .desktop-by-binary match, and
 # that stays available even when the whole line is past the cap.
@@ -113,7 +113,7 @@ cmd_list_json() {
           })
     ' <<<"$clients")"
 
-    # The command line per window, resolved once per DISTINCT pid: his three
+    # The command line per window, resolved once per DISTINCT pid: three
     # nimbus windows are three windows of one process, and the whole reason
     # this is a list of suggestions rather than an automatic mapping.
     local pairs

@@ -1711,7 +1711,7 @@ fi
 # 40 -- OPENING THE LIST READS THE APPLICATIONS TOO. Without that read the
 #       .desktop routes are dead and every window offers nothing but its
 #       /proc line -- which is precisely the automatic mapping this task
-#       exists not to be. Measured against a real session: the Webmail window
+#       exists not to be. Measured against a real session: the webmail window
 #       has NO suggestion at all without the application list.
 toggle_body="$(fn_body autostartFromWindowToggle <<<"$stripped_panel")"
 if [[ -z "$toggle_body" ]]; then

@@ -641,10 +641,10 @@ QtObject {
             // Finding 3 of the task 18 review, and it GATED the writer: a rule
             // inside `--[[ ... ]]` came back editable:true, so changing it would
             // have rewritten a line the user had deliberately switched off and
-            // removing it would have deleted a line he was keeping. The line
+            // removing it would have deleted a line the owner was keeping. The line
             // number and the raw text were always right, so no neighbour was
             // ever at risk -- but the entry itself should never have been
-            // offered. Neither his files nor Omarchy's default tree contains a
+            // offered. Neither the fixture nor Omarchy's default tree contains a
             // long bracket, so every fixture here is constructed.
             var blockCommented = Model.parseAutostartLua(
                 "o.launch_on_start(\"one\")\n--[[\no.launch_on_start(\"two\")\n]]\n"
@@ -729,7 +729,7 @@ QtObject {
                   Model.oneLineDifference(AUTOSTART_TEXT, changed.text), "changed:4");
             check("autostart change: the line count is unchanged",
                   changed.text.split("\n").length, AUTOSTART_TEXT.split("\n").length);
-            check("autostart change: his German comment on line 3 is untouched",
+            check("autostart change: the German comment on line 3 is untouched",
                   changed.text.split("\n")[2], "-- Dienstliche Kommunikation");
 
             // --- remove: exactly the line named, no other ---------------------
@@ -752,9 +752,9 @@ QtObject {
             check("autostart remove: the file still ends with exactly one newline",
                   /[^\n]\n$/.test(removed.text), true);
 
-            // --- THE NON-EDITABLE ENTRY, which is his Chat line -----------
+            // --- THE NON-EDITABLE ENTRY, which is the nested webapp line ---
             //
-            // Line 8 of his file:
+            // Line 8 of the fixture:
             //   o.exec_on_start(o.launch_webapp_sole("Chat", "https://..."))
             // The plugin SHOWS it and does not touch it. Neither operation may
             // reach it, and neither may return any text at all -- a refusal that
@@ -1026,10 +1026,10 @@ QtObject {
             // here: the AppImage mount path, the three windows of one nimbus
             // process, and the .desktop file with the right command and no
             // StartupWMClass.
-            var hisApps = [
+            var realApps = [
                 { name: "Termpane", exec: "termpane", wmclass: "Termpane", icon: "" },
-                // Sorts BEFORE Webmail (Nimbus) in his real list, and that is
-                // load-bearing: without the host-token ordering the Webmail
+                // Sorts BEFORE Webmail (Nimbus) in the real list, and that is
+                // load-bearing: without the host-token ordering the webmail
                 // window offers YouTube Music first.
                 { name: "YouTube Music",
                   exec: "/opt/nimbus-bin/nimbus --profile-directory=Default --app-id=cinhimbnkkaeohfgghhklpknlkffjgod",
@@ -1043,16 +1043,16 @@ QtObject {
                 { name: "Vaultkey", exec: "vaultkey %f", wmclass: "vaultkey", icon: "" },
                 { name: "Chatterbox", exec: "Chatterbox -- %U", wmclass: "ChatterboxDesktop", icon: "" },
                 { name: "Signal", exec: "msgbox-desktop -- %u", wmclass: "signal", icon: "" },
-                { name: "Microsoft Teams for Linux",
+                { name: "Notes App",
                   exec: "notes-app --gtk-version=3 %U", wmclass: "", icon: "" },
                 { name: "Chat", exec: "omarchy-launch-webapp https://chat.example.org/",
                   wmclass: "", icon: "" }
             ];
 
-            // His ~/.config/hypr/autostart.lua, verbatim. notes-app is
+            // A REAL hand-maintained autostart.lua, verbatim. notes-app is
             // in it and signal is not -- which is what the already-present
             // warnings are judged against.
-            var hisAutostart =
+            var realAutostart =
                 "-- Autostart. Portiert aus autostart.conf.\n"
               + "\n"
               + "-- Dienstliche Kommunikation\n"
@@ -1071,7 +1071,7 @@ QtObject {
               + "\n"
               + "-- Modelbox (am 28.08.2026 nach dem Upgrade neu installiert).\n"
               + "o.launch_on_start(\"modelbox\")\n";
-            var hisEntries = Model.parseAutostartLua(hisAutostart, "autostart.lua");
+            var realEntries = Model.parseAutostartLua(realAutostart, "autostart.lua");
 
             // The command line all three nimbus windows report, verbatim from
             // /proc/1866/cmdline. It ENDS in --app=https://mail.example.com/
@@ -1089,7 +1089,7 @@ QtObject {
                 return Model.autostartCandidatesForWindow(
                     { "class": windowClass, title: "t", command: command,
                       program: program, address: "0x1", workspace: "1", monitor: "DP-4" },
-                    hisApps, hisEntries);
+                    realApps, realEntries);
             }
             // The whole ordered list as one comparable string: source, the
             // Name= it came from, the command, and every warning. Order is
@@ -1104,9 +1104,9 @@ QtObject {
                 return out.join("  ,  ");
             }
 
-            check("candidates fixture: his autostart.lua reads back six editable entries",
-                  hisEntries.length + "/" + Model.hyprEditableCount(
-                      [{ name: "autostart.lua", entries: hisEntries }]), "7/6");
+            check("candidates fixture: the autostart.lua reads back six editable entries",
+                  realEntries.length + "/" + Model.hyprEditableCount(
+                      [{ name: "autostart.lua", entries: realEntries }]), "7/6");
 
             // --- one assertion per row of the measured table ------------------
             check("candidates row: org.example.chatterbox",
@@ -1120,7 +1120,7 @@ QtObject {
             check("candidates row: notes-app",
                   rendered(forWindow("notes-app", "/opt/notes-app/notes-app",
                                      "notes-app")),
-                  "desktop-binary|Microsoft Teams for Linux|notes-app --gtk-version=3"
+                  "desktop-binary|Notes App|notes-app --gtk-version=3"
                   + "|!program-already-present"
                   + "  ,  running||/opt/notes-app/notes-app|!program-already-present");
             check("candidates row: signal",
@@ -1167,7 +1167,7 @@ QtObject {
                   + "  ,  desktop-binary|Nimbus|nimbus|!already-present"
                   + "  ,  running||" + braveRunning + "|!program-already-present");
 
-            // --- THE OUTLOOK CASE, named ------------------------------------
+            // --- THE WEBMAIL CASE, named ------------------------------------
             //
             // A .desktop file with NO StartupWMClass whose Exec starts with
             // the same program as the running window. This is the only route
@@ -1192,7 +1192,7 @@ QtObject {
                       return n;
                   })(), 0);
             check("webmail case: the desktop entry it comes from really has no StartupWMClass",
-                  hisApps[2].name + "/" + hisApps[2].wmclass, "Webmail (Nimbus)/");
+                  realApps[2].name + "/" + realApps[2].wmclass, "Webmail (Nimbus)/");
             check("webmail case: the host token out of the window class",
                   Model.classHostToken("nimbus-mail.example.com__mail_-Default"),
                   "mail.example.com");
@@ -1209,7 +1209,7 @@ QtObject {
                          Model.classHostToken("nimbus-mail.example.com__mail_-Default")) >= 0,
                   true);
             check("webmail case: and the runner-up does NOT carry that token",
-                  hisApps[1].exec.indexOf("mail.example.com"), -1);
+                  realApps[1].exec.indexOf("mail.example.com"), -1);
 
             // --- THE LM STUDIO CASE, named ----------------------------------
             //
@@ -1248,8 +1248,8 @@ QtObject {
             check("lm studio case: a mount-like word that is not a path segment is not caught",
                   Model.commandIsUnstablePath("nimbus --mount_point=/x"), false);
 
-            // --- already-present, against his real file ----------------------
-            check("already-present: notes-app is in his autostart.lua",
+            // --- already-present, against the real fixture ------------------
+            check("already-present: notes-app is in the fixture's autostart.lua",
                   forWindow("notes-app", "/opt/notes-app/notes-app",
                             "notes-app")[0].warning, "program-already-present");
             check("already-present: and signal is not",
@@ -1261,23 +1261,23 @@ QtObject {
             check("already-present: nothing is warned about with no file to compare against",
                   Model.autostartCandidatesForWindow(
                       { "class": "notes-app", command: "notes-app", program: "notes-app" },
-                      hisApps, [])[0].warning, "");
+                      realApps, [])[0].warning, "");
             check("already-present: the nested webapp line carries no command, so it warns nothing",
                   Model.autostartCandidatesForWindow(
                       { "class": "x", command: "omarchy-launch-webapp https://chat.example.org/",
                         program: "omarchy-launch-webapp" },
-                      hisApps, hisEntries)[0].warning, "");
+                      realApps, realEntries)[0].warning, "");
             check("already-present: spacing does not make a command a different one",
                   Model.autostartCandidatesForWindow(
                       { "class": "x", command: "nimbus   --app=https://mail.example.com/mail/",
                         program: "nimbus" },
-                      [], hisEntries)[0].warning, "already-present");
+                      [], realEntries)[0].warning, "already-present");
 
             // --- three windows, one command line ----------------------------
             //
             // Three windows of one nimbus process are THREE entries with three
             // different answers, not one. The classes differ, so the lists
-            // differ -- and that is the only thing that tells the Webmail
+            // differ -- and that is the only thing that tells the webmail
             // window from the browser window at all.
             var braveWindows = [
                 forWindow("nimbus-browser", braveRunning, "nimbus"),
@@ -1497,7 +1497,7 @@ QtObject {
                   Model.candidateWarningText("unstable-path").indexOf("without a path") >= 0, true);
             check("candidate wording: the running source says it is measured, not packaged",
                   Model.candidateSourceText("running").indexOf("running right now") >= 0, true);
-            check("candidate wording: both empty reasons tell him to type it by hand",
+            check("candidate wording: both empty reasons say to type it by hand",
                   (Model.candidateReasonText("no-command-line").indexOf("by hand") >= 0)
                   && (Model.candidateReasonText("command-too-long").indexOf("by hand") >= 0), true);
 

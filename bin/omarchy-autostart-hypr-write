@@ -2,8 +2,8 @@
 # Writes ~/.config/hypr/autostart.lua, and nothing else.
 #
 # THE FILE THIS REPLACES RUNS AT EVERY LOGIN. A malformed autostart.lua means
-# the user's programs do not start and Hyprland reports a Lua error when he
-# logs in. Every safeguard here exists for that one sentence.
+# the user's programs do not start and Hyprland reports a Lua error at the
+# next login. Every safeguard here exists for that one sentence.
 #
 # It does NOTHING with the content -- it gets that finished, on stdin, from
 # Model.autostartApply(), which is a pure function and therefore the one place
@@ -322,8 +322,8 @@ cmd_write() {
     local diagnostic
     if ! diagnostic="$("$luac" -p "$STAGEFILE" 2>&1)"; then
         # The staged file's name is scratch, and putting it in front of the
-        # user would name a file that no longer exists by the time he reads
-        # the message. Both spellings have to go: Lua abbreviates a long chunk
+        # user would name a file that no longer exists by the time the
+        # message is read. Both spellings have to go: Lua abbreviates a long chunk
         # name to its TAIL with a leading "..." (measured -- a 90-character
         # staged path came back as "...e9e/scratchpad/.../.autostart.lua.Rwdrdn"),
         # so a plain substitution of the full path misses it. Matching the
@@ -343,7 +343,7 @@ cmd_write() {
     #
     # A failed backup is a refusal, not a warning, and that has not changed:
     # writing without one would leave the user with no way to undo a change to
-    # a file that decides whether his session starts what it should. A name
+    # a file that decides whether the session starts what it should. A name
     # that cannot be found free counts as a failed backup for the same reason.
     local backup_base backup_path
     backup_base="$(backup_name_for_now)" \

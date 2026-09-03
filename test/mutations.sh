@@ -407,7 +407,7 @@ probe "autostart: remove deletes one line, not two" "$QML_SUITE" Model.js \
 probe "autostart: the file keeps its single trailing newline" "$QML_SUITE" Model.js \
   's|return lines.join("\\n") + "\\n";|return lines.join("\\n");|'
 
-# THE NON-EDITABLE ENTRY, which in the user's file is the nested Chat line.
+# THE NON-EDITABLE ENTRY, which in the fixture is the nested webapp line.
 # With this check gone, the plugin would rewrite a line it cannot represent.
 probe "autostart: a non-editable entry cannot be changed or removed" "$QML_SUITE" Model.js \
   's|^    if (found.editable !== true) return { ok: false, error: "entry-not-editable" };$|    if (false) return { ok: false, error: "entry-not-editable" };|'
@@ -598,7 +598,7 @@ probe "panel: the change editor is closed in exactly one place" "$STRUCT_SUITE" 
 # --- FROM A RUNNING PROGRAM TO AN AUTOSTART COMMAND -------------------------
 #
 # Every assurance this task added, handed the input it was written to catch.
-# The ranking probe is the one that matters most: without it his Webmail
+# The ranking probe is the one that matters most: without it the webmail
 # window offered YouTube Music first, and the suite said nothing.
 
 # --- the running-programs picker is off, and off means unreachable ---------

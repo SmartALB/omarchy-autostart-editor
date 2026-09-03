@@ -805,8 +805,8 @@ function hyprEntryText(entry) {
 
 // Every character a command may contain, expressed as the ones it may not.
 //
-// THIS FILE IS READ BY A PERSON: his autostart.lua is hand-maintained and
-// carries his own German section comments, and
+// THIS FILE IS READ BY A PERSON: autostart.lua is hand-maintained, often
+// carries the owner's own section comments, and
 // `o.launch_on_start(string.char(98,114,97,118,101))` in it would be unusable
 // even though it is safe -- which is what the removed `eval` route wrote,
 // because nothing there was ever read by a person. So the writer emits a real
@@ -864,7 +864,7 @@ function luaQuote(s) {
     return QUOTE + out + QUOTE;
 }
 
-// The one line shape this writer emits, in the style of his own file:
+// The one line shape this writer emits, in the style the file already uses:
 //   o.launch_on_start("<command>")
 // No indentation, no trailing semicolon, no comment -- exactly what
 // parseAutostartLua reads back as an editable entry with launcher
@@ -927,8 +927,9 @@ function autostartWrittenText() {
 }
 
 // The content lines of a file. `hyprLines` splits on "\n", so a file that
-// ends with a newline -- his does, and it is the convention this writer
-// keeps -- yields a trailing empty element that is NOT a line. Dropping
+// ends with a newline -- as a hand-written Lua file does, and it is the
+// convention this writer keeps -- yields a trailing empty element that is
+// NOT a line. Dropping
 // exactly one of them is what makes "the file gained one line" mean what it
 // says, here and in oneLineDifference().
 function autostartContentLines(text) {
@@ -938,7 +939,7 @@ function autostartContentLines(text) {
 }
 
 // Content lines back to file text, always terminated by exactly one "\n" --
-// his file's convention, and no blank line at the end. An empty list gives
+// the file's own convention, and no blank line at the end. An empty list gives
 // an empty file rather than a lone newline.
 function autostartJoinLines(lines) {
     if (lines.length === 0) return "";
@@ -969,7 +970,7 @@ function autostartCommandRefusal(command) {
 //
 // Exactly one line changes. Add appends one as the LAST line -- no section
 // detection, nothing sorted into a "matching" comment block, because
-// guessing which of his German section comments a new program belongs under
+// guessing which of the file's own section comments a new program belongs under
 // is exactly the kind of surprise this design exists to avoid. Change
 // replaces the line named and no other. Remove deletes the line named and no
 // other.
@@ -1074,7 +1075,7 @@ function oneLineDifference(oldText, newText) {
 
 // --- FROM A RUNNING PROGRAM TO AN AUTOSTART COMMAND ------------------------
 //
-// A window has a CLASS, not a command. Measured on his own session, the gap
+// A window has a CLASS, not a command. Measured on a real session, the gap
 // between the two is not a rounding error, it is three distinct defects
 // waiting to be written into a file that runs at every login:
 //
@@ -1084,7 +1085,7 @@ function oneLineDifference(oldText, newText) {
 //   nimbus-browser
 //   nimbus-mail.example.com__mail_-Default
 //   nimbus-chat.example.org__-Default   ->  ONE command line, all three
-//       Three windows of one process. /proc cannot say that the Webmail
+//       Three windows of one process. /proc cannot say that the webmail
 //       window needs `nimbus --app=https://mail.example.com/mail/`; worse,
 //       the line it does report happens to END in that flag, so the plain
 //       browser window reports a command that is actively wrong for it.
@@ -1093,11 +1094,11 @@ function oneLineDifference(oldText, newText) {
 //       class-to-desktop match never finds it.
 //
 // So this produces SUGGESTIONS, ordered, each naming where it came from, and
-// nothing writes until the user has confirmed the line. The plugin does not
-// know which of these he means; only he does.
+// nothing writes until the user has confirmed the line. The plugin cannot
+// know which of these is meant; only the person at the keyboard can.
 
-// How many suggestions one window can produce. His nimbus binary alone matches
-// five .desktop files by basename, and a window that offered twenty would not
+// How many suggestions one window can produce. A browser binary alone can
+// match five .desktop files by basename, and a window that offered twenty would not
 // be a choice, it would be a wall.
 var MAX_CANDIDATES = 12;
 
@@ -1159,11 +1160,11 @@ function commandIsUnstablePath(command) {
 // contains that string, so it reorders nothing -- which is the correct
 // outcome, not a lucky one.
 // MEASURED, not assumed: the first version of this returned
-// "nimbus-mail.example.com" for his Webmail window -- the leftmost dotted
+// "nimbus-mail.example.com" for the webapp window -- the leftmost dotted
 // match swallows the browser name in front of the host, because a hostname
 // label may contain a hyphen and the regular expression cannot know that this
 // particular hyphen separates the browser from the host. That token appears in
-// no command, so it reordered nothing and the Webmail window offered YouTube
+// no command, so it reordered nothing and that window offered YouTube
 // Music first. Hence the second step: everything up to the last hyphen BEFORE
 // the first dot is dropped. A host whose own first label contains a hyphen
 // ("nimbus-web-app.example.com") loses that label too and yields
@@ -1254,7 +1255,7 @@ function candidateWarningsFor(command, entries) {
         var entry = list[i];
         // Only the entries this reader can represent carry a command at all.
         // The nested `o.exec_on_start(o.launch_webapp_sole("Chat", ...))`
-        // line in his file does not, so a Chat suggestion is NOT reported
+        // line does not, so such a suggestion is NOT reported
         // as already present -- a known blind spot of this comparison, and the
         // honest one: the alternative is to guess what that Lua helper expands
         // to and be wrong.
@@ -1280,7 +1281,7 @@ function candidateWarningsFor(command, entries) {
 // stable, and the class is a strong signal), then the .desktop files that run
 // the same program -- those whose command mentions the host in the window
 // class ahead of those that do not, which is what puts Webmail (Nimbus) at the
-// top for the Webmail window instead of YouTube Music -- and the running
+// top for the webmail window instead of YouTube Music -- and the running
 // command line last, because it is the one most likely to carry a volatile
 // path or the wrong window's flags.
 //

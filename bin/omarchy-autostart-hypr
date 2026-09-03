@@ -7,8 +7,9 @@
 # reach it in the same engine that runs the plugin; a parser in awk would be
 # a parser no suite of this project can test.
 #
-# The file belongs to the USER, is hand-maintained, and carries his own German
-# section comments and factual notes. Nothing here may alter one byte of it.
+# The file belongs to the USER, is hand-maintained, and often carries the
+# owner's own section comments and factual notes. Nothing here may alter one
+# byte of it.
 # The content is passed through verbatim so that the writer can do line surgery
 # against exactly the bytes the reader saw.
 #
