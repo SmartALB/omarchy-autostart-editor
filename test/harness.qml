@@ -1271,7 +1271,41 @@ QtObject {
                   "vaultkey");
 
             // --- the shape of the list itself -------------------------------
-            check("candidates: a .desktop matching by class AND by binary is offered once",
+            //
+            // THE DEDUPLICATION HAD NO ASSERTION AT ALL, and a mutation probe
+            // is how that was found: replacing the `if (seen[...]) continue`
+            // guard with `if (false) continue` left this whole suite green.
+            // The assertion below it -- Termpane, which matches its own
+            // .desktop by class and by binary -- cannot catch it, because the
+            // `continue` after the by-class push is what makes that one entry,
+            // not the deduplication. So the two inputs that DO produce a
+            // duplicate command are asserted by name.
+            //
+            // First: the running command line is exactly what a .desktop
+            // declares. This is the ordinary case, not a contrived one -- a
+            // program started from its launcher runs the launcher's own Exec=.
+            check("candidates: a running command equal to a .desktop command is offered once",
+                  forWindow("Termpane", "termpane", "termpane").length, 1);
+            check("candidates: and the one kept is the higher-ranked source",
+                  forWindow("Termpane", "termpane", "termpane")[0].source, "desktop-class");
+            // Second: two .desktop files declaring the same command, both
+            // matched by the running program. Nothing upstream of the
+            // deduplication can collapse these -- they are two different
+            // entries of the application list.
+            check("candidates: two .desktop files with the same command are offered once",
+                  Model.autostartCandidatesForWindow(
+                      { "class": "zzz", command: "/opt/x/myapp --x", program: "myapp" },
+                      [{ name: "One", exec: "myapp", wmclass: "aaa" },
+                       { name: "Two", exec: "myapp", wmclass: "bbb" }], []).length, 2);
+            check("candidates: and it is the first of the two that is kept",
+                  Model.autostartCandidatesForWindow(
+                      { "class": "zzz", command: "/opt/x/myapp --x", program: "myapp" },
+                      [{ name: "One", exec: "myapp", wmclass: "aaa" },
+                       { name: "Two", exec: "myapp", wmclass: "bbb" }], [])[0].name, "One");
+            // A .desktop matched by class is not ALSO offered as a binary
+            // match: the loop takes its `continue` after the by-class push.
+            // Two entries here, and the second is the running line.
+            check("candidates: a .desktop matching by class is not offered a second time by binary",
                   forWindow("Termpane", "/usr/bin/termpane", "termpane").length, 2);
             check("candidates: the running line is offered last",
                   forWindow("Termpane", "/usr/bin/termpane", "termpane")[1].source, "running");

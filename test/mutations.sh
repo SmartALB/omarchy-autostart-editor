@@ -164,6 +164,19 @@ probe "windows: the window count cap" "$SHELL_SUITE" bin/omarchy-autostart-windo
 
 # --- the QML files, structurally -------------------------------------------
 
+# --- the removed half cannot grow back --------------------------------------
+#
+# Both of these guard an ABSENCE, and an absence check has to be probed or it
+# proves nothing: the check that stood in this place required every
+# rule-construction site in Model.js to mention luaBytes(), and once there were
+# no such sites it passed over an empty set for a whole round.
+
+probe "removal: a rule construction cannot come back into Model.js" "$STRUCT_SUITE" Model.js \
+  's|^function luaQuote(s) {$|function luaQuote(s) {\n    if (false) return "hl.window_rule({ x = 1 })";|'
+
+probe "removal: an eval verb cannot come back into Model.js" "$STRUCT_SUITE" Model.js \
+  's|^function luaQuote(s) {$|function luaQuote(s) {\n    if (false) return "eval";|'
+
 probe "runners: bash named by absolute path" "$STRUCT_SUITE" Runners.qml \
   's|"/usr/bin/bash"|"bash"|'
 
@@ -455,6 +468,11 @@ probe "candidates: the .desktop matched on the running program is offered at all
 probe "candidates: the running command line is offered last" "$QML_SUITE" Model.js \
   's|        ordered.push({ command: running, source: "running", name: "" });|        true;|'
 
+# HELD BY NOTHING UNTIL THIS PROBE WAS BELIEVED. It reported green for two
+# rounds: the assertion meant to hold it -- Termpane, matched by class and by
+# binary -- is made one entry by the loop's own `continue`, not by this guard.
+# Two assertions naming the inputs that really do produce a duplicate command
+# were added to test/harness.qml; this now turns them red.
 probe "candidates: one command is offered once" "$QML_SUITE" Model.js \
   's|        if (seen\[candidate.command\]) continue;|        if (false) continue;|'
 
@@ -484,8 +502,15 @@ probe "windows: the program survives as a basename, not a whole path" "$SHELL_SU
 probe "windows: the control characters in a command line are squashed" "$SHELL_SUITE" bin/omarchy-autostart-windows \
   '/^        def clean:/s|"\[\[:cntrl:\]\]"|"[[:cntrl:]]zz"|'
 
+# The pattern is a bracket expression around the backslash -- "[\]t" is one
+# literal backslash followed by "t" -- because a backslash inside a sed regex
+# followed by a digit or a letter is not a literal backslash. What stood here
+# needed two characters before each letter where the file has one, so it
+# matched nothing and this probe reported "the mutation changed nothing" for
+# two rounds. The pid and the command line still travel to jq as one
+# tab-separated line, so the guard it points at is still real.
 probe "windows: a tab in a command line cannot shift a field" "$SHELL_SUITE" bin/omarchy-autostart-windows \
-  "s|tr '..0..n..t..r'|tr '\\\\\\\\0\\\\\\\\n\\\\\\\\r'|"
+  '/ tr /s|[\]t||'
 
 # "#" as the delimiter, not "|": the line under mutation is a jq pipeline and
 # contains the character sed would otherwise read as the end of the pattern.
@@ -531,8 +556,13 @@ probe "guard: an assertion in the file that never runs" "$QML_SUITE" test/harnes
 
 # run-tests.sh loses one invocation line. The suite's own invocation guard
 # (test/lib.sh) must name the function that stopped running.
+#
+# The line named here has to be one that EXISTS: this probe pointed at
+# test_marker_release_removes_the_marker_file, which went with the start
+# marker, and a probe that deletes nothing reports "the mutation changed
+# nothing" rather than proving the guard works.
 probe "guard: a test function that is defined but never invoked" "$SHELL_SUITE" test/run-tests.sh \
-  '/^test_marker_release_removes_the_marker_file$/d'
+  '/^test_hypr_read_changes_nothing$/d'
 
 printf '\nmutation probes: total=%d failed=%d\n' "$run" "$failed"
 if (( skipped > 0 )); then
