@@ -617,7 +617,7 @@ test_hypr_read_answers_even_when_the_file_does_not_exist() {
 test_hypr_read_delivers_the_bytes_unchanged() {
     setup_sandbox
     write_real_files
-    printf '%s\n' 'o.launch_on_start("nimbus --app=https://web\\.chat\\.com/")' \
+    printf '%s\n' 'o.launch_on_start("nimbus --app=https://chat\\.example\\.org/")' \
         >> "$(hypr_dir)/autostart.lua"
     local out; out="$("$HYPR_BIN" read)"
     jq -j '.files[0].content' <<<"$out" > "$SANDBOX/autostart.lua.delivered"
@@ -625,7 +625,7 @@ test_hypr_read_delivers_the_bytes_unchanged() {
               "$(cmp -s "$(hypr_dir)/autostart.lua" "$SANDBOX/autostart.lua.delivered" \
                  && echo identical || echo DIFFERS)" "identical"
     assert_eq "hypr: the doubled backslash survives the crossing" \
-              "$(jq -r '.files[0].content' <<<"$out" | grep -c 'web\\\\\.chat')" "1"
+              "$(jq -r '.files[0].content' <<<"$out" | grep -c 'chat\\\\\.example')" "1"
     assert_eq "hypr: the present file reports a real mtime" \
               "$(jq -r '[.files[] | select(.mtime > 0)] | length' <<<"$out")" "1"
     teardown_sandbox
