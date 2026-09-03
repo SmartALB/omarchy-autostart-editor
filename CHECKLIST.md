@@ -64,33 +64,31 @@ once the file is present and is a real PNG; it fails only if the obligation
 disappears from both places at once. The second is the coupling in step 5 --
 the README must reference the image exactly when the image exists.
 
-### A2. Enable the plugin in `shell.json`, and confirm the widget came up
+### A2. Install with Omarchy's own command, and confirm the widget came up
 
-**Installing is not sufficient, and the failure is silent.** A third-party
-plugin counts as enabled only when its id is referenced from
-`~/.config/omarchy/shell.json`; only first-party shell infrastructure is
-implicitly enabled (`shell.qml:263-266`, `PluginRegistry.isEnabled`). Until
-that reference exists, the bar shows nothing and nothing complains: the plugin
-installs and `omarchy plugin validate` exits 0.
+**Omarchy installs and enables plugins itself.** This step used to describe
+editing `~/.config/omarchy/shell.json` by hand with two commands to verify it;
+that was work the platform already does, and describing it was my error:
 
-**One entry is enough, and it is the bar entry.** `findEntryLocation`
-(`PluginRegistry.qml:206-224`) accepts the id in `bar.id`, in any
-`bar.layout.*` section, or in the top-level `plugins[]` array, and
-`isEnabled()` for a third-party plugin is exactly that predicate. So adding
-the widget to the bar -- through Omarchy's own plugin screen, or by hand:
-
-```json
-{ "bar": { "layout": { "right": [ { "id": "smartalb.autostart" } ] } } }
+```bash
+omarchy plugin add https://github.com/SmartALB/omarchy-autostart-editor.git --enable
 ```
 
-is the whole of it. There is no second switch, and no service half any more.
+`omarchy-plugin-add` clones into `~/.config/omarchy/plugins/<id>`, and
+`--enable` runs `omarchy-plugin-enable`, which writes the bar placement -- it
+asks which section and falls back to `barWidget.defaultSection`, which this
+manifest sets to `right`. **Nothing in `shell.json` needs touching.**
 
-**Do not also add it under `plugins[]`.** A second reference is not needed and
-is not harmless bookkeeping: `setEnabled(false)` removes only the first
-location it finds, so switching the plugin off through the interface would
-leave the other entry behind and the plugin would stay enabled.
+Two failure modes worth knowing rather than rediscovering, both measured:
 
-Verify, after `omarchy-restart-shell`:
+- **Over SSH, `--enable` needs `--yes`.** It asks for the section
+  interactively, and with no terminal attached it needs `--yes` to take the
+  default.
+- **`omarchy plugin list` and `omarchy plugin enable` need a graphical
+  session.** Outside one they fail with `OMARCHY_PATH is not set`, so
+  installing over SSH works but verifying it there does not.
+
+Verify, in a graphical session, after `omarchy-restart-shell`:
 
 ```bash
 omarchy plugin list | grep smartalb.autostart
@@ -99,6 +97,18 @@ omarchy plugin list | grep smartalb.autostart
 The row must read `enabled`, and its KINDS column must show `bar-widget` --
 and **nothing else**. A row that also lists `service` means the manifest grew
 a kind back whose `Service.qml` does not exist.
+
+**Why enabling matters at all**, since the command now does it for you: a
+third-party plugin counts as enabled only when its id is referenced from
+`shell.json` (`shell.qml:263-266`, `PluginRegistry.isEnabled`), and until it
+is, the bar shows nothing and nothing complains -- the plugin installs and
+`omarchy plugin validate` exits 0. `findEntryLocation`
+(`PluginRegistry.qml:206-224`) accepts the id in `bar.id`, in any
+`bar.layout.*` section, or in a top-level `plugins[]` array. One reference is
+enough, and a second is not harmless bookkeeping: `setEnabled(false)` removes
+only the first location it finds, so switching the plugin off would leave the
+other entry behind and it would stay enabled. `omarchy plugin enable` writes
+one; do not add another by hand.
 
 ### A3. Run the two checks this repository cannot run for you
 
@@ -163,17 +173,21 @@ five writes is five, and this list has more steps than that.
    an empty footer means the panel is not the build you think it is. The
    number is not written in `Panel.qml`; it comes from `Model.VERSION`, which
    a shell assertion pins to the manifest in both directions.
-3. Every entry of your file is listed, each with its line number. Compare
+3. Every entry of your file is listed, one under another, **with no line
+   numbers in front** -- the user asked for those to go. Compare the list
    against your own editor:
 
    ```bash
-   nl -ba ~/.config/hypr/autostart.lua
+   grep -nE 'o\.(launch_on_start|exec_on_start)' ~/.config/hypr/autostart.lua
    ```
 
-   Every number the panel shows must be the line that call is on. **This is
-   the claim every write rests on** -- the automated round-trip proof in
-   `test/harness.qml` checks it against the file contents, but only your eyes
-   can check it against the panel.
+   Same entries, same order, nothing missing and nothing invented. The line
+   numbers are still what the writer targets, so the claim every write rests
+   on has not gone anywhere -- it is just no longer visible: the round-trip
+   proof in `test/harness.qml` checks `raw` against the line at its number,
+   and step 6 below is where your eyes confirm a write landed on the right
+   line.
+   An entry that runs through `o.exec_on_start` is marked `(shell)`.
 4. A form the reader cannot take apart -- a nested helper such as
    `o.exec_on_start(o.launch_webapp_sole("Chat", "..."))` -- is shown
    **verbatim**, marked *not editable*, with a sentence saying why, and has no
@@ -196,33 +210,50 @@ five writes is five, and this list has more steps than that.
 7. **Add from your installed applications**: the picker lists real application
    names, and choosing one **fills the field** with its command rather than
    writing it. Nothing reaches the file until you press the add control.
-8. **Add from a running program**: the picker lists your open windows. Unfold
-   one and confirm the suggestions are ordered sensibly for that window, that
-   each names where it came from, and that a command under `/tmp`, `/run` or
-   an AppImage mount path carries the warning that it will not survive a
-   restart. Picking one fills the field and writes nothing.
-9. A window with no command to offer is **shown anyway**, with the reason.
-10. **Change** one entry: exactly that line differs afterwards, and the
+8. **There must be no "Running programs" button.** The feature is hidden by
+   request -- "das ist noch nicht so weit" -- behind
+   `Model.RUNNING_PROGRAMS_ENABLED`, which is `false`. Two things to check,
+   because hiding is where this goes wrong:
+   - the Add row shows the command field, **Applications** and **Add**, and
+     nothing else, with the field using the width the missing button freed;
+   - **nothing is spawned for it.** With the panel open and closed a few
+     times, no `omarchy-autostart-windows` process should ever appear:
+
+     ```bash
+     pgrep -af omarchy-autostart-windows
+     ```
+
+     Silence. A hidden picker that still starts a process on every open is
+     the worst of both, which is why the route refuses before it reads and a
+     structural check requires the guard to come first.
+
+   *When it is switched back on*, the steps it needs are: the picker lists the
+   open windows; unfolding one shows suggestions ordered sensibly for that
+   window, each naming where it came from, with a warning on any command under
+   `/tmp`, `/run` or an AppImage mount path; picking one fills the field and
+   writes nothing; and a window with no command to offer is shown anyway, with
+   the reason. Every one of those is still covered by `test/harness.qml`.
+9. **Change** one entry: exactly that line differs afterwards, and the
     editor's field gives focus back when it closes -- press `Escape` after
     closing it and confirm the panel still closes. (A hidden field that keeps
     focus swallows `Escape` for the rest of the session; that defect has been
     measured in this project before.)
-11. **Remove** one entry: exactly that line is gone, and the comment above it
+10. **Remove** one entry: exactly that line is gone, and the comment above it
     is still there.
-12. Nothing was started and nothing was reloaded. The message after a write
+11. Nothing was started and nothing was reloaded. The message after a write
     says so; confirm no new window appeared and that your session is
     unchanged.
-13. Make the file unwritable by a second account (`chmod 664`) and try to
+12. Make the file unwritable by a second account (`chmod 664`) and try to
     write: the panel must refuse, name that reason, and change nothing.
-14. Edit `autostart.lua` in your editor while the panel is open, then try to
+13. Edit `autostart.lua` in your editor while the panel is open, then try to
     write from the panel: it must refuse as stale and tell you to reopen the
     panel. **This is the guard that stops a line number from a stale read
     hitting a different line.**
-15. Point `autostart.lua` at a symlink and try to write: refused, with that
+14. Point `autostart.lua` at a symlink and try to write: refused, with that
     reason.
-16. Log out and back in: your entries start, each exactly once, and the file
+15. Log out and back in: your entries start, each exactly once, and the file
     the plugin wrote is what did it.
-17. **Install over the previous version and check what is NOT there.** This
+16. **Install over the previous version and check what is NOT there.** This
     is the one step written from a defect that reached the user's machine:
     `install` used to copy its file list over whatever was at the target, so
     `Service.qml`, `bin/omarchy-autostart-config` and
@@ -238,7 +269,7 @@ five writes is five, and this list has more steps than that.
     The plugin directory must hold twelve entries and nothing else: the four
     documents, the four QML/JS files, and `bin/` with its four scripts. A
     `Service.qml` there is the defect back.
-18. `./uninstall`, then check: the plugin directory is gone and
+17. `./uninstall`, then check: the plugin directory is gone and
     `~/.config/hypr/autostart.lua` is byte for byte what it was.
 
 ---

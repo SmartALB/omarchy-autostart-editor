@@ -58,6 +58,29 @@
 // test_install_removes_what_the_plugin_no_longer_ships.
 var VERSION        = "1.0.0";
 
+// THE RUNNING-PROGRAMS PICKER, OFF BY REQUEST. One flag, one place, read
+// exactly once in Panel.qml -- the shape Model.WRITE_PATH_ENABLED used for the
+// cutover, and for the same reason: a feature switched off in several places
+// is a feature nobody can switch back on with confidence.
+//
+// The user asked for it to be HIDDEN, not removed -- "das ist noch nicht so
+// weit" -- so nothing is deleted: bin/omarchy-autostart-windows,
+// autostartCandidatesForWindow and every assertion over the ranking, the
+// unstable-path warning and the already-present check all stay exactly where
+// they are. Turning this to true is the whole of bringing it back.
+//
+// WHAT IT GATES is the panel's "Running programs" button and the route behind
+// it. TWO USES OF ONE READ, deliberately, and the second is the one that
+// matters: this project's own rule -- written into test/qml-structure.sh when
+// the cutover was checked -- is that a hidden control is NOT a closed route,
+// because it has already shipped one gate that read as armed and was inert.
+// So the route returns early as well, and a structural check requires the
+// guard to come before the reads rather than beside them.
+//
+// WHAT STAYS REACHABLE while it is off: the installed-applications picker and
+// typing a command by hand. Those are the two ways to add an entry now.
+var RUNNING_PROGRAMS_ENABLED = false;
+
 var MAX_NAME       = 100;
 var MAX_COMMAND    = 500;
 
@@ -728,29 +751,38 @@ function hyprHeaderText(sections) {
     return text;
 }
 
-// One entry as one line of text. The line number comes first because it is
-// the thing that makes the entry findable in the user's own editor. A
-// non-editable entry is shown by its RAW line and nothing else -- there is
-// no reading of it to offer, and inventing one is the failure this whole
-// task exists to avoid.
+// One entry as one line of text. A non-editable entry is shown by its RAW
+// line and nothing else -- there is no reading of it to offer, and inventing
+// one is the failure this whole task exists to avoid.
+//
+// NO LINE NUMBER. Every return path used to begin with "<n>: ", and the
+// entries are simply listed one under another now. The number carried
+// bookkeeping rather than information: the panel is a list of what starts
+// with the session, not a concordance of a file the user can open themselves.
+//
+// THE NUMBER IS STILL IN THE DATA, and nothing about that changed. It is what
+// autostartApply targets, what the panel's autostartEditLine keys on, and
+// what oneLineDifference proves a write touched exactly one of. Only the
+// DISPLAY dropped it, and no assertion about the surgery reads the displayed
+// text: the round-trip proof compares `raw` against the input line, and
+// lineNumbersOf pins the numbers themselves.
+//
+// The two things that are NOT numbers stay, because they carry information a
+// reader cannot get otherwise: the "(shell)" marker, which says an entry runs
+// through o.exec_on_start rather than the uwsm-app launcher, and -- for a
+// non-editable entry -- the raw line, which is the only honest thing to show
+// for a form this reader cannot take apart.
 function hyprEntryText(entry) {
     var e = entry || {};
-    // `prefix`, deliberately not the obvious short word for the front of a
-    // line: test/qml-structure.sh check 1 scans this file for PATH-resolved
-    // tool names on a word boundary, and one of the tools it names is the
-    // one that word would collide with. A local variable is free to be
-    // called something else; a structural check that has to be loosened for
-    // a variable name is not.
-    var prefix = String(e.line || 0) + ": ";
-    if (!e.editable) return prefix + String(e.raw === undefined ? "" : e.raw);
+    if (!e.editable) return String(e.raw === undefined ? "" : e.raw);
     if (e.kind === "autostart") {
-        return prefix + String(e.command) + (e.launcher === "uwsm-app" ? "" : "  (shell)");
+        return String(e.command) + (e.launcher === "uwsm-app" ? "" : "  (shell)");
     }
     // A kind this function does not know falls through to the raw line, which
     // is the same answer a non-editable entry gets: the line as it stands,
     // never an invention. The "window" and "workspace" branches that stood
     // here are gone with their parsers.
-    return prefix + String(e.raw === undefined ? "" : e.raw);
+    return String(e.raw === undefined ? "" : e.raw);
 }
 
 // ==========================================================================

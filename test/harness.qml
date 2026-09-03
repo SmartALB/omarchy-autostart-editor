@@ -151,6 +151,24 @@ QtObject {
             check("envelopeText: the writer's no-lua-compiler names the package to install",
                   Model.envelopeText("no-lua-compiler", "").indexOf("lua51") >= 0, true);
 
+            // --- the running-programs picker, off by request --------------------
+            //
+            // Panel.qml reads this and nothing here can execute Panel.qml, so
+            // what a test CAN say is that the flag exists in the namespace and
+            // is off. That it is actually consulted, and that the route
+            // refuses BEFORE it reads anything, is test/qml-structure.sh.
+            //
+            // Every assertion over autostartCandidatesForWindow below stays
+            // exactly as it was: the feature is hidden, not removed, and those
+            // are the reason it will be quick to bring back.
+            check("running programs: the picker is off",
+                  Model.RUNNING_PROGRAMS_ENABLED, false);
+            check("running programs: but the model behind it still answers",
+                  Model.autostartCandidatesForWindow(
+                      { "class": "Termpane", command: "termpane", program: "termpane" },
+                      [{ name: "Termpane", exec: "termpane", wmclass: "Termpane" }],
+                      []).length, 1);
+
             // --- versionText ---------------------------------------------------
             //
             // The panel's footer. The shell suite pins Model.VERSION to
@@ -449,11 +467,37 @@ QtObject {
                   Model.hyprHeaderText(Model.parseHyprFiles(undefined))
                        .indexOf("No file was read") >= 0, true);
 
-            check("hypr entry text: the line number comes first",
-                  Model.hyprEntryText(autostartEntries[0]), "4: notes-app");
+            // MOVED, NOT LOOSENED. These two were "4: notes-app" and
+            // "8: " + raw; the display carries no line number any more, so
+            // both are pinned to the new whole string by equality rather than
+            // relaxed to a substring. Nothing about the SURGERY is proven
+            // here: the round-trip assertion above compares `raw` against the
+            // input line and lineNumbersOf pins the numbers, so dropping the
+            // display cost that coverage nothing.
+            check("hypr entry text: an editable entry is its command, with nothing in front",
+                  Model.hyprEntryText(autostartEntries[0]), "notes-app");
             check("hypr entry text: a non-editable entry shows its raw line and nothing invented",
-                  Model.hyprEntryText(autostartEntries[2]),
-                  "8: " + autostartEntries[2].raw);
+                  Model.hyprEntryText(autostartEntries[2]), autostartEntries[2].raw);
+            // AND THE NUMBER IS STILL THERE TO EDIT WITH. The display dropping
+            // it must not be read as the reader dropping it.
+            check("hypr entry text: the entry still carries the line the writer targets",
+                  autostartEntries[0].line, 4);
+            check("hypr entry text: and the displayed text no longer contains it",
+                  Model.hyprEntryText(autostartEntries[0]).indexOf("4"), -1);
+
+            // THE (shell) MARKER, WHICH HAD NO ASSERTION AT ALL. With the line
+            // number gone it is the only thing the display adds to a command,
+            // and it is the difference between an entry that goes through the
+            // uwsm-app launcher and one that does not -- which is exactly what
+            // a user needs to see to know why one behaves unlike the others.
+            check("hypr entry text: a shell-route entry is marked",
+                  Model.hyprEntryText(
+                      Model.parseAutostartLua("o.exec_on_start(\"echo hi\")")[0]),
+                  "echo hi  (shell)");
+            check("hypr entry text: and a launcher-route entry is not",
+                  Model.hyprEntryText(
+                      Model.parseAutostartLua("o.launch_on_start(\"nimbus\")")[0]),
+                  "nimbus");
 
             // --- the Lua string scanner ------------------------------------------
             check("luaStringAt: a plain string",

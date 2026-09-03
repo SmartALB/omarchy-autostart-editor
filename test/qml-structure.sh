@@ -1607,6 +1607,69 @@ if [[ -n "${write_body:-}" ]]; then
                           || bad "autostart write: the write path reloads and launches nothing" "$reload_hits"
 fi
 
+# --- THE RUNNING-PROGRAMS PICKER IS OFF, AND THE ROUTE IS CLOSED -----------
+#
+# The user asked for the feature to be HIDDEN, not removed, so every check
+# below this block still applies to code that is still here. What these four
+# add is that it cannot be reached while the flag is off.
+#
+# A HIDDEN CONTROL IS NOT A CLOSED ROUTE. That sentence is in this file already
+# -- it is why the deleted cutover check tested routes rather than visibility
+# -- and it is the reason the guard has to be inside the function and BEFORE
+# the reads, not only on the button.
+if grep -qE '^var RUNNING_PROGRAMS_ENABLED = false;$' Model.js; then
+  ok "running programs: Model.js has the flag, and it is off"
+else
+  bad "running programs: Model.js has the flag, and it is off" \
+      "no line 'var RUNNING_PROGRAMS_ENABLED = false;' in Model.js -- the flag is missing, renamed, or turned on"
+fi
+
+flag_reads="$(grep -cE 'Model\.RUNNING_PROGRAMS_ENABLED' <<<"$stripped_panel" || true)"
+if [[ "$flag_reads" == "1" ]]; then
+  ok "running programs: Panel.qml reads the flag exactly once"
+else
+  bad "running programs: Panel.qml reads the flag exactly once" \
+      "found $flag_reads reads of Model.RUNNING_PROGRAMS_ENABLED in the code of Panel.qml -- expected the single one in root.offersRunningPrograms"
+fi
+
+if grep -qE '^[[:space:]]*readonly property bool offersRunningPrograms:[[:space:]]*Model\.RUNNING_PROGRAMS_ENABLED[[:space:]]*$' <<<"$stripped_panel"; then
+  ok "running programs: that one read is the offersRunningPrograms property"
+else
+  bad "running programs: that one read is the offersRunningPrograms property" \
+      "no 'readonly property bool offersRunningPrograms: Model.RUNNING_PROGRAMS_ENABLED' line in the code of Panel.qml"
+fi
+
+# THE ROUTE, AND THE ORDER INSIDE IT. The guard must come before every read
+# the picker performs, or a hidden feature still spawns a process on every
+# press -- which is the worst of both. refreshWindows() has exactly one call
+# site and it is in this body, so gating this body gates the process.
+toggle_route="$(fn_body autostartFromWindowToggle <<<"$stripped_panel")"
+guard_line="$(grep -nE 'if[[:space:]]*\([[:space:]]*![[:space:]]*root\.offersRunningPrograms[[:space:]]*\)[[:space:]]*return' <<<"$toggle_route" | head -1 | cut -d: -f1)"
+read_line="$(grep -nE '(refreshWindows|startAppsRead)[[:space:]]*\(' <<<"$toggle_route" | head -1 | cut -d: -f1)"
+refresh_sites="$(grep -cE '(^|[^A-Za-z0-9_.])(root\.)?refreshWindows[[:space:]]*\(' \
+                 <<<"$(grep -v 'function[[:space:]]\+refreshWindows' <<<"$stripped_panel")" || true)"
+if [[ -z "$toggle_route" ]]; then
+  bad "running programs: the route refuses before it reads anything" \
+      "no 'function autostartFromWindowToggle(...) { ... }' block found, so every check about it would be vacuous"
+elif [[ -z "$guard_line" ]]; then
+  bad "running programs: the route refuses before it reads anything" \
+      "no 'if (!root.offersRunningPrograms) return' inside autostartFromWindowToggle -- the button is hidden but the route is open"
+elif [[ -z "$read_line" ]]; then
+  bad "running programs: the route refuses before it reads anything" \
+      "autostartFromWindowToggle reads neither the windows nor the applications, so this check cannot see what it is meant to gate"
+elif (( guard_line < read_line )); then
+  ok "running programs: the route refuses before it reads anything"
+else
+  bad "running programs: the route refuses before it reads anything" \
+      "the guard is on line $guard_line of the body and the first read on line $read_line -- a hidden feature that still spawns a process is the worst of both"
+fi
+if [[ "$refresh_sites" == "1" ]]; then
+  ok "running programs: refreshWindows has exactly one call site, so gating it is enough"
+else
+  bad "running programs: refreshWindows has exactly one call site, so gating it is enough" \
+      "found $refresh_sites call sites of refreshWindows in the code of Panel.qml -- a second one is a second route to the process"
+fi
+
 # --- ADD FROM A RUNNING PROGRAM --------------------------------------------
 #
 # A window has a class, not a command. Everything that turns one into the

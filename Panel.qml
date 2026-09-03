@@ -226,6 +226,11 @@ Panel {
     // windows with three different classes but one command line, and two
     // Termpane windows share a class outright. Keyed by class, unfolding one
     // would unfold the other.
+    // THE ONE READ of the running-programs flag. Everything that shows or
+    // reaches that feature goes through this property, so bringing it back is
+    // one edit in Model.js and nothing here.
+    readonly property bool offersRunningPrograms: Model.RUNNING_PROGRAMS_ENABLED
+
     property bool autostartFromWindowOpen: false
     property int autostartWindowRow: -1
 
@@ -276,9 +281,11 @@ Panel {
     // every `command:` occurrence in a qml file to be a call on this file's
     // own Runners instance -- which is what keeps a hand-built argv out of a
     // Process -- and an object literal with a `command:` key here would have
-    // to loosen it. Model.js set the precedent (see `prefix` in
-    // hyprEntryText): rename or reshape the local, never widen a structural
-    // check to fit it.
+    // to loosen it. The rule it follows: rename or reshape the local, never
+    // widen a structural check to fit it. (This cited a local in Model.js's
+    // hyprEntryText as the precedent; that local went with the line-number
+    // prefix, and a citation of code that no longer exists is worse than no
+    // citation.)
     function autostartOperation(action, line, commandLine) {
         var op = { action: action }
         if (line !== undefined) op.line = line
@@ -301,6 +308,13 @@ Panel {
     // second read every window would offer nothing but its /proc line -- which
     // is exactly the automatic mapping this task exists not to be.
     function autostartFromWindowToggle() {
+        // THE ROUTE, CLOSED FIRST. Hiding the button is not enough on its own
+        // -- a hidden control is not a closed route, and this plugin has
+        // already shipped a gate that read as armed and was inert. The guard
+        // is before every read below, so nothing is spawned for a feature
+        // nobody can see: refreshWindows() is this function's own call and has
+        // no other caller.
+        if (!root.offersRunningPrograms) return
         root.autostartMessage = ""
         root.autostartError = ""
         root.autostartFromWindowOpen = !root.autostartFromWindowOpen
@@ -901,12 +915,23 @@ Panel {
                                     spacing: Style.spacing.controlGap
 
                                     TextField {
+                                        // The running-programs button's width
+                                        // and its gap come off only while it
+                                        // is SHOWN: a Row lays out no
+                                        // invisible child, but implicitWidth
+                                        // still reports one, so subtracting it
+                                        // unconditionally would leave the
+                                        // field needlessly narrow with the
+                                        // feature off -- and bringing the
+                                        // feature back needs no edit here.
                                         width: Math.max(Style.space(80),
                                                         autostartAdd.width
                                                         - autostartAddButton.implicitWidth
                                                         - autostartPickButton.implicitWidth
-                                                        - autostartWindowButton.implicitWidth
-                                                        - 3 * parent.spacing)
+                                                        - (autostartWindowButton.visible
+                                                           ? autostartWindowButton.implicitWidth
+                                                             + parent.spacing : 0)
+                                                        - 2 * parent.spacing)
                                         placeholderText: "Command to add"
                                         text: root.autostartNewCommand
                                         foreground: root.fg
@@ -934,6 +959,7 @@ Panel {
 
                                     Button {
                                         id: autostartWindowButton
+                                        visible: root.offersRunningPrograms
                                         text: root.autostartFromWindowOpen
                                               ? "Close windows" : "Running programs"
                                         foreground: root.fg

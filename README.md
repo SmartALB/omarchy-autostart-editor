@@ -28,9 +28,9 @@ when you like.
 
 ## What it does
 
-Opens a panel behind a bar button and shows every entry of your
-`autostart.lua`, each with its **1-based line number** so you can find it in
-your own editor. `o.launch_on_start` and `o.exec_on_start` are read, and
+Opens a panel behind a bar button and lists every entry of your
+`autostart.lua`, one under another. `o.launch_on_start` and `o.exec_on_start`
+are read, and
 `o.exec_on_start(o.launch(...))` is shown identically to
 `o.launch_on_start(...)`, because
 `/usr/share/omarchy/default/hypr/helpers.lua` defines them to be the same
@@ -38,19 +38,19 @@ thing.
 
 From the panel you can:
 
-- **add** a command -- typed by hand, picked from your installed applications,
-  or picked **from a program that is running right now**: the panel lists your
-  open windows and, for each, the command lines it can offer, ranked, with
-  where each one came from and a warning for anything that will not survive a
-  restart. Picking one **fills the field**; it does not write. The line that
-  goes into a file which runs at every login is one you have read first.
+- **add** a command -- typed by hand, or picked from your installed
+  applications. Picking one **fills the field**; it does not write. The line
+  that goes into a file which runs at every login is one you have read first.
 - **change** one entry -- exactly the line you picked, no other.
 - **remove** one entry -- exactly the line you picked, no other.
 
 A line that calls one of those helpers in a form the reader cannot take apart
 -- a nested helper such as
 `o.exec_on_start(o.launch_webapp_sole("Chat", "..."))` -- is shown **as it
-stands**, marked *not editable*, with the reason in plain words. It is never
+stands**, marked *not editable*, with the reason in plain words. An entry that
+runs through `o.exec_on_start` rather than the `uwsm-app` launcher is marked
+`(shell)`, because that is the one thing about an entry you cannot see from the
+command itself. It is never
 guessed at and never silently left out, and it can be neither changed nor
 removed: for those, edit the file by hand. That is a real limitation and it is
 named on screen rather than hidden. A line that calls none of those helpers is
@@ -119,9 +119,8 @@ reloads nothing.
 
 Your editor. `autostart.lua` is a small hand-written file and `nvim` can do
 anything to it that this panel can, faster. What the panel offers is the
-overview and the picker: your entries with their line numbers, the forms it
-will not touch marked apart, and a way to turn a program you are looking at
-right now into a line that starts it next time.
+overview: your entries in one list, the forms it will not touch marked apart,
+and the installed-applications picker to save you typing a command out.
 
 ## Known limits
 
@@ -142,6 +141,55 @@ right now into a line that starts it next time.
 
 ## Install
 
+Omarchy installs plugins itself, and that is the way to do it:
+
+```bash
+omarchy plugin add https://github.com/SmartALB/omarchy-autostart-editor.git --enable
+```
+
+That clones into `~/.config/omarchy/plugins/smartalb.autostart/` and `--enable`
+places the widget in your bar for you -- it asks which section and falls back
+to the plugin's own default, which is `right`. **There is nothing to edit in
+`shell.json` by hand.**
+
+Two things worth knowing before you run it somewhere unusual:
+
+- **Over SSH, add `--yes`.** `--enable` asks for the bar section
+  interactively; with no terminal attached it needs `--yes` to take the
+  default instead.
+- **`omarchy plugin list` and `omarchy plugin enable` need a graphical
+  session.** Outside one they fail with `OMARCHY_PATH is not set`. Installing
+  over SSH works; verifying it there does not.
+
+The sibling commands are the rest of the lifecycle:
+
+```bash
+omarchy plugin list                     # what is installed, and whether it is enabled
+omarchy plugin update                   # pull the newest version of every plugin
+omarchy plugin enable smartalb.autostart
+omarchy plugin disable smartalb.autostart
+omarchy plugin remove smartalb.autostart
+```
+
+After installing, restart the shell so the widget appears:
+
+```bash
+omarchy-restart-shell
+```
+
+To check it took:
+
+```bash
+omarchy plugin list | grep smartalb.autostart
+```
+
+The row should read `enabled` and list `bar-widget`.
+
+### Installing from a clone, for development
+
+`./install` and `./uninstall` are the **developer** path -- what you use when
+you are changing the plugin, not what a user needs:
+
 ```bash
 git clone https://github.com/SmartALB/omarchy-autostart-editor.git
 cd omarchy-autostart-editor
@@ -151,46 +199,29 @@ omarchy-restart-shell
 
 `./install` puts the plugin at `~/.config/omarchy/plugins/smartalb.autostart/`
 and prints what to do next. It refuses to run as the root user, because it
-installs into a per-user configuration directory.
+installs into a per-user configuration directory. It does **not** place the
+widget in your bar -- `omarchy plugin enable smartalb.autostart` does that, or
+Omarchy's own plugin screen.
 
 **An upgrade replaces that directory rather than copying into it**, so a file
 this plugin no longer ships cannot survive in your installed copy. The new
 content is built in a scratch directory beside the target and renamed into
 place; if anything goes wrong in between, the previous version is put back.
 
-Then add the widget to your bar. Either use Omarchy's own plugin screen, or
-add the id to a bar section in `~/.config/omarchy/shell.json`:
-
-```json
-{ "bar": { "layout": { "right": [ { "id": "smartalb.autostart" } ] } } }
-```
-
-**This step is not optional, and skipping it fails quietly.** Until the id is
-referenced from `shell.json`, Omarchy treats the plugin as disabled -- nothing
-appears in the bar, with no error anywhere. One entry is enough; do not add a
-second one under a top-level `plugins[]` array.
-
-To check it took, after the restart:
-
-```bash
-omarchy plugin list | grep smartalb.autostart
-```
-
-The row should read `enabled` and list `bar-widget`.
-
 ### Removal
 
 ```bash
-./uninstall
+omarchy plugin remove smartalb.autostart
 ```
 
-It removes the plugin directory and nothing else -- it refuses to delete
-anything that does not resolve to exactly that directory. Remove the widget
-from your bar in `shell.json` yourself afterwards, then run
-`omarchy-restart-shell`. Your autostart entries are in your own
-`autostart.lua` and keep working without the plugin; the backups it took, if
-any, are beside it as `autostart.lua.smartalb-autostart.*.bak` and are left
-for you to keep or delete.
+From a clone, `./uninstall` does the same for the directory: it removes the
+plugin and nothing else -- it refuses to delete anything that does not resolve
+to exactly that directory -- and leaves the bar entry for
+`omarchy plugin disable` or the plugin screen to clear. Your autostart entries
+are in your own `autostart.lua` and keep working without the plugin; the
+backups it took, if any, are beside it as
+`autostart.lua.smartalb-autostart.*.bak` and are left for you to keep or
+delete.
 
 ## Where your data lives
 

@@ -434,6 +434,22 @@ probe "autostart: only autostart.lua is writable" "$QML_SUITE" Model.js \
 probe "autostart: a truncated read is not writable" "$QML_SUITE" Model.js \
   's|^    if (s.truncated === true) return false;$|    if (false) return false;|'
 
+# --- what the listing shows -------------------------------------------------
+#
+# The line number is gone from the display and stays in the data, so both
+# halves are probed: putting a number back in front must turn the listing
+# assertions red, and the two markers that DO carry information must not be
+# droppable in silence.
+
+probe "listing: no line number in front of an entry" "$QML_SUITE" Model.js \
+  's|    if (e.kind === "autostart") {|    if (e.kind === "autostart") { return String(e.line) + ": " + String(e.command);|'
+
+probe "listing: the (shell) marker must survive" "$QML_SUITE" Model.js \
+  's|(e.launcher === "uwsm-app" ? "" : "  (shell)")|""|'
+
+probe "listing: a non-editable entry must still show its raw line" "$QML_SUITE" Model.js \
+  's|^    if (!e.editable) return String(e.raw === undefined ? "" : e.raw);$|    if (!e.editable) return "";|'
+
 probe "autostart: a refusal code cannot reach the panel unworded" "$QML_SUITE" Model.js \
   '/^    case "entry-not-editable":$/,+2d'
 
@@ -584,6 +600,23 @@ probe "panel: the change editor is closed in exactly one place" "$STRUCT_SUITE" 
 # Every assurance this task added, handed the input it was written to catch.
 # The ranking probe is the one that matters most: without it his Webmail
 # window offered YouTube Music first, and the suite said nothing.
+
+# --- the running-programs picker is off, and off means unreachable ---------
+#
+# Hidden, not removed, so the probes over the ranking and the warnings below
+# stay. What these three add is the gate: the flag off, read once, and the
+# route closed before it reads anything.
+
+probe "running programs: the flag must actually be off" "$STRUCT_SUITE" Model.js \
+  's|^var RUNNING_PROGRAMS_ENABLED = false;$|var RUNNING_PROGRAMS_ENABLED = true;|'
+
+probe "running programs: the panel must have one switch, not two" "$STRUCT_SUITE" Panel.qml \
+  's|^    readonly property bool offersRunningPrograms: Model.RUNNING_PROGRAMS_ENABLED$|    readonly property bool offersRunningPrograms: Model.RUNNING_PROGRAMS_ENABLED \&\& Model.RUNNING_PROGRAMS_ENABLED|'
+
+# THE ONE THAT MATTERS: with the guard gone the button is still hidden, so the
+# feature still LOOKS off -- and every press would spawn a process.
+probe "running programs: the route must refuse, not just the button hide" "$STRUCT_SUITE" Panel.qml \
+  's|^        if (!root.offersRunningPrograms) return$|        if (false) return|'
 
 probe "candidates: the host in the window class is what orders the suggestions" "$QML_SUITE" Model.js \
   's|if (host !== "" && command.indexOf(host) >= 0) hosted.push(row);|if (false) hosted.push(row);|'
