@@ -56,7 +56,7 @@
 // it: the installed manifest.json and the installed Model.js are now provably
 // from one source tree, asserted file-for-file by
 // test_install_removes_what_the_plugin_no_longer_ships.
-var VERSION        = "1.0.2";
+var VERSION        = "1.0.3";
 
 // THE RUNNING-PROGRAMS PICKER, OFF BY REQUEST. One flag, one place, read
 // exactly once in Panel.qml -- the shape Model.WRITE_PATH_ENABLED used for the

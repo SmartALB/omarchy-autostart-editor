@@ -1897,7 +1897,7 @@ test_manifest_is_sound() {
     assert_eq "manifest: schemaVersion is the number 1, not the string" \
               "$(jq -r '.schemaVersion == 1' "$m")" "true"
     assert_eq "manifest: name"          "$(jq -r .name "$m")"          "Autostart Editor"
-    assert_eq "manifest: version"       "$(jq -r .version "$m")"       "1.0.2"
+    assert_eq "manifest: version"       "$(jq -r .version "$m")"       "1.0.3"
     assert_eq "manifest: license"       "$(jq -r .license "$m")"       "MIT"
     assert_eq "manifest: not in the omarchy namespace" \
               "$(jq -r '.id | startswith("omarchy.")' "$m")" "false"
