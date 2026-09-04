@@ -269,11 +269,24 @@ probe "name: and the shell suite still pins the name itself" "$SHELL_SUITE" mani
 # bumped on its own here -- the equality must refuse either -- and a version
 # literal is planted in Panel.qml, which must refuse a second source of truth.
 
+# NEITHER OF THESE TWO NAMES THE CURRENT VERSION, and that is the whole point
+# of the shape. They used to read `"1.0.0"` -> `"1.0.1"`, and the 1.0.1 bump
+# turned both into patterns that matched nothing: the mutation changed the file
+# not at all, the suite stayed green for want of anything broken, and only the
+# "the mutation changed nothing" guard said so. A probe that has to be re-aimed
+# at every release is a probe that is silently dead between releases.
+#
+# So each one CAPTURES whatever version is there and replaces it with a
+# sentinel that no release can ever be. It proves exactly what the literal
+# form proved -- one side moved on its own must make the equality red -- and it
+# cannot go stale. If the sentinel ever WERE the real version the file would
+# come back unchanged and the same guard would fail by name, so this is not a
+# way to stop noticing.
 probe "version: Model.VERSION bumped alone must be refused" "$SHELL_SUITE" Model.js \
-  's|^var VERSION        = "1.0.0";$|var VERSION        = "1.0.1";|'
+  's|^\(var VERSION *= *"\)[^"]*\(";\)$|\1999.999.999\2|'
 
 probe "version: the manifest bumped alone must be refused" "$SHELL_SUITE" manifest.json \
-  's|"version": "1.0.0"|"version": "1.0.1"|'
+  's|\("version": "\)[^"]*\("\)|\1999.999.999\2|'
 
 probe "version: a version literal in Panel.qml is a second source of truth" "$STRUCT_SUITE" Panel.qml \
   's|text: Model.versionText()|text: "1.0.0"|'
@@ -298,8 +311,37 @@ probe "readme: a privileged verb in prose" "$SHELL_SUITE" README.md \
 probe "uninstall: the user's own autostart.lua is not removed with the plugin" "$SHELL_SUITE" uninstall \
   's|^cat <<NOTE$|rm -f -- "${XDG_CONFIG_HOME:-$HOME/.config}/hypr/autostart.lua"\ncat <<NOTE|'
 
-probe "checklist: the preview obligation cannot just vanish" "$SHELL_SUITE" CHECKLIST.md \
-  's/preview\.png/preview-image/g'
+# THE SUBJECT OF THIS PROBE MOVED WHEN THE SCREENSHOT WAS TAKEN, so the probe
+# moved with it rather than being weakened to keep passing.
+#
+# The assertion is "the screenshot is either taken or still owed in writing",
+# and it passes in BOTH states by design. What it refuses is the third state:
+# gone from disk AND gone from the checklist. While preview.png did not exist,
+# stripping the obligation out of CHECKLIST.md reached that third state and the
+# suite went red, which is what this probe used to do.
+#
+# preview.png now exists, so the assertion answers through the file-present
+# branch and never reads CHECKLIST.md at all -- the obligation's disappearance
+# is invisible, and the old probe reported "the suite stayed green" honestly.
+# The property was not lost; it is simply not the branch that is live.
+#
+# So this forks on the state, the same way the README coupling below already
+# does and for the same reason: a single fixed expression stops proving
+# anything the moment the file lands. With the file present, the live half of
+# the assertion is "PRESENT BUT NOT A PNG -- a placeholder is not a
+# screenshot", and that is what gets probed, by breaking the magic bytes the
+# assertion actually reads. With the file absent, the checklist obligation is
+# load-bearing again and the original probe applies.
+if [[ -f preview.png ]]; then
+    # The first eight bytes are what the assertion checks, so the mutation
+    # lands there: 89 50 4e 47 -> 89 42 41 44. Measured -- same file size, and
+    # the restore comes back byte-identical under the `cmp` above.
+    probe "preview: a file that is not a real PNG is not a screenshot" "$SHELL_SUITE" preview.png \
+      '1s/^\x89PNG/\x89BAD/'
+else
+    probe "checklist: the preview obligation cannot just vanish" "$SHELL_SUITE" CHECKLIST.md \
+      's/preview\.png/preview-image/g'
+fi
 
 # The README and preview.png must agree -- that is how a broken image sat at
 # the top of the first page a reviewer opens while all five suites stayed
