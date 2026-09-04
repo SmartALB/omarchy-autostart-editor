@@ -86,6 +86,13 @@ STAMP_OVERRIDE="${OMARCHY_AUTOSTART_STAMP:-}"
 # 4, copied deliberately.
 STAGEFILE=""   # the candidate, staged beside the destination
 BACKUPTMP=""   # the backup, staged beside the destination before it is named
+# THE DESCRIPTOR HELD OPEN ON THE DESTINATION, and the /proc path that reaches
+# it. Not in the trap, deliberately: the two above are FILES left in the user's
+# directory if nobody removes them, and a descriptor is not -- the kernel
+# closes it when this process exits, however it exits. It is closed by name
+# after the publish so a reader can see where its life ends.
+TARGETFD=""
+TARGET_FD_PATH=""
 cleanup() {
     [[ -n "${STAGEFILE:-}" ]] && rm -f -- "$STAGEFILE"
     [[ -n "${BACKUPTMP:-}" ]] && rm -f -- "$BACKUPTMP"
@@ -327,13 +334,54 @@ cmd_write() {
     [[ -r "$TARGET" ]] || err "not-a-file" "$TARGET cannot be read"
     check_permissions "$TARGET" "file"
 
+    # THE DESCRIPTOR, HELD FROM HERE TO THE RENAME.
+    #
+    # Every refusal above answers about a PATH, and a path is a name another
+    # process of the same user can repoint between two lines of this script.
+    # So the file is opened ONCE, here, and every question after this -- its
+    # modification time, its mode, and the bytes the backup is made of -- is
+    # asked of THAT OPEN FILE and not of the name a second time.
+    #
+    # MEASURED, both primitives rather than assumed (bash 5.3.15, coreutils
+    # 9.11), with the path unlinked and a different file put back at it
+    # between the open and the reads:
+    #
+    #   stat -L -c '%Y %i' /proc/self/fd/N  -> the ORIGINAL's mtime and inode
+    #   the same stat WITHOUT -L            -> the /proc symlink itself (mode
+    #                                          500, "symbolic link"), NOT the
+    #                                          file: -L is not optional here,
+    #                                          GNU stat does not dereference
+    #                                          by default
+    #   cp -p /proc/self/fd/N dest          -> the ORIGINAL's bytes, mtime and
+    #                                          mode, after the substitution
+    #   readlink /proc/self/fd/N            -> "<path> (deleted)"
+    #
+    # `stat` and `cp` are child processes and /proc/self is THEIRS, not this
+    # shell's -- it works because an `exec {fd}<` descriptor is inherited
+    # across a fork/exec. Measured too, not assumed.
+    exec {TARGETFD}<"$TARGET" \
+        || err "not-a-file" "$TARGET could not be opened for reading"
+    TARGET_FD_PATH="/proc/self/fd/$TARGETFD"
+    # The open resolved the name one more time, so what it landed on is asked
+    # again HERE, through the descriptor: a plain file and nothing else.
+    [[ -f "$TARGET_FD_PATH" ]] \
+        || err "not-a-file" "$TARGET is not a plain file"
+
     # THE FRESHNESS CHECK. This is a file the user also maintains by hand: if
     # its mtime is not the one the panel read, somebody has touched it since,
     # and every line number the caller carries may now mean a different line.
-    local current
-    current="$(stat -c %Y "$TARGET" 2>/dev/null)" \
+    #
+    # Through the descriptor, and the INODE is taken with it: the mtime alone
+    # cannot tell "the same file, untouched" from "a different file with the
+    # same timestamp", which is a state anyone can produce with `touch -r`.
+    # Both are what the re-check before the rename compares against.
+    local current target_inode
+    current="$(stat -L -c %Y "$TARGET_FD_PATH" 2>/dev/null)" \
+        || err "not-a-file" "$TARGET disappeared before it could be checked"
+    target_inode="$(stat -L -c %i "$TARGET_FD_PATH" 2>/dev/null)" \
         || err "not-a-file" "$TARGET disappeared before it could be checked"
     [[ "$current" =~ ^[0-9]+$ ]] || err "not-a-file" "implausible modification time for $TARGET"
+    [[ "$target_inode" =~ ^[0-9]+$ ]] || err "not-a-file" "implausible inode number for $TARGET"
     [[ "$current" == "$expect_mtime" ]] \
         || err "stale" "$TARGET changed on disk (mtime $current, caller expected $expect_mtime); reopen the panel so it reads the file again"
 
@@ -344,7 +392,11 @@ cmd_write() {
         || err "write-failed" "could not stage a replacement in $HYPR_DIR"
     [[ -n "$STAGEFILE" && -f "$STAGEFILE" ]] \
         || err "write-failed" "could not stage a replacement in $HYPR_DIR"
-    chmod --reference="$TARGET" "$STAGEFILE" \
+    # --reference on the DESCRIPTOR, not on the name: the mode the staged file
+    # inherits has to be the mode of the file that was validated. `chmod
+    # --reference` dereferences, so the /proc path reads the real mode (640 in
+    # the measurement above) and not the 500 of the /proc symlink.
+    chmod --reference="$TARGET_FD_PATH" "$STAGEFILE" \
         || err "write-failed" "could not give the staged file the permissions of $TARGET"
 
     read_bounded /dev/stdin "$STAGEFILE"
@@ -412,7 +464,15 @@ cmd_write() {
     backup_path="$HYPR_DIR/$backup_base"
     BACKUPTMP="$(mktemp "$HYPR_DIR/.autostart.lua.bak.XXXXXX")" \
         || err "write-failed" "could not stage a backup of $TARGET in $HYPR_DIR; nothing was written"
-    cp -p -- "$TARGET" "$BACKUPTMP" \
+    # AND IT IS READ FROM THE DESCRIPTOR, NOT FROM THE NAME. This is the half
+    # of the finding that is provable rather than narrowed: whatever happens to
+    # the path in the meantime, these bytes are the bytes that passed the
+    # freshness check -- measured above, `cp -p` through /proc/self/fd/N
+    # returned the original content, mtime and mode after the file at the path
+    # had been unlinked and replaced. A second `cp` from "$TARGET" here would
+    # be a second resolution of the name and could copy someone else's file
+    # into the user's backup.
+    cp -p -- "$TARGET_FD_PATH" "$BACKUPTMP" \
         || err "write-failed" "could not back $TARGET up to $backup_path; nothing was written"
     mv -T -f -- "$BACKUPTMP" "$backup_path" \
         || err "write-failed" "could not back $TARGET up to $backup_path; nothing was written"
@@ -426,10 +486,49 @@ cmd_write() {
     # --no-target-directory a $TARGET that became a symlink to a directory in
     # the meantime would take the staged file INSIDE it and leave the link
     # standing as the user's autostart.lua.
+    # THE RE-CHECK, IMMEDIATELY BEFORE THE RENAME, and it is worth being exact
+    # about what it does and does not buy.
+    #
+    # IT DOES NOT CLOSE THE WINDOW. A POSIX rename cannot be made atomic with
+    # a check that precedes it: between the last `stat` here and `mv -T` on
+    # the next line there is still an interval, and no ordering of those two
+    # calls removes it. Nothing in this comment should be read as a claim that
+    # a concurrent substitution is impossible.
+    #
+    # WHAT IT BUYS is the rest of the distance. Before this, check and act were
+    # separated by a mktemp, a chmod, a whole luac5.1 run, a cp and two forks;
+    # a file swapped anywhere in there was overwritten without a word. Now the
+    # unnoticed interval is the rename itself, and anything slower than that is
+    # refused instead. Together with the backup above -- taken from the
+    # descriptor, so provably the validated bytes -- that is the honest
+    # statement of this fix.
+    #
+    # BOTH the inode and the mtime, against what the descriptor reported: an
+    # inode that no longer matches means the name points at a different file,
+    # and an mtime that moved means the same file was written to since.
+    #
+    # A refusal here leaves the backup that was just taken standing. That is
+    # deliberate: it holds the bytes that were validated, so it is a saved
+    # state, not damage, and the user's own file is untouched.
+    local now_mtime now_inode
+    [[ ! -h "$TARGET" ]] \
+        || err "is-a-symlink" "$TARGET became a symbolic link while it was being written; nothing was written"
+    now_mtime="$(stat -c %Y "$TARGET" 2>/dev/null)" \
+        || err "stale" "$TARGET disappeared while it was being written; nothing was written"
+    now_inode="$(stat -c %i "$TARGET" 2>/dev/null)" \
+        || err "stale" "$TARGET disappeared while it was being written; nothing was written"
+    [[ "$now_inode" == "$target_inode" && "$now_mtime" == "$current" ]] \
+        || err "stale" "$TARGET was replaced while it was being written (inode $now_inode, expected $target_inode; mtime $now_mtime, expected $current); nothing was written -- reopen the panel so it reads the file again"
+
     mv -T -f -- "$STAGEFILE" "$TARGET" || err "write-failed" "could not publish $TARGET"
     # Published: the staged path no longer exists, so take it out of cleanup's
     # hands rather than have it try to remove the destination's former name.
     STAGEFILE=""
+    # The descriptor's work is done -- it named the file that was replaced, and
+    # that file is now the previous state. Closed here rather than left to the
+    # kernel so its life ends where a reader can see it.
+    exec {TARGETFD}<&-
+    TARGETFD=""; TARGET_FD_PATH=""
 
     local mtime
     mtime="$(stat -c %Y "$TARGET" 2>/dev/null)" \

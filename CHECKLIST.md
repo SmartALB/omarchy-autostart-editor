@@ -286,6 +286,24 @@ five writes is five, and this list has more steps than that.
    ```
 
    Exactly one added line, and no other difference.
+
+   **AND THAT THE WRITE COMPLETES AT ALL IS THE CHECK, not a formality.** The
+   content no longer travels in the command: the panel runs the writer with an
+   argv list and hands it the new file on the process's stdin, closing stdin
+   afterwards so the writer sees an end of stream. That close was measured
+   against Quickshell 0.3.1 outside the panel, but only a real session runs
+   this path in the panel itself -- and if the close ever stops happening, the
+   symptom is exactly this: the panel stays busy, no message arrives, and the
+   file is unchanged. A write that finishes and reports its sentence is the
+   confirmation.
+
+   While it is in flight nothing about the file may be visible to other
+   processes. If you want to see that for yourself, run this in a loop in a
+   terminal while you press the add control -- it must print nothing:
+
+   ```bash
+   grep -rl launch_on_start /proc/[0-9]*/cmdline 2>/dev/null
+   ```
 7. **Add from your installed applications**: the picker lists real application
    names, and choosing one **fills the field** with its command rather than
    writing it. Nothing reaches the file until you press the add control.

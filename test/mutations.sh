@@ -78,9 +78,9 @@ trap 'restore_now; exit 129' HUP
 
 run=0; failed=0; skipped=0
 
-# RUN A SUBSET, DELIBERATELY AND VISIBLY. A full run is 108 probes at roughly a
+# RUN A SUBSET, DELIBERATELY AND VISIBLY. A full run is 138 probes at roughly a
 # minute each, because every probe runs a whole suite twice; verifying the
-# probes added by one task should not cost an hour and a half.
+# probes added by one task should not cost over two hours.
 #
 # PROBE_ONLY is an extended regular expression matched against the probe NAME.
 # Unset means every probe, which is the only thing a release run may do. A
@@ -142,17 +142,18 @@ SHELL_SUITE=./test/run-tests.sh
 QML_SUITE=./test/run-qml-tests.sh
 STRUCT_SUITE=./test/qml-structure.sh
 SHAPE_SUITE=./test/runners-shape.sh
+ARGV_SUITE=./test/write-argv.sh
 
 # A probe can only mean anything if the suite is green to begin with. Checked
 # once per suite up front, by name, rather than inferred from the first probe.
-for pair in "$SHELL_SUITE" "$QML_SUITE" "$STRUCT_SUITE" "$SHAPE_SUITE"; do
+for pair in "$SHELL_SUITE" "$QML_SUITE" "$STRUCT_SUITE" "$SHAPE_SUITE" "$ARGV_SUITE"; do
     if ! "$pair" >/dev/null 2>&1; then
         printf 'FAIL baseline -- %s is already red before any mutation; nothing below can be trusted\n' "$pair"
         printf '\nmutation probes: total=0 failed=1\n'
         exit 1
     fi
 done
-echo "baseline: all four suites are green"
+echo "baseline: all five suites are green"
 
 # --- the bin/ scripts -------------------------------------------------------
 
@@ -518,7 +519,31 @@ probe "writer: a file that changed on disk is refused" "$SHELL_SUITE" bin/omarch
 # renamed onto its final one, so that a link left at the final name cannot be
 # written through (see the symlink probes below). The pattern follows.
 probe "writer: the backup is taken before the replacement" "$SHELL_SUITE" bin/omarchy-autostart-hypr-write \
-  's|cp -p -- "$TARGET" "$BACKUPTMP"|true|'
+  's|cp -p -- "$TARGET_FD_PATH" "$BACKUPTMP"|true|'
+
+# --- THE FILE THE WRITER VALIDATED, HELD OPEN -------------------------------
+#
+# The second half of the reviewer's finding against v1.0.1: the target was
+# validated by NAME, and the name was then resolved twice more -- for the
+# backup and for the rename -- with nothing holding the file that had been
+# checked. Each of the three pieces of the fix gets its own probe, and the
+# first of them is the whole fix reverted: with the /proc path replaced by the
+# name, every later read resolves the name again, which is exactly the code
+# the finding was written about.
+probe "writer: the descriptor must be what is read, not the name again" "$SHELL_SUITE" bin/omarchy-autostart-hypr-write \
+  's|TARGET_FD_PATH="/proc/self/fd/$TARGETFD"|TARGET_FD_PATH="$TARGET"|'
+
+probe "writer: the backup must come from the descriptor, not from the name" "$SHELL_SUITE" bin/omarchy-autostart-hypr-write \
+  's|cp -p -- "$TARGET_FD_PATH" "$BACKUPTMP"|cp -p -- "$TARGET" "$BACKUPTMP"|'
+
+# The two halves of the re-check before the rename, one probe each. The inode
+# half is the one an mtime comparison cannot hold: `touch -d` gives a
+# different file the same timestamp.
+probe "writer: a different file at the name must be noticed (the inode)" "$SHELL_SUITE" bin/omarchy-autostart-hypr-write \
+  's|\[\[ "$now_inode" == "$target_inode"|[[ "$now_inode" == "$now_inode"|'
+
+probe "writer: the same file written to must be noticed (the mtime)" "$SHELL_SUITE" bin/omarchy-autostart-hypr-write \
+  's|"$now_mtime" == "$current" \]\]|"$now_mtime" == "$now_mtime" ]]|'
 
 # --- the dated backups, and the pruning that deletes in the user's directory -
 #
@@ -646,8 +671,12 @@ probe "writer: a candidate past the cap is refused" "$SHELL_SUITE" bin/omarchy-a
 probe "writer: the replacement is staged beside the destination" "$SHELL_SUITE" bin/omarchy-autostart-hypr-write \
   's|mktemp "$HYPR_DIR/.autostart.lua.XXXXXX"|mktemp|'
 
+# The reference moved to the held descriptor with the fix for the check-then-use
+# finding, so the pattern follows it: the staged file must get the mode of the
+# file that was VALIDATED, and a probe whose pattern no longer matches proves
+# nothing -- which is exactly how the full gate caught this one.
 probe "writer: the staged file gets the original's permissions" "$SHELL_SUITE" bin/omarchy-autostart-hypr-write \
-  's|chmod --reference="$TARGET" "$STAGEFILE"|true|'
+  's|chmod --reference="$TARGET_FD_PATH" "$STAGEFILE"|true|'
 
 # --- the panel's one route to the file --------------------------------------
 # The substituted name is a script that does not exist, which is the point:
@@ -656,8 +685,62 @@ probe "writer: the staged file gets the original's permissions" "$SHELL_SUITE" b
 probe "panel: the write goes through the writer script, not a second route" "$STRUCT_SUITE" Panel.qml \
   's|omarchy-autostart-hypr-write|omarchy-autostart-somewhere-else|'
 
-probe "panel: the new content is shell-quoted" "$STRUCT_SUITE" Panel.qml \
-  's|Model.shellQuote(result.text)|result.text|'
+# --- THE CONTENT MUST NOT ENTER AN ARGV -------------------------------------
+#
+# THE PROBE THAT STOOD HERE WAS THE RIGHT ANSWER TO THE WRONG QUESTION. It
+# required the content to be shell-QUOTED into the command string
+# (Model.shellQuote(result.text)), and it was green for three rounds while the
+# producing shell carried the whole of the user's autostart.lua in its own
+# /proc/<pid>/cmdline. Quoting was never the property; the content being in a
+# command at all was.
+#
+# Both directions are probed: the structural check on Panel.qml, and the
+# behavioural suite that evaluates the panel's own command expression and then
+# reads a real /proc/<pid>/cmdline.
+probe "panel: the content must not be appended to the argv" "$STRUCT_SUITE" Panel.qml \
+  's|String(Number(section.mtime))\]|String(Number(section.mtime)), result.text]|'
+
+probe "argv: a content argument is readable in /proc" "$ARGV_SUITE" Panel.qml \
+  's|String(Number(section.mtime))\]|String(Number(section.mtime)), result.text]|'
+
+# AND THE SHAPE v1.0.1 ACTUALLY SHIPPED, put back verbatim: run.runnerOut with
+# the content shell-quoted into the command string. `|| run.toolArgv(` leaves
+# the two following lines parsing as before while the string route is what the
+# expression evaluates to, so this is a one-line revert of the fix rather than
+# an invented defect. Measured against this probe: the reconstructed argv
+# carries the whole file in a `bash -c` element, and the same content was read
+# out of a live /proc/<pid>/cmdline by hand (15 of 93 sampled command lines
+# held it) -- which is why the assertion is on the argv the source builds and
+# not only on the /proc window, since the old shape does not park on stdin and
+# a /proc read of a process that lives two milliseconds is a race, not a test.
+probe "argv: the v1.0.1 shell-string route cannot come back" "$ARGV_SUITE" Panel.qml \
+  's@autostartWriteProc.command = run.toolArgv(@autostartWriteProc.command = run.runnerOut("printf %s " + Model.shellQuote(result.text) + " | " + Model.shellQuote(run.binDir + "omarchy-autostart-hypr-write") + " write --expect-mtime " + Number(section.mtime)) || run.toolArgv(@'
+
+# The other half of the same fix: a command carrying no content is only correct
+# if the content goes in on stdin. Each of the three statements that make that
+# work is probed on its own -- an open stdin, the write, and the close without
+# which the writer waits forever for an end of stream that never comes.
+probe "panel: stdin must be open on the writer Process" "$STRUCT_SUITE" Panel.qml \
+  's|stdinEnabled: true|stdinEnabled: false|'
+
+probe "panel: the content must actually be written to stdin" "$STRUCT_SUITE" Panel.qml \
+  's|autostartWriteProc.write(autostartWriteProc.pendingContent)|true|'
+
+probe "panel: stdin must be closed, or the candidate has no end" "$STRUCT_SUITE" Panel.qml \
+  's|autostartWriteProc.stdinEnabled = false|autostartWriteProc.pendingContent = ""|'
+
+# And the argv helper must carry the arguments it was given: an argv that
+# names the writer and nothing else is a write with no freshness expectation.
+probe "runners: the argv must carry the tool's own arguments" "$ARGV_SUITE" Runners.qml \
+  's|.concat(args \|\| \[\])|.concat([])|'
+
+# 5c ITSELF, handed the input it was written for. An assignment to a Process
+# command was outside both older checks -- they scan for "command:" with the
+# colon -- and the one route that writes the user's autostart.lua is an
+# assignment. Probed on a DIFFERENT call site than the write, so what goes red
+# is 5c and not one of the checks specific to the writer.
+probe "panel: a hand-built argv in a command assignment is refused" "$STRUCT_SUITE" Panel.qml \
+  's|windowsProc.command = run.tool("omarchy-autostart-windows")|windowsProc.command = ["/usr/bin/true"]|'
 
 probe "panel: a refused operation never arms the Process" "$STRUCT_SUITE" Panel.qml \
   '/^        if (!result.ok) {$/,+3d'

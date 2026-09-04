@@ -263,14 +263,27 @@ Panel {
             return
         }
         root.autostartBusy = true
-        // The same route the configuration writer uses: the content goes in on
-        // stdin, shell-quoted once, so no length of it can be mistaken for an
-        // argument. `printf '%s'` and not `echo`, because the content ends in
-        // a newline that is part of the file.
-        autostartWriteProc.command = run.runnerOut(
-            "printf '%s' " + Model.shellQuote(result.text) + " | "
-            + Model.shellQuote(run.binDir + "omarchy-autostart-hypr-write")
-            + " write --expect-mtime " + Number(section.mtime))
+        // THE CONTENT NEVER ENTERS AN ARGV, and that is a stronger statement
+        // than the one that stood here. What stood here said the content went
+        // to the writer on stdin, "so no length of it can be mistaken for an
+        // argument" -- true of the writer, and it missed the exposure one
+        // process earlier: the command was a STRING for `bash -c`, so the
+        // shell that produced the content carried the whole file in its own
+        // /proc/<pid>/cmdline, which every process on the machine can read.
+        // An autostart line is any command with any argument, and
+        // /proc/<pid>/cmdline is the very channel this plugin's own picker
+        // reads to suggest commands -- so that was this plugin publishing the
+        // user's command lines to the whole box, once per save.
+        //
+        // Now: an argv list (run.toolArgv, no shell at all) naming the writer
+        // and carrying nothing but the operation's metadata, and the content
+        // handed to the process's stdin by autostartWriteProc's onStarted.
+        // Nothing here is a command string, so there is nothing for the
+        // content to be embedded in.
+        autostartWriteProc.pendingContent = result.text
+        autostartWriteProc.command = run.toolArgv(
+            "omarchy-autostart-hypr-write",
+            ["write", "--expect-mtime", String(Number(section.mtime))])
         autostartWriteProc.running = true
     }
 
@@ -406,6 +419,26 @@ Panel {
 
     Process {
         id: autostartWriteProc
+        // The new autostart.lua, waiting for the process to exist. It is
+        // written to stdin in onStarted and dropped in the same handler: this
+        // property is a hand-off, not a copy of the file the panel keeps.
+        property string pendingContent: ""
+        // stdin, and the shipped precedent for it is
+        // /usr/share/omarchy/shell/plugins/panels/network/Panel.qml:780,
+        // where a wifi passphrase takes the same route for the same reason.
+        stdinEnabled: true
+        onStarted: {
+            autostartWriteProc.write(autostartWriteProc.pendingContent)
+            autostartWriteProc.pendingContent = ""
+            // AND THEN CLOSED, or the writer waits forever: it reads its
+            // candidate to END OF STREAM (`head -c` on /dev/stdin), so an
+            // open stdin is an unfinished file. MEASURED against the real
+            // Quickshell 0.3.1 rather than read off the property name -- a
+            // process given `write()` in onStarted and then stdinEnabled =
+            // false saw the bytes AND the EOF; the doc's word for this is the
+            // only thing that closes it.
+            autostartWriteProc.stdinEnabled = false
+        }
         stdout: StdioCollector {
             waitForEnd: true
             onStreamFinished: {

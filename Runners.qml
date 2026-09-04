@@ -101,4 +101,32 @@ Item {
         return root.runnerOut(Model.shellQuote(root.binDir + name)
                               + (args ? " " + args : ""))
     }
+
+    // ONE OF OUR OWN bin/ SCRIPTS WITH NO SHELL ANYWHERE IN THE ROUTE, as an
+    // argv list: the tool, then its arguments, each its own element.
+    //
+    // WHY THIS EXISTS, and it is a reported defect rather than a preference.
+    // The autostart write used tool()/runnerOut(), which build a command
+    // STRING for `bash -c`. The new autostart.lua went to the writer on
+    // stdin -- but the shell that produced it carried the whole file in its
+    // own argv, and /proc/<pid>/cmdline is world-readable: every process on
+    // the machine could read the user's command lines once per save. The
+    // comment at the call site said the content went in on stdin and was
+    // true about the WRITER while missing the exposure one process earlier.
+    // Passing an argv list removes the producing shell entirely, so there is
+    // no command string for the content to be embedded in, and the quoting
+    // question that comes with one does not arise at all.
+    //
+    // WHAT IS GIVEN UP, named rather than glossed over: runnerOut's `head -c`
+    // second belt on the producer. There is no shell here to interpose one.
+    // The one caller reads a bounded JSON envelope from a script that caps
+    // its own output, so the remaining cap is the script's -- and a shell
+    // whose argv holds the user's commands is the worse of the two exposures.
+    //
+    // The timeout stays: it is a program, not an interpreter, it passes stdin
+    // straight through, and a call that never returns is what it is for.
+    function toolArgv(name, args) {
+        return [root.binTimeout, "-k", "5", String(root.shellSeconds),
+                root.binDir + name].concat(args || [])
+    }
 }

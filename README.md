@@ -300,6 +300,7 @@ settle -- every claim that needs a running Hyprland session to confirm.
 ./test/run-qml-tests.sh    # Model.js, headless, in the Qt6 engine
 ./test/qml-structure.sh    # structural checks over the QML files
 ./test/runners-shape.sh    # runnerOut/runnerErr, run through a real bash
+./test/write-argv.sh       # the write's argv, against a real /proc/<pid>/cmdline
 ./test/mutations.sh        # every test above, checked against its own mutation
 ```
 

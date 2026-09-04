@@ -318,7 +318,7 @@ $f:$((i + 1)): ${line}"
         hits_5b="$hits_5b
 $f:$((i + 1)): ${line} (no Runners { id: ... } declaration found in this file)"
       else
-        helper_anchor_pat="^${runners_id}[[:space:]]*\.[[:space:]]*(runner|runnerOut|runnerErr|tool)\("
+        helper_anchor_pat="^${runners_id}[[:space:]]*\.[[:space:]]*(runner|runnerOut|runnerErr|tool|toolArgv)\("
         if [[ ! "$candidate" =~ $helper_anchor_pat ]]; then
           hits_5b="$hits_5b
 $f:$((i + 1)): ${line}"
@@ -331,6 +331,43 @@ done
                      || bad "no bare array literal right after any command: occurrence" "$hits_5a"
 [[ -z "$hits_5b" ]] && ok "every Process command begins with a call on this file's own Runners instance" \
                      || bad "every Process command begins with a call on this file's own Runners instance" "$hits_5b"
+
+# 5c -- AND THE SAME RULE FOR AN ASSIGNMENT, which is the half 5a and 5b could
+#       not see at all: both scan for "command:" WITH THE COLON, so a
+#       "someProc.command = ..." -- the shape every command in Panel.qml
+#       actually takes -- was never judged by either. The one route that
+#       writes the user's autostart.lua is an assignment, and it went through
+#       three reviews without this check standing in front of it.
+#
+#       Same verdict, same origin-qualification: the right-hand side must
+#       begin with a call on this file's own Runners instance, wherever it
+#       sits (same line, or wrapped onto the next). A bare array literal, a
+#       hand-built command string, or a call on anything else is a hit.
+hits_5c=""
+for f in $(qml_files); do
+  clean="$(strip_comments "$f")"
+  mapfile -t lines <<<"$clean"
+  n=${#lines[@]}
+  runners_id="$(runners_instance_id "$clean")"
+  for ((i = 0; i < n; i++)); do
+    line="${lines[$i]}"
+    [[ "$line" =~ (^|[^A-Za-z0-9_])command[[:space:]]*= ]] || continue
+    rhs="$(trim "$(sed -E 's/^.*[^A-Za-z0-9_]command[[:space:]]*=//' <<<"$line")")"
+    if [[ -z "$rhs" ]]; then
+      (( i + 1 < n )) && rhs="$(trim "${lines[$((i + 1))]}")"
+    fi
+    if [[ -z "$runners_id" ]]; then
+      hits_5c="$hits_5c
+$f:$((i + 1)): ${line} (no Runners { id: ... } declaration found in this file)"
+    else
+      assign_anchor_pat="^${runners_id}[[:space:]]*\.[[:space:]]*(runner|runnerOut|runnerErr|tool|toolArgv)\("
+      [[ "$rhs" =~ $assign_anchor_pat ]] || hits_5c="$hits_5c
+$f:$((i + 1)): ${line}"
+    fi
+  done
+done
+[[ -z "$hits_5c" ]] && ok "every assignment to a Process command begins with a call on this file's own Runners instance" \
+                     || bad "every assignment to a Process command begins with a call on this file's own Runners instance" "$hits_5c"
 
 # 6 -- teardown covers every declared Process with an actual statement, not
 #      merely a mention -- a comment like "// also stop barProc" used to
@@ -1459,15 +1496,89 @@ else
       "the writer script is not named anywhere in the code of Panel.qml"
 fi
 
-# 33 -- the content reaches the writer on stdin, shell-quoted through
-#       Model.shellQuote. An unquoted expansion of a file's whole text into a
-#       shell command line is the one mistake here that would be catastrophic
-#       and silent.
-if grep -qE 'Model\.shellQuote\(result\.text\)' <<<"$stripped_panel"; then
-  ok "autostart write: the new content is shell-quoted on its way to stdin"
+# 33 -- THE CONTENT NEVER ENTERS THE COMMAND. What stood here required the
+#       content to be shell-QUOTED into the command string, which was the
+#       right answer to the wrong question: quoted or not, a command string is
+#       the shell's argv, and /proc/<pid>/cmdline is world-readable, so the
+#       user's own command lines were published to every process on the
+#       machine once per save. The property now is that the command carries no
+#       content at all -- there is no shell in this route any more.
+#
+#       Judged on the COMMAND EXPRESSION, taken as the lines from the
+#       assignment up to the line that arms the Process. A "result.text" or a
+#       shell-quoting call anywhere in there is a hit, and so is a call on
+#       either collecting helper: those build a string for `bash -c`, which is
+#       the shape this check exists to keep out of this one route.
+write_cmd_block="$(awk '
+    /autostartWriteProc[[:space:]]*\.[[:space:]]*command[[:space:]]*=/ { grabbing = 1 }
+    grabbing && /autostartWriteProc[[:space:]]*\.[[:space:]]*running/ { grabbing = 0 }
+    grabbing { print }
+' <<<"$stripped_panel")"
+if [[ -z "$write_cmd_block" ]]; then
+  bad "autostart write: the command expression was found at all" \
+      "no autostartWriteProc.command assignment in the code of Panel.qml, so every check on it would be vacuous"
 else
-  bad "autostart write: the new content is shell-quoted on its way to stdin" \
-      "no Model.shellQuote(result.text) in the code of Panel.qml"
+  ok "autostart write: the command expression was found at all"
+  if grep -qE 'run[[:space:]]*\.[[:space:]]*toolArgv\(' <<<"$write_cmd_block"; then
+    ok "autostart write: the command is an argv list through run.toolArgv, with no shell in it"
+  else
+    bad "autostart write: the command is an argv list through run.toolArgv, with no shell in it" \
+        "the writer's command does not go through run.toolArgv:
+$write_cmd_block"
+  fi
+  content_in_cmd="$(grep -nE 'result\.text|shellQuote|runnerOut|runnerErr|run[[:space:]]*\.[[:space:]]*runner\(|printf' <<<"$write_cmd_block" || true)"
+  [[ -z "$content_in_cmd" ]] \
+    && ok "autostart write: the command expression carries neither the content nor a shell" \
+    || bad "autostart write: the command expression carries neither the content nor a shell" "$content_in_cmd"
+fi
+
+# 33b -- AND THE CONTENT REACHES THE WRITER ON STDIN, which is the other half:
+#        a command that no longer carries the file would otherwise be a
+#        command that writes an empty one. Three statements, each required in
+#        the writer Process's own block -- stdin opened, the content written
+#        when the process starts, and stdin CLOSED, without which the writer
+#        waits forever on a candidate that never ends (it reads to end of
+#        stream). Measured against the real Quickshell before being asserted
+#        here; see the call site's comment.
+write_proc_block="$(awk '
+    BEGIN { capturing = 0; depth = 0 }
+    {
+        line = $0
+        if (!capturing) {
+            if (line !~ /(^|[^A-Za-z0-9_])id:[[:space:]]*autostartWriteProc([^A-Za-z0-9_]|$)/) next
+            capturing = 1; depth = 0
+        }
+        print line
+        n = length(line)
+        for (i = 1; i <= n; i++) {
+            c = substr(line, i, 1)
+            if (c == "{") depth++
+            else if (c == "}") { depth--; if (depth < 0) { capturing = 0; i = n + 1 } }
+        }
+    }
+' <<<"$stripped_panel")"
+if [[ -z "$write_proc_block" ]]; then
+  bad "autostart write: the writer Process block was found at all" \
+      "no 'id: autostartWriteProc' in the code of Panel.qml"
+else
+  ok "autostart write: the writer Process block was found at all"
+  if grep -qE 'stdinEnabled:[[:space:]]*true' <<<"$write_proc_block"; then
+    ok "autostart write: the writer Process opens stdin"
+  else
+    bad "autostart write: the writer Process opens stdin" "no 'stdinEnabled: true' in its block"
+  fi
+  if grep -qE 'write\([^)]*pendingContent' <<<"$write_proc_block"; then
+    ok "autostart write: and the content is written to it, not to a command"
+  else
+    bad "autostart write: and the content is written to it, not to a command" \
+        "no write(...pendingContent...) in the writer Process's block"
+  fi
+  if grep -qE 'stdinEnabled[[:space:]]*=[[:space:]]*false' <<<"$write_proc_block"; then
+    ok "autostart write: and stdin is closed, so the candidate has an end"
+  else
+    bad "autostart write: and stdin is closed, so the candidate has an end" \
+        "no 'stdinEnabled = false' in the writer Process's block -- the writer reads to end of stream and would wait forever"
+  fi
 fi
 
 # 34 -- the panel's write function consults Model.hyprSectionIsWritable before

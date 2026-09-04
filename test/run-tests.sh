@@ -546,6 +546,18 @@ test_runners_shape() {
 
 test_runners_shape
 
+# The argv of the one write, measured through a real /proc/<pid>/cmdline. Its
+# own suite because it needs the Qt6 engine to evaluate the panel's own
+# command expression; run from here so a single command still runs everything.
+test_write_argv() {
+    local out status
+    out="$(./write-argv.sh 2>&1)"; status=$?
+    assert_eq "write argv: the content is in no command the panel builds" "$status" "0"
+    assert_contains "write argv: the checks actually ran" "$out" "write argv: total="
+}
+
+test_write_argv
+
 # --- the reader for the user's own Hyprland Lua files -----------------------
 #
 # The script under test here is the one that touches the USER'S OWN
@@ -1568,8 +1580,11 @@ test_the_backup_is_never_written_straight_to_its_final_name() {
     setup_sandbox
     assert_eq "symlink backup: no cp writes to the final backup name" \
               "$(write_code | grep -cF 'cp -p -- "$TARGET" "$backup_path"' || true)" "0"
+    # The source is the held descriptor, not the name -- see the descriptor
+    # assertions below, which is where that half is bound. Here it only has to
+    # be the STAGED destination.
     assert_eq "symlink backup: the backup is copied to a staged name first" \
-              "$(write_code | grep -cF 'cp -p -- "$TARGET" "$BACKUPTMP"' || true)" "1"
+              "$(write_code | grep -cF 'cp -p -- "$TARGET_FD_PATH" "$BACKUPTMP"' || true)" "1"
     assert_eq "symlink backup: and reaches its final name by a rename that replaces a link" \
               "$(write_code | grep -cF 'mv -T -f -- "$BACKUPTMP" "$backup_path"' || true)" "1"
     # The publish is the same class of defect one line further on: $TARGET was
@@ -1589,8 +1604,178 @@ test_the_backup_is_never_written_straight_to_its_final_name() {
     teardown_sandbox
 }
 
+# --- THE FILE THE WRITER VALIDATED, HELD OPEN -------------------------------
+#
+# THE FINDING, in the reviewer's own terms: the writer validated the target and
+# its mtime, then resolved the NAME twice more -- once to copy the backup out
+# of it, once to rename over it -- with nothing holding the file it had
+# validated. Check and act were separated by a mktemp, a chmod, a cp, two
+# forks and a whole luac5.1 run, so a process of the same user that replaced
+# autostart.lua in that interval got the user's own backup filled with ITS
+# file and the user's candidate written over a file nobody had checked.
+#
+# THE SEAM THAT MAKES IT MEASURABLE is the writer's own blocking read of
+# stdin. The descriptor is opened and validated BEFORE the candidate content
+# is read, so a test can hold the writer right there, substitute the file, and
+# only then let it continue -- no timing luck involved. The staged
+# `.autostart.lua.XXXXXX` appearing in the directory is the synchronisation
+# point: it is created after the validation and before the read.
+#
+# WHAT THESE ASSERTIONS DO NOT SHOW, said plainly rather than implied. The
+# interval between the last check and `mv -T` is not reachable from a test and
+# no ordering of those two calls removes it; the race is narrowed, not closed,
+# and the writer's own comment says so in those words. What is measured here
+# is the part that IS observable: the backup holds the bytes that were
+# validated, and a substitution slower than the rename is refused rather than
+# silently overwritten.
+
+# Runs one write with the writer parked on its stdin read, calls $1 at that
+# moment, then feeds it the good candidate. Prints the envelope, or
+# SEAM-NEVER-REACHED if the writer never got as far as staging -- which must
+# be a failure at the call site, because a probe that never reached the seam
+# looks exactly like one that did.
+write_while_blocked() {
+    local swap="$1" fifo="$SANDBOX/writer-stdin" pid staged i
+    local feed
+    rm -f -- "$fifo"
+    mkfifo "$fifo" || { printf 'SEAM-NEVER-REACHED'; return 0; }
+    timeout -k 5 60 "$WRITE_BIN" write --expect-mtime "$(autostart_mtime)" \
+        < "$fifo" > "$SANDBOX/envelope.json" 2> "$SANDBOX/writer.err" &
+    pid=$!
+    # Opening the write end releases the writer's own open of the fifo.
+    exec {feed}>"$fifo"
+    staged=""
+    for (( i = 0; i < 500; i++ )); do
+        staged="$(ls -A "$(hypr_dir)" | grep '^\.autostart' | head -1 || true)"
+        [[ -n "$staged" ]] && break
+        sleep 0.01
+    done
+    if [[ -z "$staged" ]]; then
+        exec {feed}>&-
+        wait "$pid" 2>/dev/null
+        printf 'SEAM-NEVER-REACHED'
+        return 0
+    fi
+    "$swap"
+    write_good_candidate >&"$feed"
+    exec {feed}>&-
+    wait "$pid" 2>/dev/null
+    cat "$SANDBOX/envelope.json"
+}
+
+# The substitutions, one per property of the re-check.
+
+# Nothing at all: the control. The seam must not be what refuses a write.
+swap_nothing() { :; }
+
+# A DIFFERENT FILE AT THE SAME NAME WITH THE SAME MODIFICATION TIME. This is
+# the case the mtime alone cannot see, and `touch -d` is all it takes to
+# produce -- which is why the inode is carried across the check too.
+swap_a_different_file_with_the_same_mtime() {
+    local path mtime
+    path="$(autostart_path)"
+    mtime="$(stat -c %Y "$path")"
+    rm -f -- "$path"
+    printf '%s\n' 'o.launch_on_start("someone-elses-file")' > "$path"
+    chmod 644 "$path"
+    touch -d "@$mtime" -- "$path"
+}
+
+# THE SAME FILE, WRITTEN TO. The inode is unchanged here, so this is the half
+# the mtime comparison holds. The timestamp is set explicitly rather than left
+# to the append: %Y has one-second resolution, and an append inside the same
+# second would leave the mtime equal and the assertion flaky.
+swap_the_same_file_written_to() {
+    local path
+    path="$(autostart_path)"
+    printf '%s\n' 'o.launch_on_start("hand-edited")' >> "$path"
+    touch -d "@$(( $(stat -c %Y "$path") + 7 ))" -- "$path"
+}
+
+test_the_seam_itself_refuses_nothing() {
+    setup_sandbox
+    write_autostart_fixture
+    local out; out="$(write_while_blocked swap_nothing)"
+    assert_eq "descriptor: the blocked write reached the seam at all" \
+              "$([[ "$out" == "SEAM-NEVER-REACHED" ]] && echo NEVER || echo reached)" "reached"
+    assert_eq "descriptor: with nothing substituted the write succeeds" \
+              "$(jq -r .ok <<<"$out" 2>/dev/null)" "true"
+    write_good_candidate > "$SANDBOX/expected.lua"
+    assert_eq "descriptor: and the candidate is what was published" \
+              "$(cmp -s "$SANDBOX/expected.lua" "$(autostart_path)" \
+                 && echo identical || echo DIFFERENT)" "identical"
+    assert_eq "descriptor: the backup holds the content that was replaced" \
+              "$(cmp -s "$SANDBOX/before.lua" "$(newest_backup)" \
+                 && echo identical || echo DIFFERENT)" "identical"
+    teardown_sandbox
+}
+
+test_a_file_substituted_under_the_writer_is_refused() {
+    setup_sandbox
+    write_autostart_fixture
+    local out; out="$(write_while_blocked swap_a_different_file_with_the_same_mtime)"
+    assert_eq "descriptor: the blocked write reached the seam at all" \
+              "$([[ "$out" == "SEAM-NEVER-REACHED" ]] && echo NEVER || echo reached)" "reached"
+    assert_eq "descriptor: a different file at the name is refused, not overwritten" \
+              "$(jq -r .error <<<"$out" 2>/dev/null)" "stale"
+    write_good_candidate > "$SANDBOX/expected.lua"
+    assert_eq "descriptor: the candidate is not published over it" \
+              "$(cmp -s "$SANDBOX/expected.lua" "$(autostart_path)" \
+                 && echo PUBLISHED || echo "not published")" "not published"
+    # THE HALF THAT IS PROVEN RATHER THAN NARROWED. The backup was read from
+    # the descriptor, so it holds the bytes that passed the freshness check --
+    # a copy from the name would hold the substituted file instead.
+    assert_eq "descriptor: the backup holds the bytes that were validated" \
+              "$(cmp -s "$SANDBOX/before.lua" "$(newest_backup)" \
+                 && echo identical || echo DIFFERENT)" "identical"
+    assert_nothing_staged "descriptor: nothing is left staged after the refusal"
+    teardown_sandbox
+}
+
+test_the_same_file_written_to_under_the_writer_is_refused() {
+    setup_sandbox
+    write_autostart_fixture
+    local out; out="$(write_while_blocked swap_the_same_file_written_to)"
+    assert_eq "descriptor: the blocked write reached the seam at all" \
+              "$([[ "$out" == "SEAM-NEVER-REACHED" ]] && echo NEVER || echo reached)" "reached"
+    assert_eq "descriptor: the same file written to in the meantime is refused" \
+              "$(jq -r .error <<<"$out" 2>/dev/null)" "stale"
+    write_good_candidate > "$SANDBOX/expected.lua"
+    assert_eq "descriptor: the candidate is not published over the hand edit" \
+              "$(cmp -s "$SANDBOX/expected.lua" "$(autostart_path)" \
+                 && echo PUBLISHED || echo "not published")" "not published"
+    teardown_sandbox
+}
+
+# The three code assertions the race half cannot reach behaviourally -- the
+# same shape, and the same admission, as the symlink assertions above: they
+# are about the CHARACTERS of the writer, and each is probed in mutations.sh.
+test_the_writer_never_resolves_the_name_twice() {
+    assert_eq "descriptor: the destination is opened once and held" \
+              "$(write_code | grep -cF 'exec {TARGETFD}<"$TARGET"' || true)" "1"
+    assert_eq "descriptor: the backup is copied from that descriptor" \
+              "$(write_code | grep -cF 'cp -p -- "$TARGET_FD_PATH" "$BACKUPTMP"' || true)" "1"
+    # And NOT from the name: the closing quote is part of the pattern, so
+    # "$TARGET_FD_PATH" is not what this matches.
+    assert_eq "descriptor: and never from the name" \
+              "$(write_code | grep -cF 'cp -p -- "$TARGET"' || true)" "0"
+    # The freshness check reads the descriptor, and it reads it WITH -L: GNU
+    # stat does not dereference by default, so without -L this would report
+    # the /proc symlink instead of the file (measured -- mode 500, type
+    # "symbolic link").
+    assert_eq "descriptor: the freshness check reads the descriptor, dereferenced" \
+              "$(write_code | grep -cE 'stat -L -c %[Yi] "\$TARGET_FD_PATH"' || true)" "2"
+    # Both halves of the re-check, on one line, immediately before the rename.
+    assert_eq "descriptor: the rename is preceded by an inode-and-mtime re-check" \
+              "$(write_code | grep -cF '[[ "$now_inode" == "$target_inode" && "$now_mtime" == "$current" ]]' || true)" "1"
+}
+
 test_write_publishes_a_good_candidate
 test_write_backs_the_old_content_up
+test_the_seam_itself_refuses_nothing
+test_a_file_substituted_under_the_writer_is_refused
+test_the_same_file_written_to_under_the_writer_is_refused
+test_the_writer_never_resolves_the_name_twice
 test_write_keeps_only_the_newest_backups
 test_the_pruner_refuses_every_name_that_is_not_ours
 test_write_aborts_when_no_backup_can_be_taken
