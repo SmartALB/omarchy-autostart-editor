@@ -2527,8 +2527,12 @@ test_a_second_hard_link_to_the_target_is_refused_end_to_end() {
 # Returns non-zero if it never appears, and every caller ASSERTS on that, so a
 # run that missed the window fails by name rather than passing quietly.
 wait_for_publish_window() {
+    # SIXTY SECONDS, not twenty. The cap only ever matters when something has
+    # gone wrong, and a cap that can be reached by a merely BUSY machine turns
+    # this helper into the flake it exists to remove -- the mutation gate runs
+    # this suite twice per probe, back to back, for an hour.
     local marker="$(hypr_dir)/.publish-delay-entered" i
-    for (( i = 0; i < 400; i++ )); do
+    for (( i = 0; i < 1200; i++ )); do
         [[ -e "$marker" ]] && return 0
         sleep 0.05
     done
@@ -2563,7 +2567,7 @@ test_a_version_that_appears_after_validation_is_not_silently_discarded() {
     # The write, held for two seconds immediately before the publish.
     write_good_candidate \
         | OMARCHY_AUTOSTART_STAMP="20260904-101010" \
-          OMARCHY_AUTOSTART_PUBLISH_DELAY=2 \
+          OMARCHY_AUTOSTART_PUBLISH_DELAY=4 \
           "$WRITE_BIN" write --expect-mtime "$mtime" > "$SANDBOX/answer.json" &
     local writer=$!
 
@@ -2627,7 +2631,7 @@ test_an_in_place_rewrite_inside_the_window_is_also_preserved() {
     inode="$(stat -c %i "$(autostart_path)")"
     write_good_candidate \
         | OMARCHY_AUTOSTART_STAMP="20260904-131313" \
-          OMARCHY_AUTOSTART_PUBLISH_DELAY=2 \
+          OMARCHY_AUTOSTART_PUBLISH_DELAY=4 \
           "$WRITE_BIN" write --expect-mtime "$mtime" > "$SANDBOX/answer.json" &
     local writer=$!
     local entered="no"; wait_for_publish_window && entered="yes"
@@ -2664,7 +2668,7 @@ test_a_target_that_vanishes_inside_the_publish_window_is_refused() {
     local mtime; mtime="$(autostart_mtime)"
     write_good_candidate \
         | OMARCHY_AUTOSTART_STAMP="20260904-121212" \
-          OMARCHY_AUTOSTART_PUBLISH_DELAY=2 \
+          OMARCHY_AUTOSTART_PUBLISH_DELAY=4 \
           "$WRITE_BIN" write --expect-mtime "$mtime" > "$SANDBOX/answer.json" &
     local writer=$!
     local entered="no"; wait_for_publish_window && entered="yes"
@@ -2711,8 +2715,13 @@ test_the_publish_delay_seam_ignores_a_value_it_cannot_trust() {
              "$WRITE_BIN" write --expect-mtime "$mtime")"
     end="$(date +%s)"
     elapsed=$((end - start))
+    # FIFTEEN SECONDS OF MARGIN, against a mutation that sleeps THIRTY. The
+    # gap is what makes this an assertion about the validation rather than
+    # about how busy the machine is; at five seconds it was tight enough to
+    # fail once during a gate run, which is a flake wearing a finding's
+    # clothes.
     assert_eq "delay seam: a value that is not a single digit is ignored, not slept" \
-              "$([[ "$elapsed" -lt 5 ]] && echo ignored \
+              "$([[ "$elapsed" -lt 15 ]] && echo ignored \
                  || echo "SLEPT ${elapsed}s -- the value was handed to sleep unchecked")" \
               "ignored"
     assert_eq "delay seam: and the write itself is unaffected by it" \
@@ -2791,6 +2800,100 @@ test_the_no_exchange_seam_takes_only_the_one_value() {
     assert_eq "no exchange seam: by exchange, as normal" \
               "$(jq -r .publish <<<"$out")" "exchange"
     teardown_sandbox
+}
+
+# THE SEAM CAN ONLY EVER PUSH THIS WRITER TOWARDS REFUSING.
+#
+# A seam that changes security-relevant behaviour is itself attack surface, so
+# the property has to be DIRECTIONAL and it has to be asserted, not asserted
+# about one value. What is bound here:
+#
+#   * exactly the string "1" refuses; every other value behaves EXACTLY as the
+#     variable being unset does -- asserted by running each value against a
+#     control run on an identical fixture and requiring the two answers to
+#     match, OR the seam's answer to be the refusal with the file untouched;
+#   * no value can suppress a check that would otherwise refuse: with the seam
+#     set to "1" AND a reason to refuse earlier, the EARLIER refusal is what
+#     comes back, and nothing is written;
+#   * the value is never expanded into a command. MEASURED with
+#     "1;/usr/bin/touch /tmp/pwned-seam" and "$(/usr/bin/id)": no file was
+#     created and no substitution happened -- it is only ever compared inside
+#     [[ ]].
+#
+# So the worst a foreign environment can do through this variable is stop the
+# panel from saving. It cannot make it write, it cannot make it write by
+# another route, and it cannot silence a refusal.
+test_the_no_exchange_seam_can_only_push_towards_refusing() {
+    setup_sandbox
+    local v control seamed cfile sfile mismatched=""
+    for v in '1' '0' 'yes' '' 'true' '1 ' ' 1' '01' '-1' '*' '11' \
+             '1;/usr/bin/touch /tmp/omarchy-pwned-seam' '$(/usr/bin/id)'; do
+        # The control: the same write, same fixture, seam UNSET.
+        write_autostart_fixture
+        control="$(write_good_candidate \
+                   | OMARCHY_AUTOSTART_STAMP="20260904-181818" \
+                     "$WRITE_BIN" write --expect-mtime "$(autostart_mtime)" \
+                   | jq -r '[.ok, (.error // ""), (.publish // "")] | join("/")')"
+        cfile="$(cmp -s "$SANDBOX/before.lua" "$(autostart_path)" && echo untouched || echo written)"
+        rm -f -- "$(hypr_dir)"/autostart.lua.smartalb-autostart.*.bak
+        # The same thing with the seam set to this value.
+        write_autostart_fixture
+        seamed="$(write_good_candidate \
+                  | OMARCHY_AUTOSTART_STAMP="20260904-191919" \
+                    OMARCHY_AUTOSTART_NO_EXCHANGE="$v" \
+                    "$WRITE_BIN" write --expect-mtime "$(autostart_mtime)" \
+                  | jq -r '[.ok, (.error // ""), (.publish // "")] | join("/")')"
+        sfile="$(cmp -s "$SANDBOX/before.lua" "$(autostart_path)" && echo untouched || echo written)"
+        rm -f -- "$(hypr_dir)"/autostart.lua.smartalb-autostart.*.bak
+        # Either it did exactly what the unset variable does, or it refused and
+        # left the file alone. There is no third acceptable outcome.
+        if [[ "$seamed/$sfile" != "$control/$cfile" \
+              && "$seamed/$sfile" != "false/no-atomic-exchange//untouched" ]]; then
+            mismatched="$mismatched [${v}]->${seamed}/${sfile}"
+        fi
+    done
+    assert_eq "seam direction: every value either behaves as unset or refuses without writing" \
+              "${mismatched:- none}" " none"
+    assert_eq "seam direction: and no value was ever expanded into a command" \
+              "$([[ -e /tmp/omarchy-pwned-seam ]] && echo EXECUTED || echo inert)" "inert"
+
+    # AND IT CANNOT SILENCE AN EARLIER REFUSAL. A stale mtime must still come
+    # back as "stale" with the seam set, not as the publish-time refusal, and
+    # a group-writable file must still come back as insecure-permissions --
+    # both decided long before the publish is reached.
+    write_autostart_fixture
+    assert_eq "seam direction: a stale write is still stale with the seam set" \
+              "$(write_good_candidate \
+                 | OMARCHY_AUTOSTART_NO_EXCHANGE=1 "$WRITE_BIN" write --expect-mtime 1 \
+                 | jq -r .error)" "stale"
+    chmod g+w "$(autostart_path)"
+    assert_eq "seam direction: a group-writable file is still refused for that reason" \
+              "$(write_good_candidate \
+                 | OMARCHY_AUTOSTART_NO_EXCHANGE=1 "$WRITE_BIN" write --expect-mtime "$(autostart_mtime)" \
+                 | jq -r .error)" "insecure-permissions"
+    chmod 644 "$(autostart_path)"
+    teardown_sandbox
+}
+
+# AND THE SEAM IS REACHABLE FROM EXACTLY ONE PLACE IN THE SOURCE, which is
+# what makes the directional claim above checkable at all: a second reference
+# somewhere else could reach a different decision, and nothing in the
+# behavioural loop would see it.
+test_the_no_exchange_seam_is_consulted_in_one_place_only() {
+    assert_eq "seam direction: the seam appears in exactly two lines of code" \
+              "$(write_code | grep -cF 'NO_EXCHANGE' || true)" "2"
+    assert_eq "seam direction: one of them is the assignment from the environment" \
+              "$(write_code | grep -cF 'NO_EXCHANGE="${OMARCHY_AUTOSTART_NO_EXCHANGE:-}"' || true)" "1"
+    # The other is the publish condition, compared against the exact string.
+    assert_eq "seam direction: the other is an exact comparison against \"1\"" \
+              "$(write_code | grep -cF '[[ "$NO_EXCHANGE" != "1" ]]' || true)" "1"
+    # And the branch it guards is the exchange, whose alternative refuses --
+    # so the only thing the seam can select is the refusal.
+    assert_eq "seam direction: the branch it guards is the atomic exchange" \
+              "$(write_code | grep -A1 -F '[[ "$NO_EXCHANGE" != "1" ]]' \
+                 | grep -cF '"$MV" --exchange -T --' || true)" "1"
+    assert_eq "seam direction: and no-atomic-exchange is the only other way out" \
+              "$(write_code | grep -cF 'err "no-atomic-exchange"' || true)" "1"
 }
 
 # THE OTHER SIDE OF THE SAME PROPERTY: an ordinary write rescues nothing and
@@ -3013,6 +3116,8 @@ test_a_target_that_vanishes_inside_the_publish_window_is_refused
 test_the_publish_delay_seam_ignores_a_value_it_cannot_trust
 test_a_system_that_cannot_exchange_is_refused
 test_the_no_exchange_seam_takes_only_the_one_value
+test_the_no_exchange_seam_can_only_push_towards_refusing
+test_the_no_exchange_seam_is_consulted_in_one_place_only
 test_an_ordinary_write_rescues_nothing
 test_a_rescued_file_can_never_be_pruned
 test_every_shipped_script_fixes_its_interpreter

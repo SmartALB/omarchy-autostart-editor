@@ -998,6 +998,17 @@ probe "publish: the delay seam validates its own value" "$SHELL_SUITE" bin/omarc
 probe "publish: an unavailable exchange must refuse, not fall back to a plain rename" "$SHELL_SUITE" bin/omarchy-autostart-hypr-write \
   's@        err "no-atomic-exchange" \\@        "$MV" -T -f -- "$STAGEFILE" "$TARGET" || err "write-failed" "x"; STAGEFILE=""; publish_mode="rename"; : \\@'
 
+# A SEAM THAT FIRES ON ANY NON-EMPTY VALUE IS A SEAM THAT FIRES BY ACCIDENT,
+# and it is also the direction that matters: loosened this way, an unrelated
+# variable in somebody's environment stops the panel saving.
+probe "publish: the no-exchange seam is an exact comparison, not a truthiness test" "$SHELL_SUITE" bin/omarchy-autostart-hypr-write \
+  's@\[\[ "$NO_EXCHANGE" != "1" \]\]@[[ -z "$NO_EXCHANGE" ]]@'
+
+# And it must be consulted in ONE place. A second reference could reach a
+# different decision, which is what the directional assertion rests on.
+probe "publish: the no-exchange seam is not consulted anywhere else" "$SHELL_SUITE" bin/omarchy-autostart-hypr-write \
+  's@^NO_EXCHANGE="${OMARCHY_AUTOSTART_NO_EXCHANGE:-}"$@NO_EXCHANGE="${OMARCHY_AUTOSTART_NO_EXCHANGE:-}"\nNO_EXCHANGE_ALIAS="$NO_EXCHANGE"@'
+
 # And the seam that reaches that branch has to actually reach it.
 probe "publish: the no-exchange seam is honoured" "$SHELL_SUITE" bin/omarchy-autostart-hypr-write \
   's@    if \[\[ "$NO_EXCHANGE" != "1" \]\] \\@    if [[ "$NO_EXCHANGE" != "0" ]] \\@'
