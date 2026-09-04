@@ -543,7 +543,7 @@ probe "writer: a different file at the name must be noticed (the inode)" "$SHELL
   's|\[\[ "$now_inode" == "$target_inode"|[[ "$now_inode" == "$now_inode"|'
 
 probe "writer: the same file written to must be noticed (the mtime)" "$SHELL_SUITE" bin/omarchy-autostart-hypr-write \
-  's|"$now_mtime" == "$current" \]\]|"$now_mtime" == "$now_mtime" ]]|'
+  's|"$now_mtime" == "$target_mtime_ns" \]\]|"$now_mtime" == "$now_mtime" ]]|'
 
 # --- the dated backups, and the pruning that deletes in the user's directory -
 #
@@ -928,13 +928,13 @@ probe "descriptor: the mode must be asked of the descriptor" "$SHELL_SUITE" bin/
 probe "descriptor: a second hard link must be refused" "$SHELL_SUITE" bin/omarchy-autostart-hypr-write \
   's|\[\[ "$links" == "1" \]\]|[[ -n "$links" ]]|'
 
-probe "descriptor: the owner must be us" "$SHELL_SUITE" bin/omarchy-autostart-hypr-write \
+probe "descriptor: the owner comparison must be against our own euid" "$SHELL_SUITE" bin/omarchy-autostart-hypr-write \
   's|\[\[ "$uid" == "$EUID" \]\]|[[ -n "$uid" ]]|'
 
 # The identity of the NAME is taken with lstat on purpose: with -L it would
 # resolve the link and then agree with the descriptor about a file the name
 # does not refer to, which is the comparison quietly answering "yes" always.
-probe "descriptor: the name's identity is taken without dereferencing" "$SHELL_SUITE" bin/omarchy-autostart-hypr-write \
+probe "descriptor: the name's identity must not be dereferenced" "$SHELL_SUITE" bin/omarchy-autostart-hypr-write \
   's|path_ident="$("$STAT" -c .%d:%i. -- "$TARGET" 2>/dev/null)"|path_ident="$("$STAT" -L -c "%d:%i" -- "$TARGET" 2>/dev/null)"|'
 
 # --- A VERSION THAT APPEARS AFTER THE VALIDATION (finding 2) ----------------
@@ -946,7 +946,25 @@ probe "publish: a one-way rename cannot preserve what it replaced" "$SHELL_SUITE
   's@if "$MV" --exchange -T -- "$STAGEFILE" "$TARGET" 2>/dev/null; then@if "$MV" -T -f -- "$STAGEFILE" "$TARGET" 2>/dev/null; then@'
 
 probe "publish: what was replaced must be looked at" "$SHELL_SUITE" bin/omarchy-autostart-hypr-write \
-  's|^        publish_check_replaced "$replaced" "$target_inode" "$current"|        :|'
+  's|^        publish_check_replaced "$replaced" "$target_inode" "$target_mtime_ns"|        :|'
+
+# WHOLE SECONDS ARE TOO COARSE TO IDENTIFY WHAT WAS REPLACED, and the unit is
+# therefore part of the property rather than an implementation detail. Measured:
+# two writes to one file inside the same second report the same %Y and a
+# different %.9Y, so in seconds a rewrite IN PLACE reads as "the file we
+# validated" and is deleted as redundant. This probe puts the coarse unit back.
+probe "publish: the replaced file is identified at sub-second precision" "$SHELL_SUITE" bin/omarchy-autostart-hypr-write \
+  's@got="$(LC_ALL=C "$STAT" -c .%i %.9Y. -- "$replaced" 2>/dev/null)"@got="$(LC_ALL=C "$STAT" -c "%i %Y" -- "$replaced" 2>/dev/null)"@'
+
+# And the same unit in the re-check one step earlier.
+probe "publish: the pre-publish re-check is sub-second too" "$SHELL_SUITE" bin/omarchy-autostart-hypr-write \
+  's@now_fields="$(LC_ALL=C "$STAT" -c .%i %.9Y. -- "$TARGET" 2>/dev/null)"@now_fields="$(LC_ALL=C "$STAT" -c "%i %Y" -- "$TARGET" 2>/dev/null)"@'
+
+# The window marker is what makes the three window tests deterministic. Without
+# it they fall back to guessing, which is the flake that found the coarse-unit
+# defect in the first place -- so the marker's own absence must be loud.
+probe "publish: the delay seam announces that it entered the window" "$SHELL_SUITE" bin/omarchy-autostart-hypr-write \
+  's@    : > "$HYPR_DIR/$DELAY_MARKER" 2>/dev/null || true@    :@'
 
 # The whole point: an intervening version is KEPT, not deleted. This is the
 # defect the old code had, written back in one line.
@@ -980,7 +998,7 @@ probe "publish: the delay seam validates its own value" "$SHELL_SUITE" bin/omarc
 # runtime as well as failing the class-level assertion -- which is exactly the
 # pair of consequences the empty PATH was chosen for.
 probe "boundary: a tool resolved by bare name" "$SHELL_SUITE" bin/omarchy-autostart-hypr-write \
-  's|now_mtime="$("$STAT" -c %Y "$TARGET" 2>/dev/null)"|now_mtime="$(stat -c %Y "$TARGET" 2>/dev/null)"|'
+  's|current="$("$STAT" -L -c %Y "$TARGET_FD_PATH" 2>/dev/null)"|current="$(stat -L -c %Y "$TARGET_FD_PATH" 2>/dev/null)"|'
 
 probe "boundary: a bare tool name in the reader too" "$SHELL_SUITE" bin/omarchy-autostart-hypr \
   's|size="$("$WC" -c < "$dst")"|size="$(wc -c < "$dst")"|'

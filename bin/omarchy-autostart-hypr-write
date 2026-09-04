@@ -186,11 +186,34 @@ STAMP_OVERRIDE="${OMARCHY_AUTOSTART_STAMP:-}"
 # already stand on, and this is the weaker seam of the three: HYPRCTL names an
 # arbitrary BINARY TO EXECUTE.
 PUBLISH_DELAY="${OMARCHY_AUTOSTART_PUBLISH_DELAY:-}"
+# AND IT ANNOUNCES THAT IT HAS ENTERED THE WINDOW, which is the difference
+# between a deterministic test and a flaky one.
+#
+# A test that reaches this window by sleeping a fixed amount and hoping is a
+# test that fails when the machine is busy -- and it fails in BOTH directions:
+# too early and the pre-publish re-check refuses (the substitution never
+# reaches this window at all), too late and the exchange has already happened.
+# One such flake turned up during the probe run, in the shape the whole
+# project distrusts: a green that depended on timing.
+#
+# So the seam drops a marker immediately before it sleeps, and the tests WAIT
+# FOR IT. Once it exists, the re-check above has provably passed and the sleep
+# has provably begun, so what the test does next is inside the window by
+# construction rather than by luck. The tests also assert that the marker
+# appeared, so a run that never reached the window fails loudly instead of
+# passing for the wrong reason.
+#
+# IT CANNOT APPEAR IN PRODUCTION. It is written only on the path guarded by
+# the seam, and the seam is unset unless a test sets it -- the panel cannot
+# set it at all. Its name deliberately does not begin with ".autostart.lua",
+# so it is outside every pattern this script stages, backs up or prunes.
+DELAY_MARKER=".publish-delay-entered"
 publish_delay() {
     [[ -n "$PUBLISH_DELAY" ]] || return 0
     # A single digit or nothing happens. Not an error: a malformed seam value
     # must not be able to fail a write of the user's.
     [[ "$PUBLISH_DELAY" =~ ^[0-9]$ ]] || return 0
+    : > "$HYPR_DIR/$DELAY_MARKER" 2>/dev/null || true
     "$SLEEP" "$PUBLISH_DELAY"
     return 0
 }
@@ -453,7 +476,12 @@ RESCUED_PATH=""
 publish_check_replaced() {
     local replaced="$1" want_inode="$2" want_mtime="$3" got base
     RESCUED_PATH=""
-    got="$("$STAT" -c '%i %Y' -- "$replaced" 2>/dev/null)" || got="unreadable"
+    # NANOSECONDS, and LC_ALL=C so the decimal separator is a dot whatever the
+    # session's locale is. In whole seconds a rewrite in place inside the same
+    # second reads as "the file we validated" and is deleted as redundant --
+    # which is the finding this whole function exists to answer, reintroduced
+    # by a unit that was too coarse.
+    got="$(LC_ALL=C "$STAT" -c '%i %.9Y' -- "$replaced" 2>/dev/null)" || got="unreadable"
     if [[ "$got" == "$want_inode $want_mtime" ]]; then
         # The file we validated, and the backup already holds it.
         "$RM" -f -- "$replaced"
@@ -658,13 +686,39 @@ cmd_write() {
     # cannot tell "the same file, untouched" from "a different file with the
     # same timestamp", which is a state anyone can produce with `touch -r`.
     # Both are what the re-check before the rename compares against.
-    local current target_inode
+    # AND AT NANOSECOND PRECISION, WHICH IS A SEPARATE VALUE FOR A REASON.
+    #
+    # `%Y` is WHOLE SECONDS, and that is what the caller's --expect-mtime is
+    # in, so the freshness check against the panel has to stay in seconds.
+    # But every comparison this script makes with ITSELF -- "is the file at
+    # the name still the one I validated?" -- is too coarse in seconds, and
+    # that is not theoretical: MEASURED on tmpfs, two writes to the same file
+    # inside one second report the SAME `%Y` and DIFFERENT `%.9Y`. A rewrite
+    # IN PLACE inside that second therefore looked identical to "untouched",
+    # so the intervening version was deleted as redundant. A flaky test found
+    # it; the flake was the defect.
+    #
+    # LC_ALL=C ON THESE READS. `%.9Y` is a decimal number and this machine's
+    # locale prints it with a COMMA (measured: "1788505942,116120693"), which
+    # is unusable for a numeric check. Set on the individual calls rather than
+    # for the whole script, because a script-wide LC_ALL=C would also reorder
+    # `sort` -- which orders the application picker in the other scripts, and
+    # keeping that behaviour unchanged was deliberate.
+    #
+    # WHERE THE FILESYSTEM HAS NO SUB-SECOND TIMESTAMPS this is exactly as
+    # strong as `%Y` was and no weaker. btrfs (the real target here) and tmpfs
+    # (the sandbox) both store nanoseconds -- checked.
+    local current target_inode target_mtime_ns
     current="$("$STAT" -L -c %Y "$TARGET_FD_PATH" 2>/dev/null)" \
         || err "not-a-file" "$TARGET disappeared before it could be checked"
     target_inode="$("$STAT" -L -c %i "$TARGET_FD_PATH" 2>/dev/null)" \
         || err "not-a-file" "$TARGET disappeared before it could be checked"
     [[ "$current" =~ ^[0-9]+$ ]] || err "not-a-file" "implausible modification time for $TARGET"
     [[ "$target_inode" =~ ^[0-9]+$ ]] || err "not-a-file" "implausible inode number for $TARGET"
+    target_mtime_ns="$(LC_ALL=C "$STAT" -L -c %.9Y "$TARGET_FD_PATH" 2>/dev/null)" \
+        || err "not-a-file" "$TARGET disappeared before it could be checked"
+    [[ "$target_mtime_ns" =~ ^[0-9]+\.[0-9]+$ ]] \
+        || err "not-a-file" "implausible modification time for $TARGET"
     [[ "$current" == "$expect_mtime" ]] \
         || err "stale" "$TARGET changed on disk (mtime $current, caller expected $expect_mtime); reopen the panel so it reads the file again"
 
@@ -779,12 +833,15 @@ cmd_write() {
     local now_mtime now_inode
     [[ ! -h "$TARGET" ]] \
         || err "is-a-symlink" "$TARGET became a symbolic link while it was being written; nothing was written"
-    now_mtime="$("$STAT" -c %Y "$TARGET" 2>/dev/null)" \
+    # ONE stat for both, at nanosecond precision: a rewrite in place inside the
+    # same second moves %.9Y and does not move %Y, so this is the reading that
+    # can actually tell "untouched" from "written to since".
+    local now_fields
+    now_fields="$(LC_ALL=C "$STAT" -c '%i %.9Y' -- "$TARGET" 2>/dev/null)" \
         || err "stale" "$TARGET disappeared while it was being written; nothing was written"
-    now_inode="$("$STAT" -c %i "$TARGET" 2>/dev/null)" \
-        || err "stale" "$TARGET disappeared while it was being written; nothing was written"
-    [[ "$now_inode" == "$target_inode" && "$now_mtime" == "$current" ]] \
-        || err "stale" "$TARGET was replaced while it was being written (inode $now_inode, expected $target_inode; mtime $now_mtime, expected $current); nothing was written -- reopen the panel so it reads the file again"
+    read -r now_inode now_mtime <<<"$now_fields"
+    [[ "$now_inode" == "$target_inode" && "$now_mtime" == "$target_mtime_ns" ]] \
+        || err "stale" "$TARGET was replaced while it was being written (inode $now_inode, expected $target_inode; mtime $now_mtime, expected $target_mtime_ns); nothing was written -- reopen the panel so it reads the file again"
 
     # The seam, and nothing but a delay. See PUBLISH_DELAY.
     publish_delay
@@ -840,7 +897,7 @@ cmd_write() {
         # over by name.
         local replaced="$STAGEFILE"
         STAGEFILE=""
-        publish_check_replaced "$replaced" "$target_inode" "$current"
+        publish_check_replaced "$replaced" "$target_inode" "$target_mtime_ns"
     else
         # TWO REASONS AN EXCHANGE FAILS, AND THEY NEED DIFFERENT ANSWERS.
         #

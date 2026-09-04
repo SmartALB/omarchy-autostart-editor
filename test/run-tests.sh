@@ -1792,9 +1792,41 @@ test_the_writer_never_resolves_the_name_twice() {
     # "symbolic link").
     assert_eq "descriptor: the freshness check reads the descriptor, dereferenced" \
               "$(write_code | grep -cE '"\$STAT" -L -c %[Yi] "\$TARGET_FD_PATH"' || true)" "2"
+    # THE NAME'S IDENTITY IS TAKEN WITH lstat, AND THAT IS THE WHOLE POINT OF
+    # IT. With -L this stat would RESOLVE a symlink at the name and then agree
+    # with the descriptor about a file the name does not refer to -- the
+    # comparison would answer "the same object" for exactly the substitution
+    # it exists to catch.
+    #
+    # WHY THIS IS A SOURCE ASSERTION AND NOT A BEHAVIOURAL ONE. Measured: on a
+    # plain file `stat -c '%d:%i'` and `stat -L -c '%d:%i'` return the SAME
+    # device:inode, so nothing an ordinary write does can tell the two
+    # spellings apart. The difference shows only through a symlink at the name,
+    # and the symlink refusal fires before this line is reached. The probe in
+    # mutations.sh turns -L on and requires this to go red, which is what stops
+    # it being a comment that agrees with itself.
+    assert_eq "descriptor: the name's identity is taken with lstat" \
+              "$(write_code | grep -cE '"\$STAT" -c .%d:%i. -- "\$TARGET"' || true)" "1"
+    assert_eq "descriptor: and never dereferenced, which would agree with a link" \
+              "$(write_code | grep -cE '"\$STAT" -L -c .%d:%i. -- "\$TARGET"' || true)" "0"
+    # THE OWNER IS COMPARED AGAINST OURS, and this one is a source assertion
+    # for a blunter reason: producing a file owned by another uid needs root,
+    # which this suite does not have and must not ask for. So the refusal
+    # itself is never exercised -- named here rather than left looking covered
+    # -- and what IS bound is that the comparison exists and is against $EUID
+    # rather than against something that always matches.
+    assert_eq "descriptor: the owner is compared against our own euid" \
+              "$(write_code | grep -cF '[[ "$uid" == "$EUID" ]]' || true)" "1"
     # Both halves of the re-check, on one line, immediately before the rename.
+    # RE-POINTED, and the change is the point: the re-check compares against
+    # the NANOSECOND mtime now, not the whole-second one the caller's
+    # --expect-mtime is in. In seconds a rewrite in place inside the same
+    # second is indistinguishable from "untouched" -- measured -- and this
+    # comparison would wave it through.
     assert_eq "descriptor: the rename is preceded by an inode-and-mtime re-check" \
-              "$(write_code | grep -cF '[[ "$now_inode" == "$target_inode" && "$now_mtime" == "$current" ]]' || true)" "1"
+              "$(write_code | grep -cF '[[ "$now_inode" == "$target_inode" && "$now_mtime" == "$target_mtime_ns" ]]' || true)" "1"
+    assert_eq "descriptor: and the re-check reads sub-second precision, not whole seconds" \
+              "$(write_code | grep -cF "LC_ALL=C \"\$STAT\" -c '%i %.9Y' -- \"\$TARGET\"" || true)" "1"
 }
 
 test_write_publishes_a_good_candidate
@@ -2477,6 +2509,26 @@ test_a_second_hard_link_to_the_target_is_refused_end_to_end() {
     teardown_sandbox
 }
 
+
+# WAIT UNTIL THE WRITER IS PROVABLY INSIDE THE PUBLISH WINDOW.
+#
+# The writer's delay seam drops a marker the instant it enters the window --
+# after the pre-publish re-check has passed, before the exchange. Polling for
+# that is what makes the three window tests below deterministic instead of
+# dependent on the machine's mood: a fixed `sleep` raced in both directions,
+# and one of those races showed up as a flake during the probe run.
+#
+# Returns non-zero if it never appears, and every caller ASSERTS on that, so a
+# run that missed the window fails by name rather than passing quietly.
+wait_for_publish_window() {
+    local marker="$(hypr_dir)/.publish-delay-entered" i
+    for (( i = 0; i < 400; i++ )); do
+        [[ -e "$marker" ]] && return 0
+        sleep 0.05
+    done
+    return 1
+}
+
 # --- A VERSION THAT APPEARS AFTER THE VALIDATION --------------------------
 #
 # THE FINDING: the final inode/mtime check and the publish were separate
@@ -2509,9 +2561,11 @@ test_a_version_that_appears_after_validation_is_not_silently_discarded() {
           "$WRITE_BIN" write --expect-mtime "$mtime" > "$SANDBOX/answer.json" &
     local writer=$!
 
-    # Inside the window: after the pre-publish re-check has passed, before the
-    # exchange. A whole new file at the name, so the inode changes too.
-    sleep 1
+    # Inside the window BY CONSTRUCTION, not by timing: this returns only once
+    # the writer has passed its pre-publish re-check and begun its delay.
+    local entered="no"; wait_for_publish_window && entered="yes"
+    assert_eq "intervening: the writer really did reach the publish window" "$entered" "yes"
+    # A whole new file at the name, so the inode changes too.
     printf 'o.launch_on_start("their-own-edit")\n' > "$SANDBOX/theirs.lua"
     mv -T -- "$SANDBOX/theirs.lua" "$(autostart_path)"
     wait "$writer"
@@ -2544,6 +2598,128 @@ test_a_version_that_appears_after_validation_is_not_silently_discarded() {
     teardown_sandbox
 }
 
+# THE SAME WINDOW, BUT THE FILE IS REWRITTEN IN PLACE RATHER THAN REPLACED.
+#
+# This is the case that makes the post-exchange comparison need BOTH numbers.
+# A rewrite through the same inode -- which is what `printf > file` does, and
+# what plenty of editors do -- leaves the INODE unchanged and moves only the
+# mtime. Compared on the inode alone, the replaced object reads as "the file we
+# validated", is treated as redundant, and is DELETED: the user's intervening
+# edit would be gone, silently, which is the finding wearing a different hat.
+#
+# It was a mutation probe that found this gap. The first version of the
+# intervening-version test replaced the file with a NEW one, so the inode moved
+# too and an inode-only comparison still caught it -- the probe that drops the
+# mtime survived, which is the probe saying the assertion was weaker than it
+# looked.
+test_an_in_place_rewrite_inside_the_window_is_also_preserved() {
+    setup_sandbox
+    write_autostart_fixture
+    write_good_candidate > "$SANDBOX/expected.lua"
+    local mtime inode
+    mtime="$(autostart_mtime)"
+    inode="$(stat -c %i "$(autostart_path)")"
+    write_good_candidate \
+        | OMARCHY_AUTOSTART_STAMP="20260904-131313" \
+          OMARCHY_AUTOSTART_PUBLISH_DELAY=2 \
+          "$WRITE_BIN" write --expect-mtime "$mtime" > "$SANDBOX/answer.json" &
+    local writer=$!
+    local entered="no"; wait_for_publish_window && entered="yes"
+    assert_eq "in-place: the writer really did reach the publish window" "$entered" "yes"
+    # IN PLACE: no mv, no new file. Same inode, later mtime.
+    printf 'o.launch_on_start("edited-in-place")\n' > "$(autostart_path)"
+    assert_eq "in-place: the fixture really was rewritten through the same inode" \
+              "$(stat -c %i "$(autostart_path)")" "$inode"
+    wait "$writer"
+
+    local out; out="$(cat "$SANDBOX/answer.json")"
+    assert_eq "in-place: the write still published" "$(jq -r .ok <<<"$out")" "true"
+    assert_eq "in-place: our candidate is at the name" \
+              "$(cmp -s "$SANDBOX/expected.lua" "$(autostart_path)" && echo published || echo NOT-PUBLISHED)" \
+              "published"
+    local rescued; rescued="$(jq -r .rescued <<<"$out")"
+    assert_eq "in-place: the rewritten version was preserved, not deleted as redundant" \
+              "$([[ -n "$rescued" && "$rescued" != "null" && -f "$rescued" ]] && echo preserved \
+                 || echo "LOST: ${rescued}")" "preserved"
+    assert_eq "in-place: and it holds the bytes that were written in place" \
+              "$(cat "$rescued" 2>/dev/null)" 'o.launch_on_start("edited-in-place")'
+    teardown_sandbox
+}
+
+# AND THE TARGET VANISHING INSIDE THE SAME WINDOW, which is a case the one-way
+# rename could not even detect: `mv -T` CREATES a destination that is not
+# there, so a file deleted while this was working would come back carrying our
+# content and no history at all. An exchange is conditional on the target
+# existing (measured), so the write is refused instead and the validated bytes
+# are left in the backup that was already taken.
+test_a_target_that_vanishes_inside_the_publish_window_is_refused() {
+    setup_sandbox
+    write_autostart_fixture
+    local mtime; mtime="$(autostart_mtime)"
+    write_good_candidate \
+        | OMARCHY_AUTOSTART_STAMP="20260904-121212" \
+          OMARCHY_AUTOSTART_PUBLISH_DELAY=2 \
+          "$WRITE_BIN" write --expect-mtime "$mtime" > "$SANDBOX/answer.json" &
+    local writer=$!
+    local entered="no"; wait_for_publish_window && entered="yes"
+    assert_eq "vanished: the writer really did reach the publish window" "$entered" "yes"
+    rm -f -- "$(autostart_path)"
+    wait "$writer"
+    local out; out="$(cat "$SANDBOX/answer.json")"
+    assert_eq "vanished: the write is refused" "$(jq -r .error <<<"$out")" "stale"
+    # THE POINT: it is not re-created behind the user's back.
+    assert_eq "vanished: and the file is NOT created by the publish" \
+              "$([[ -e "$(autostart_path)" ]] && echo RECREATED || echo absent)" "absent"
+    assert_eq "vanished: the backup taken before the publish is still there" \
+              "$(backup_count)" "1"
+    assert_eq "vanished: and it holds the file that was validated" \
+              "$(cmp -s "$SANDBOX/before.lua" "$(newest_backup)" && echo original || echo NOT-THE-ORIGINAL)" \
+              "original"
+    assert_eq "vanished: nothing staged was left behind" \
+              "$(find "$(hypr_dir)" -maxdepth 1 -name '.autostart.lua.*' | wc -l)" "0"
+    teardown_sandbox
+}
+
+# THE SEAM ITSELF REFUSES A VALUE IT CANNOT TRUST, AND THIS IS A TIMING
+# ASSERTION BECAUSE NOTHING ELSE CAN SEE IT.
+#
+# The delay seam validates its value to a SINGLE DIGIT and otherwise does
+# nothing at all. Take that check away and the value goes straight to `sleep`
+# -- and because a failed `sleep` is followed by `return 0`, a malformed value
+# leaves NO trace in the answer. What IS observable is a value big enough to
+# matter: two digits are refused, so the write must come back at once. With the
+# check removed it sleeps for half a minute, which is what turns this red.
+#
+# Found by a probe as well: the first version of this file validated the seam
+# and asserted nothing about it, so the probe that deletes the validation
+# survived.
+test_the_publish_delay_seam_ignores_a_value_it_cannot_trust() {
+    setup_sandbox
+    write_autostart_fixture
+    local mtime start end out elapsed
+    mtime="$(autostart_mtime)"
+    start="$(date +%s)"
+    out="$(write_good_candidate \
+           | OMARCHY_AUTOSTART_STAMP="20260904-141414" \
+             OMARCHY_AUTOSTART_PUBLISH_DELAY=30 \
+             "$WRITE_BIN" write --expect-mtime "$mtime")"
+    end="$(date +%s)"
+    elapsed=$((end - start))
+    assert_eq "delay seam: a value that is not a single digit is ignored, not slept" \
+              "$([[ "$elapsed" -lt 5 ]] && echo ignored \
+                 || echo "SLEPT ${elapsed}s -- the value was handed to sleep unchecked")" \
+              "ignored"
+    assert_eq "delay seam: and the write itself is unaffected by it" \
+              "$(jq -r .ok <<<"$out")" "true"
+    # A shape that is not a number at all takes the same route.
+    out="$(write_good_candidate \
+           | OMARCHY_AUTOSTART_STAMP="20260904-151515" \
+             OMARCHY_AUTOSTART_PUBLISH_DELAY='../escape' \
+             "$WRITE_BIN" write --expect-mtime "$(autostart_mtime)")"
+    assert_eq "delay seam: a path-shaped value is ignored too" "$(jq -r .ok <<<"$out")" "true"
+    teardown_sandbox
+}
+
 # THE OTHER SIDE OF THE SAME PROPERTY: an ordinary write rescues nothing and
 # leaves no stray file behind. Without this, "rescued" could be set on every
 # write and the assertions above would still pass.
@@ -2560,6 +2736,12 @@ test_an_ordinary_write_rescues_nothing() {
     # new way for a dotfile to be left beside the user's configuration.
     assert_eq "ordinary write: no staged dotfile survived the exchange" \
               "$(find "$(hypr_dir)" -maxdepth 1 -name '.autostart.lua.*' | wc -l)" "0"
+    # AND THE SEAM LEFT NO TRACE, because the seam was not set. The window
+    # marker exists only on the delayed path; if it ever appeared on an
+    # ordinary write, the seam would be doing something in production.
+    assert_eq "ordinary write: the publish-window marker was never created" \
+              "$([[ -e "$(hypr_dir)/.publish-delay-entered" ]] && echo CREATED || echo absent)" \
+              "absent"
     teardown_sandbox
 }
 
@@ -2746,6 +2928,9 @@ test_no_test_seam_is_on_the_panels_allowlist() {
 test_the_descriptor_validation_is_asked_directly
 test_a_second_hard_link_to_the_target_is_refused_end_to_end
 test_a_version_that_appears_after_validation_is_not_silently_discarded
+test_an_in_place_rewrite_inside_the_window_is_also_preserved
+test_a_target_that_vanishes_inside_the_publish_window_is_refused
+test_the_publish_delay_seam_ignores_a_value_it_cannot_trust
 test_an_ordinary_write_rescues_nothing
 test_a_rescued_file_can_never_be_pruned
 test_every_shipped_script_fixes_its_interpreter
