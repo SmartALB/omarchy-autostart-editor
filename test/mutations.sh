@@ -472,8 +472,11 @@ probe "writer: a file that changed on disk is refused" "$SHELL_SUITE" bin/omarch
 # per write, so the old pattern -- cp -p -- "$TARGET" "$BACKUP" -- matches
 # nothing and this probe reported "the mutation changed nothing" the moment the
 # dating landed.
+# The destination moved again: the backup is copied to a STAGED name and
+# renamed onto its final one, so that a link left at the final name cannot be
+# written through (see the symlink probes below). The pattern follows.
 probe "writer: the backup is taken before the replacement" "$SHELL_SUITE" bin/omarchy-autostart-hypr-write \
-  's|cp -p -- "$TARGET" "$backup_path"|true|'
+  's|cp -p -- "$TARGET" "$BACKUPTMP"|true|'
 
 # --- the dated backups, and the pruning that deletes in the user's directory -
 #
@@ -518,8 +521,11 @@ probe "backups: the name must carry the date" "$SHELL_SUITE" bin/omarchy-autosta
 
 # A second write inside the same second must not silently replace the backup
 # the first one took.
+# The freeness test moved into name_is_free, so this disarms it there -- and
+# it now disarms it for BOTH candidate shapes at once, the bare stamp and the
+# "-<n>" collision suffix, which is what it always meant to do.
 probe "backups: a same-second collision must not overwrite a saved state" "$SHELL_SUITE" bin/omarchy-autostart-hypr-write \
-  's@if \[\[ ! -e "$HYPR_DIR/$base" \]\]; then printf@if true; then printf@'
+  's@if name_is_free "$base"; then printf@if true; then printf@'
 
 # AND A BACKUP THAT COULD NOT BE TAKEN MUST STILL ABORT THE WRITE.
 #
@@ -538,6 +544,50 @@ probe "backups: a failed backup must still abort the write" "$SHELL_SUITE" bin/o
 # check it would be a way to name a backup outside our own pattern.
 probe "backups: the stamp seam must accept nothing but a timestamp" "$SHELL_SUITE" bin/omarchy-autostart-hypr-write \
   's@    \[\[ "$stamp" =~ \^\[0-9\]{8}-\[0-9\]{6}\$ \]\] || return 1@    [[ -n "$stamp" ]] || return 1@'
+
+# --- a symlink pre-positioned at the backup name ----------------------------
+#
+# The hole a marketplace reviewer reported against c2236c3, and the reason
+# these probes are here rather than the assertions being trusted on sight: the
+# guard that was missing is one this file already holds in three other places,
+# so an assertion that never watched it fail is worth nothing here.
+
+# `-e` FOLLOWS a symlink, so a DANGLING one at a candidate name reports "does
+# not exist" and the name reads as free. This is the exact line of the report.
+probe "backups: a symlink at a candidate name is not a free name" "$SHELL_SUITE" bin/omarchy-autostart-hypr-write \
+  's@    \[\[ ! -e "$path" && ! -L "$path" \]\]@    [[ ! -e "$path" ]]@'
+
+# AND THE WRITE ITSELF MUST NOT BE ABLE TO FOLLOW ONE. This reverts the backup
+# to the shape the report describes -- a `cp` straight to the final name --
+# which is what a link appearing between the check and the copy would then be
+# written through.
+probe "backups: the backup must not be copied straight to its final name" "$SHELL_SUITE" bin/omarchy-autostart-hypr-write \
+  's@    mv -T -f -- "$BACKUPTMP" "$backup_path" \\@    cp -p -- "$TARGET" "$backup_path" \\@'
+
+# -T IS NOT DECORATION. Measured: `mv` onto a symlink pointing at a DIRECTORY
+# moves the file INSIDE that directory and leaves the link standing;
+# `mv -T` replaces the link. The publish gets the same treatment as the backup.
+probe "writer: the publish cannot be diverted into a directory" "$SHELL_SUITE" bin/omarchy-autostart-hypr-write \
+  's@mv -T -f -- "$STAGEFILE" "$TARGET"@mv -f -- "$STAGEFILE" "$TARGET"@'
+
+# The staged backup is a dotfile beside the user's Hyprland configuration, and
+# a write that fails between the copy and the rename must not leave it there.
+probe "backups: the staged backup is removed on the way out" "$SHELL_SUITE" bin/omarchy-autostart-hypr-write \
+  's@    \[\[ -n "${BACKUPTMP:-}" \]\] && rm -f -- "$BACKUPTMP"@    :@'
+
+# BOTH GUARDS AT ONCE, and that is the honest shape here rather than laziness
+# -- the same reasoning as "a failed backup must still abort the write" above.
+#
+# A link pointing at an EXISTING file is refused by the name check on `-e`
+# alone, so no single-guard mutation can reach the copy with one at the
+# destination; and the `mv -T` write cannot be observed being followed while
+# the name check is standing. The assertion that the LINK'S TARGET IS UNTOUCHED
+# is therefore only red when the whole guarantee is disarmed, which is exactly
+# what this does: the name check waved through, and the backup copied straight
+# to the name it chose. Measured -- with either one alone the suite stays green.
+probe "backups: a link at the backup name must never reach the user's own file" "$SHELL_SUITE" bin/omarchy-autostart-hypr-write \
+  's@if name_is_free "$base"; then printf@if true; then printf@
+   s@    mv -T -f -- "$BACKUPTMP" "$backup_path" \\@    cp -p -- "$TARGET" "$backup_path" \\@'
 
 probe "writer: a symlink is refused" "$SHELL_SUITE" bin/omarchy-autostart-hypr-write \
   's|^    \[\[ ! -h "$TARGET" \]\] \|\| err "is-a-symlink"|    [[ 1 -eq 1 ]] \|\| err "is-a-symlink"|'

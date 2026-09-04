@@ -85,8 +85,10 @@ STAMP_OVERRIDE="${OMARCHY_AUTOSTART_STAMP:-}"
 # be a dotfile beside the user's own Hyprland configuration. Learned in task
 # 4, copied deliberately.
 STAGEFILE=""   # the candidate, staged beside the destination
+BACKUPTMP=""   # the backup, staged beside the destination before it is named
 cleanup() {
     [[ -n "${STAGEFILE:-}" ]] && rm -f -- "$STAGEFILE"
+    [[ -n "${BACKUPTMP:-}" ]] && rm -f -- "$BACKUPTMP"
     return 0
 }
 trap cleanup EXIT
@@ -220,12 +222,44 @@ prune_our_backups() {
     return 0
 }
 
+# IS THIS CANDIDATE NAME FREE? `-e` ALONE IS THE WRONG TEST, and getting it
+# wrong here was a reported hole in this file: `-e` FOLLOWS a symlink, so a
+# DANGLING one reports "does not exist" and its name was taken to be free.
+#
+# Measured on this machine (bash 5.3.15, coreutils 9.11), on a link whose
+# target does not exist:
+#
+#     -e  FALSE     -L  TRUE      <- dangling symlink
+#     -e  TRUE      -L  TRUE      <- symlink to an existing file
+#     -e  FALSE     -L  FALSE     <- a name with nothing at it, the free case
+#
+# So `-e` and `-L` disagree on exactly the case an attacker pre-positions, and
+# only requiring BOTH to be false says "nothing is at this name". A symlink of
+# any kind at a candidate name is NOT a free name: the caller moves on to the
+# next candidate, and if every candidate is taken the write is refused. Either
+# outcome is deliberate; writing through the link is the one thing that is not.
+#
+# The backup names are predictable BY CONSTRUCTION -- author plus a
+# second-resolution date -- so "an attacker cannot guess the name" was never
+# available as a defence and this check does not lean on it.
+# A missing argument answers "not free", the same direction every other
+# refusal in this file leans: `${1:?}` would exit the shell here and skip the
+# JSON envelope that every outcome is required to leave through.
+name_is_free() {
+    local name="${1:-}" path
+    [[ -n "$name" ]] || return 1
+    path="$HYPR_DIR/$name"
+    [[ ! -e "$path" && ! -L "$path" ]]
+}
+
 # The name this write's backup gets. Free by construction: if the second-
 # resolution stamp is already taken -- two writes inside one second -- a
 # counter is appended rather than the existing backup being overwritten,
 # because silently replacing a saved state is the defect this whole change
 # exists to remove. Returning nothing means no free name was found, and the
 # caller treats that as a failed backup, which aborts the write.
+#
+# "Taken" is name_is_free's answer, not `-e`'s; see the comment on it.
 backup_name_for_now() {
     local stamp base n
     if [[ -n "$STAMP_OVERRIDE" ]]; then
@@ -235,10 +269,10 @@ backup_name_for_now() {
     fi
     [[ "$stamp" =~ ^[0-9]{8}-[0-9]{6}$ ]] || return 1
     base="autostart.lua.$BACKUP_AUTHOR.$stamp.bak"
-    if [[ ! -e "$HYPR_DIR/$base" ]]; then printf '%s\n' "$base"; return 0; fi
+    if name_is_free "$base"; then printf '%s\n' "$base"; return 0; fi
     for (( n = 2; n <= 50; n++ )); do
         base="autostart.lua.$BACKUP_AUTHOR.$stamp-$n.bak"
-        if [[ ! -e "$HYPR_DIR/$base" ]]; then printf '%s\n' "$base"; return 0; fi
+        if name_is_free "$base"; then printf '%s\n' "$base"; return 0; fi
     done
     return 1
 }
@@ -345,14 +379,54 @@ cmd_write() {
     # writing without one would leave the user with no way to undo a change to
     # a file that decides whether the session starts what it should. A name
     # that cannot be found free counts as a failed backup for the same reason.
+    #
+    # AND IT IS WRITTEN THROUGH A NAME NOBODY CAN PRE-POSITION. The name check
+    # above cannot be the only guard: it answers about the state of the
+    # directory at the moment it runs, and this is a directory another process
+    # of the same user can change between that moment and this one. So the
+    # bytes go somewhere no attacker can name, and only then take our name.
+    #
+    # MEASURED, both primitives, rather than assumed (coreutils 9.11):
+    #
+    #   cp -p src dest, dest a symlink to an existing file
+    #       -> exit 0, dest STAYS a symlink, THE LINK'S TARGET IS OVERWRITTEN.
+    #          Success reported, bytes in someone else's file. This is the
+    #          shape the reviewer's finding is about.
+    #   cp -p src dest, dest a DANGLING symlink
+    #       -> exit 1, "cannot write through dangling symlink", nothing written.
+    #   mv -f src dest, dest a symlink to an existing file
+    #       -> exit 0, dest becomes a PLAIN FILE, the target is UNTOUCHED.
+    #   mv -f src dest, dest a symlink to a DIRECTORY
+    #       -> exit 0, and the file lands INSIDE that directory. Which is why
+    #          -T is not decoration: with --no-target-directory the link is
+    #          replaced and nothing is written through it.
+    #
+    # So: `cp -p` into a fresh mktemp name (created O_EXCL, so it cannot be a
+    # link somebody left there), then `mv -T` it onto our name. `cp -p` keeps
+    # giving the backup the ORIGINAL's mtime and mode, and the rename carries
+    # both across -- measured -- so the "a backup's mtime is the age of its
+    # CONTENT" property the pruning comment relies on is unchanged.
     local backup_base backup_path
     backup_base="$(backup_name_for_now)" \
         || err "write-failed" "could not find a free backup name in $HYPR_DIR; nothing was written"
     backup_path="$HYPR_DIR/$backup_base"
-    cp -p -- "$TARGET" "$backup_path" \
+    BACKUPTMP="$(mktemp "$HYPR_DIR/.autostart.lua.bak.XXXXXX")" \
+        || err "write-failed" "could not stage a backup of $TARGET in $HYPR_DIR; nothing was written"
+    cp -p -- "$TARGET" "$BACKUPTMP" \
         || err "write-failed" "could not back $TARGET up to $backup_path; nothing was written"
+    mv -T -f -- "$BACKUPTMP" "$backup_path" \
+        || err "write-failed" "could not back $TARGET up to $backup_path; nothing was written"
+    # Named: the staged backup path no longer exists, so take it out of
+    # cleanup's hands rather than have it remove the backup we just took.
+    BACKUPTMP=""
 
-    mv -f -- "$STAGEFILE" "$TARGET" || err "write-failed" "could not publish $TARGET"
+    # -T here for the same reason, and it is the same class of defect one line
+    # further on: $TARGET was refused as a symlink long before this, but that
+    # answer is also about a moment that has passed. Without
+    # --no-target-directory a $TARGET that became a symlink to a directory in
+    # the meantime would take the staged file INSIDE it and leave the link
+    # standing as the user's autostart.lua.
+    mv -T -f -- "$STAGEFILE" "$TARGET" || err "write-failed" "could not publish $TARGET"
     # Published: the staged path no longer exists, so take it out of cleanup's
     # hands rather than have it try to remove the destination's former name.
     STAGEFILE=""

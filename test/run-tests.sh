@@ -886,8 +886,19 @@ test_write_publishes_a_good_candidate() {
     # would turn `mv` into a copy-then-unlink with a window in which
     # autostart.lua is half written. Nothing observable distinguishes the two
     # after the fact, so this is asserted on the code.
-    assert_eq "write: the replacement is staged in the destination's own directory" \
-              "$(write_code | grep -cF 'mktemp "$HYPR_DIR/' || true)" "1"
+    #
+    # EVERY stage, not "the one stage": the backup is staged too (see the
+    # writer's own comment on why it cannot be copied straight to its final
+    # name), and an assertion that counted one mktemp would have had to be
+    # renumbered rather than re-read every time another was added. Asserted as
+    # "all of them are in $HYPR_DIR" so it cannot be satisfied by a count.
+    local all_stages stages_beside
+    all_stages="$(write_code | grep -cF 'mktemp' || true)"
+    stages_beside="$(write_code | grep -cF 'mktemp "$HYPR_DIR/' || true)"
+    assert_eq "write: the script stages something at all" \
+              "$([[ "$all_stages" -gt 0 ]] && echo yes || echo 'NO mktemp at all -- the pattern no longer matches')" "yes"
+    assert_eq "write: EVERY staged file is staged in the destination's own directory" \
+              "$stages_beside" "$all_stages"
     teardown_sandbox
 }
 
@@ -1397,11 +1408,196 @@ test_write_refuses_when_there_is_no_lua_compiler() {
     teardown_sandbox
 }
 
+# --- A SYMLINK PRE-POSITIONED AT THE BACKUP NAME ---------------------------
+#
+# Reported against c2236c3 by a marketplace reviewer, and it was real: the
+# name search asked `[[ ! -e ]]`, which FOLLOWS a link, so a DANGLING symlink
+# at a candidate name reported "does not exist" and the name was taken to be
+# free -- and the backup was then copied straight to that name.
+#
+# THE NAME IS PREDICTABLE BY CONSTRUCTION. It is the author plus a
+# second-resolution date, so there is nothing to guess, and OMARCHY_AUTOSTART_STAMP
+# gives a test the same certainty an attacker already has rather than any
+# extra power. Anyone who can write in ~/.config/hypr -- the same UID, so a
+# wrong mode on that directory or any process running as the user -- can put
+# the link there first.
+#
+# WHAT THESE ASSERT is the whole of the guarantee, in three parts, because the
+# first two alone would pass for a writer that quietly wrote somewhere else:
+#   * whatever the link points at is UNTOUCHED, byte for byte;
+#   * autostart.lua ends in a correct state -- published, or unchanged;
+#   * and the writer's ANSWER matches what it did. A refusal says false; a
+#     success says true AND names a backup that really is our copy at a name
+#     of ours. "Wrote somewhere else and reported success" fails all three.
+test_write_will_not_follow_a_link_left_at_the_backup_name() {
+    setup_sandbox
+    write_autostart_fixture
+    local stamp="20260904-101010"
+    local predicted="$(hypr_dir)/autostart.lua.smartalb-autostart.$stamp.bak"
+
+    # THE DANGLING LINK: the case `-e` gets wrong. Its target is a path that
+    # does not exist, and the assertion is that it STILL does not.
+    local victim="$SANDBOX/victim-that-must-never-appear"
+    ln -s "$victim" "$predicted"
+    # Fail-closed first: if the fixture did not actually leave a dangling link
+    # at the name the writer is about to choose, everything below is about
+    # nothing.
+    assert_eq "symlink backup: the fixture left a DANGLING link at the predicted name" \
+              "$([[ -L "$predicted" && ! -e "$predicted" ]] && echo dangling || echo NOT-DANGLING)" \
+              "dangling"
+
+    local answer; answer="$(write_at_stamp "$stamp" 'o.launch_on_start("dangling")')"
+
+    assert_eq "symlink backup: the writer's answer is deliberate, not an error it hid" \
+              "$(jq -r .ok <<<"$answer")" "true"
+    assert_eq "symlink backup: NOTHING was created where the dangling link pointed" \
+              "$([[ -e "$victim" ]] && echo WRITTEN || echo absent)" "absent"
+    assert_eq "symlink backup: the pre-positioned link was not chosen as the name" \
+              "$([[ "$(jq -r .backup <<<"$answer")" == "$predicted" ]] && echo CHOSEN || echo skipped)" \
+              "skipped"
+    assert_eq "symlink backup: and the link itself was neither followed nor replaced" \
+              "$([[ -L "$predicted" && ! -e "$predicted" ]] && echo still-a-dangling-link || echo CHANGED)" \
+              "still-a-dangling-link"
+    # The backup it DID take is a real copy at a real name of ours -- which is
+    # what makes "true" an honest answer rather than a report about a write
+    # that landed somewhere else.
+    local took; took="$(jq -r .backup <<<"$answer")"
+    assert_eq "symlink backup: the backup it took is a plain file, not a link" \
+              "$([[ -f "$took" && ! -L "$took" ]] && echo plain || echo NOT-A-PLAIN-FILE)" "plain"
+    assert_eq "symlink backup: and it holds the bytes that were replaced" \
+              "$(cmp -s "$SANDBOX/before.lua" "$took" && echo identical || echo DIFFERENT)" "identical"
+    assert_eq "symlink backup: autostart.lua ends holding the new content" \
+              "$(tail -1 "$(autostart_path)")" 'o.launch_on_start("dangling")'
+    assert_nothing_staged "symlink backup: nothing is left staged afterwards"
+    teardown_sandbox
+}
+
+# THE OTHER HALF: a link that points at a file that EXISTS and has content.
+# `-e` answers TRUE for this one, so the old code skipped it by luck rather
+# than by guard -- and luck is not a property. Asserted separately so that a
+# change which fixes only the dangling case cannot pass for both.
+test_write_will_not_follow_a_link_that_points_at_a_real_file() {
+    setup_sandbox
+    write_autostart_fixture
+    local stamp="20260904-202020"
+    local predicted="$(hypr_dir)/autostart.lua.smartalb-autostart.$stamp.bak"
+
+    # A file of the user's that has nothing to do with this plugin.
+    local victim="$SANDBOX/home/.bashrc-like"
+    printf '%s\n' 'THE USER OWN FILE' 'second line' > "$victim"
+    local victim_before; victim_before="$(sha256sum < "$victim")"
+    ln -s "$victim" "$predicted"
+    assert_eq "symlink backup: the fixture left a LIVE link at the predicted name" \
+              "$([[ -L "$predicted" && -f "$predicted" ]] && echo live || echo NOT-LIVE)" "live"
+
+    local answer; answer="$(write_at_stamp "$stamp" 'o.launch_on_start("live")')"
+
+    assert_eq "symlink backup: the answer is deliberate for a live link too" \
+              "$(jq -r .ok <<<"$answer")" "true"
+    # THE ONE THAT MATTERS. Measured on this machine: `cp -p` to a symlink
+    # pointing at an existing file exits 0, leaves the link a link, and
+    # OVERWRITES the target -- success reported, bytes in the user's file.
+    assert_eq "symlink backup: THE LINK'S TARGET IS UNTOUCHED, BYTE FOR BYTE" \
+              "$(sha256sum < "$victim")" "$victim_before"
+    assert_eq "symlink backup: the live link was not chosen as the name either" \
+              "$([[ "$(jq -r .backup <<<"$answer")" == "$predicted" ]] && echo CHOSEN || echo skipped)" \
+              "skipped"
+    assert_eq "symlink backup: and the live link is still the link it was" \
+              "$([[ -L "$predicted" && "$(readlink "$predicted")" == "$victim" ]] && echo intact || echo CHANGED)" \
+              "intact"
+    local took; took="$(jq -r .backup <<<"$answer")"
+    assert_eq "symlink backup: the backup it took is a plain file here too" \
+              "$([[ -f "$took" && ! -L "$took" ]] && echo plain || echo NOT-A-PLAIN-FILE)" "plain"
+    assert_eq "symlink backup: holding the bytes that were replaced" \
+              "$(cmp -s "$SANDBOX/before.lua" "$took" && echo identical || echo DIFFERENT)" "identical"
+    assert_eq "symlink backup: autostart.lua ends holding the new content" \
+              "$(tail -1 "$(autostart_path)")" 'o.launch_on_start("live")'
+    teardown_sandbox
+}
+
+# AND WHEN EVERY CANDIDATE NAME IS A LINK, the answer is a refusal -- the same
+# refusal a directory full of real backups already produces. This is the
+# "refuse" branch of "refuse, or choose another name": there is no name left
+# to choose, so the write must not happen at all rather than fall back to one
+# of the links.
+test_write_refuses_when_every_backup_name_is_a_link() {
+    setup_sandbox
+    write_autostart_fixture
+    local stamp="20991230-235959" n
+    ln -s "$SANDBOX/nowhere" "$(hypr_dir)/autostart.lua.smartalb-autostart.$stamp.bak"
+    for (( n = 2; n <= 50; n++ )); do
+        ln -s "$SANDBOX/nowhere" "$(hypr_dir)/autostart.lua.smartalb-autostart.$stamp-$n.bak"
+    done
+    assert_eq "symlink backup: the fixture really did link every candidate name" \
+              "$(find "$(hypr_dir)" -maxdepth 1 -type l -name "autostart.lua.smartalb-autostart.$stamp*.bak" | wc -l)" "50"
+    local before answer
+    before="$(sha256sum < "$(autostart_path)")"
+    answer="$(printf '%s\n' 'o.launch_on_start("blocked")' \
+              | OMARCHY_AUTOSTART_STAMP="$stamp" "$WRITE_BIN" write \
+                  --expect-mtime "$(autostart_mtime)")"
+    assert_eq "symlink backup: with every candidate name a link the write is refused" \
+              "$(jq -r .ok <<<"$answer")" "false"
+    assert_eq "symlink backup: and it says the write failed" \
+              "$(jq -r .error <<<"$answer")" "write-failed"
+    assert_eq "symlink backup: nothing was written where any of them pointed" \
+              "$([[ -e "$SANDBOX/nowhere" ]] && echo WRITTEN || echo absent)" "absent"
+    assert_eq "symlink backup: the file is byte for byte what it was" \
+              "$(sha256sum < "$(autostart_path)")" "$before"
+    assert_nothing_staged "symlink backup: and nothing was staged and left behind"
+    teardown_sandbox
+}
+
+# THE RACE HALF, and why it is asserted on the code rather than run.
+#
+# The name check answers about the directory at the moment it runs. Another
+# process of the same user can put a link at the chosen name AFTER that answer
+# and BEFORE the backup is written, and then the name check has already done
+# all it can. The second guard is that the write itself cannot follow a link:
+# the bytes go to a fresh mktemp name -- created O_EXCL, so it cannot be
+# something somebody left there -- and `mv -T` puts that file at our name,
+# which REPLACES a link rather than writing through it (measured; `cp` to a
+# final path does not, which is what the reviewer's finding turned on).
+#
+# A test cannot make that window open on demand. Racing it in a loop would be
+# a test that can only ever report green -- it would pass just as happily
+# against the unfixed writer whenever it lost the race, which is the shape
+# this project has already been bitten by. So the property asserted here is
+# the one that is actually decidable: no `cp` in this script names the final
+# backup path as its destination, and the backup arrives there by `mv -T`.
+test_the_backup_is_never_written_straight_to_its_final_name() {
+    setup_sandbox
+    assert_eq "symlink backup: no cp writes to the final backup name" \
+              "$(write_code | grep -cF 'cp -p -- "$TARGET" "$backup_path"' || true)" "0"
+    assert_eq "symlink backup: the backup is copied to a staged name first" \
+              "$(write_code | grep -cF 'cp -p -- "$TARGET" "$BACKUPTMP"' || true)" "1"
+    assert_eq "symlink backup: and reaches its final name by a rename that replaces a link" \
+              "$(write_code | grep -cF 'mv -T -f -- "$BACKUPTMP" "$backup_path"' || true)" "1"
+    # The publish is the same class of defect one line further on: $TARGET was
+    # refused as a symlink, but that answer is also about a moment that has
+    # passed. Without -T a $TARGET that became a link to a directory in the
+    # meantime would take the staged file inside it.
+    assert_eq "symlink backup: the publish cannot move into a directory either" \
+              "$(write_code | grep -cF 'mv -T -f -- "$STAGEFILE" "$TARGET"' || true)" "1"
+    # An mv without -T anywhere in this script is the defect coming back.
+    assert_eq "symlink backup: every mv in this script is a --no-target-directory mv" \
+              "$(write_code | grep -oE '(^|[^-[:alnum:]])mv ' | grep -c . || true)" \
+              "$(write_code | grep -cF 'mv -T -f -- ' || true)"
+    # And the staged backup is cleaned up like the staged candidate, or a
+    # failed write leaves a dotfile beside the user's Hyprland configuration.
+    assert_eq "symlink backup: the staged backup is removed by the exit trap" \
+              "$(write_code | grep -cF 'rm -f -- "$BACKUPTMP"' || true)" "1"
+    teardown_sandbox
+}
+
 test_write_publishes_a_good_candidate
 test_write_backs_the_old_content_up
 test_write_keeps_only_the_newest_backups
 test_the_pruner_refuses_every_name_that_is_not_ours
 test_write_aborts_when_no_backup_can_be_taken
+test_write_will_not_follow_a_link_left_at_the_backup_name
+test_write_will_not_follow_a_link_that_points_at_a_real_file
+test_write_refuses_when_every_backup_name_is_a_link
+test_the_backup_is_never_written_straight_to_its_final_name
 test_the_stamp_seam_accepts_nothing_but_a_timestamp
 test_writing_never_touches_a_backup_that_is_not_ours
 test_write_refuses_a_candidate_that_does_not_compile
