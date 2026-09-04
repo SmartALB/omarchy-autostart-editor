@@ -2,7 +2,7 @@
   "schemaVersion": 1,
   "id": "smartalb.autostart",
   "name": "Autostart Editor",
-  "version": "1.0.1",
+  "version": "1.0.2",
   "author": "SmartALB",
   "license": "MIT",
   "description": "Edit the programs that start with your Hyprland session",
