@@ -1614,8 +1614,14 @@ test_the_backup_is_never_written_straight_to_its_final_name() {
     # here, and both must carry -T for the reason above.
     assert_eq "symlink backup: the publish exchanges, and cannot exchange into a directory" \
               "$(write_code | grep -cF '"$MV" --exchange -T -- "$STAGEFILE" "$TARGET"' || true)" "1"
-    assert_eq "symlink backup: the fallback publish cannot move into a directory either" \
-              "$(write_code | grep -cF '"$MV" -T -f -- "$STAGEFILE" "$TARGET"' || true)" "1"
+    # INVERTED, and the inversion is the property. There WAS a one-way
+    # `mv -T` publish here as the fallback for a system that cannot exchange.
+    # It published with exactly the weakness finding two is about, so it was
+    # taken out and replaced by a refusal -- which means the correct assertion
+    # is now that no such rename exists at all. The probe in mutations.sh puts
+    # it back and requires this to go red.
+    assert_eq "publish: there is no one-way rename of the staged file left in this script" \
+              "$(write_code | grep -cF '"$MV" -T -f -- "$STAGEFILE" "$TARGET"' || true)" "0"
     # An mv without -T anywhere in this script is the defect coming back.
     # An mv without -T anywhere in this script is the defect coming back --
     # and the rescue rename and the exchange are two more spellings of it, so
@@ -2720,6 +2726,73 @@ test_the_publish_delay_seam_ignores_a_value_it_cannot_trust() {
     teardown_sandbox
 }
 
+# A SYSTEM THAT CANNOT EXCHANGE IS REFUSED, NOT QUIETLY DOWNGRADED.
+#
+# `mv --exchange` needs coreutils 9.5 or newer and a filesystem that supports
+# RENAME_EXCHANGE. Where it is missing there were three candidate answers and
+# only one of them is defensible:
+#
+#   a one-way `mv -T`     publishes, and publishes with EXACTLY the weakness
+#                         finding two is about -- an intervening version
+#                         overwritten with nothing said. Tried, then taken out.
+#   move-away, move-in    captures the object atomically, but leaves the name
+#                         empty between the two renames; a writer landing in
+#                         that gap is overwritten unseen. A smaller window, the
+#                         same defect.
+#   REFUSE                nothing is written, the user's file is untouched, the
+#                         backup already taken still holds the validated bytes,
+#                         and the user gets a sentence saying why.
+#
+# THE SEAM IS WHAT MAKES THIS TESTABLE ON A SYSTEM THAT CAN EXCHANGE. Without
+# it this branch could only be verified by reading it, and a branch nobody has
+# executed is a guess about what would happen.
+test_a_system_that_cannot_exchange_is_refused() {
+    setup_sandbox
+    write_autostart_fixture
+    local mtime out
+    mtime="$(autostart_mtime)"
+    out="$(write_good_candidate \
+           | OMARCHY_AUTOSTART_STAMP="20260904-161616" \
+             OMARCHY_AUTOSTART_NO_EXCHANGE=1 \
+             "$WRITE_BIN" write --expect-mtime "$mtime")"
+    assert_eq "no exchange: the write is refused by name" \
+              "$(jq -r .error <<<"$out")" "no-atomic-exchange"
+    assert_eq "no exchange: and the answer says nothing was written" \
+              "$([[ "$(jq -r .detail <<<"$out")" == *"nothing was written"* ]] && echo said || echo NOT-SAID)" \
+              "said"
+    # THE POINT: refused means refused.
+    assert_eq "no exchange: the user's file is byte for byte what it was" \
+              "$(cmp -s "$SANDBOX/before.lua" "$(autostart_path)" && echo unchanged || echo CHANGED)" \
+              "unchanged"
+    assert_eq "no exchange: no staged dotfile was left behind" \
+              "$(find "$(hypr_dir)" -maxdepth 1 -name '.autostart.lua.*' | wc -l)" "0"
+    # And the state that was validated is still recoverable: the backup is
+    # taken before the publish, so a refusal here leaves it standing.
+    assert_eq "no exchange: the backup taken before the publish still stands" \
+              "$(backup_count)" "1"
+    assert_eq "no exchange: and it holds the file that was validated" \
+              "$(cmp -s "$SANDBOX/before.lua" "$(newest_backup)" && echo original || echo NOT-THE-ORIGINAL)" \
+              "original"
+    teardown_sandbox
+}
+
+# The seam is exactly the string "1" and nothing else. A seam that fires on any
+# non-empty value is a seam that fires by accident.
+test_the_no_exchange_seam_takes_only_the_one_value() {
+    setup_sandbox
+    write_autostart_fixture
+    local out
+    out="$(write_good_candidate \
+           | OMARCHY_AUTOSTART_STAMP="20260904-171717" \
+             OMARCHY_AUTOSTART_NO_EXCHANGE=yes \
+             "$WRITE_BIN" write --expect-mtime "$(autostart_mtime)")"
+    assert_eq "no exchange seam: any other value is ignored and the write proceeds" \
+              "$(jq -r .ok <<<"$out")" "true"
+    assert_eq "no exchange seam: by exchange, as normal" \
+              "$(jq -r .publish <<<"$out")" "exchange"
+    teardown_sandbox
+}
+
 # THE OTHER SIDE OF THE SAME PROPERTY: an ordinary write rescues nothing and
 # leaves no stray file behind. Without this, "rescued" could be set on every
 # write and the assertions above would still pass.
@@ -2813,6 +2886,13 @@ test_no_shipped_script_resolves_a_tool_by_name() {
         # Comment lines are stripped first: every one of these scripts NAMES
         # the tools it runs in its prose, and a check a comment can satisfy --
         # or defeat -- is not a check. Same rule as qml-structure.sh.
+        #
+        # IT IS NOT STRING-AWARE, AND IT FAILS CLOSED. A tool name inside a
+        # quoted message counts as a hit -- which happened for real: the
+        # no-atomic-exchange refusal explained itself with "(mv --exchange
+        # failed...)" and this flagged the "(mv " as a command. The message was
+        # reworded rather than the check loosened, because over-flagging is the
+        # safe direction for this one and a parser is not on offer here.
         local hits
         hits="$(grep -v '^[[:space:]]*#' "$s" \
                 | grep -nE '(^|[|&;({`]|\$\()[[:space:]]*(awk|cat|chmod|cp|cut|date|find|grep|head|hyprctl|id|jq|luac[0-9.]*|mkdir|mktemp|mv|readlink|rm|sed|sleep|sort|stat|tr|wc)([[:space:]]|\)|$)' \
@@ -2931,6 +3011,8 @@ test_a_version_that_appears_after_validation_is_not_silently_discarded
 test_an_in_place_rewrite_inside_the_window_is_also_preserved
 test_a_target_that_vanishes_inside_the_publish_window_is_refused
 test_the_publish_delay_seam_ignores_a_value_it_cannot_trust
+test_a_system_that_cannot_exchange_is_refused
+test_the_no_exchange_seam_takes_only_the_one_value
 test_an_ordinary_write_rescues_nothing
 test_a_rescued_file_can_never_be_pruned
 test_every_shipped_script_fixes_its_interpreter

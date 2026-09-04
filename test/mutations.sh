@@ -663,7 +663,7 @@ probe "writer: a group-writable file is refused" "$SHELL_SUITE" bin/omarchy-auto
   's|^    if (( 8#$mode \& 8#22 )); then$|    if (( 8#$mode \& 8#00 )); then|'
 
 probe "writer: an absent file is not written into existence" "$SHELL_SUITE" bin/omarchy-autostart-hypr-write \
-  's|^    \[\[ -e "$TARGET" \]\] \|\| err "not-a-file" "$TARGET does not exist"$|    [[ -e "$TARGET" ]] \|\| touch "$TARGET"|'
+  's|^    \[\[ -e "$TARGET" \]\] \|\| err "not-a-file" "$TARGET does not exist"$|    [[ -e "$TARGET" ]] \|\| /usr/bin/touch "$TARGET"|'
 
 probe "writer: a candidate past the cap is refused" "$SHELL_SUITE" bin/omarchy-autostart-hypr-write \
   's|^        err "too-large" "the candidate exceeds $MAX_BYTES bytes"$|        true|'
@@ -943,7 +943,7 @@ probe "descriptor: the name's identity must not be dereferenced" "$SHELL_SUITE" 
 # to the one-way rename this fix replaced, the intervening version becomes
 # unreachable again -- which is the finding.
 probe "publish: a one-way rename cannot preserve what it replaced" "$SHELL_SUITE" bin/omarchy-autostart-hypr-write \
-  's@if "$MV" --exchange -T -- "$STAGEFILE" "$TARGET" 2>/dev/null; then@if "$MV" -T -f -- "$STAGEFILE" "$TARGET" 2>/dev/null; then@'
+  's@&& "$MV" --exchange -T -- "$STAGEFILE" "$TARGET" 2>/dev/null; then@\&\& "$MV" -T -f -- "$STAGEFILE" "$TARGET" 2>/dev/null; then@'
 
 probe "publish: what was replaced must be looked at" "$SHELL_SUITE" bin/omarchy-autostart-hypr-write \
   's|^        publish_check_replaced "$replaced" "$target_inode" "$target_mtime_ns"|        :|'
@@ -991,6 +991,16 @@ probe "publish: the answer must name what was preserved" "$SHELL_SUITE" bin/omar
 # test seam into an argument-injection point.
 probe "publish: the delay seam validates its own value" "$SHELL_SUITE" bin/omarchy-autostart-hypr-write \
   's|\[\[ "$PUBLISH_DELAY" =~ \^\[0-9\]\$ \]\] \|\| return 0|:|'
+
+# A SYSTEM THAT CANNOT EXCHANGE MUST BE REFUSED, NOT DOWNGRADED. This is the
+# one-way rename put back -- the exact code that was tried and taken out --
+# and it is the shape the second finding is about.
+probe "publish: an unavailable exchange must refuse, not fall back to a plain rename" "$SHELL_SUITE" bin/omarchy-autostart-hypr-write \
+  's@        err "no-atomic-exchange" \\@        "$MV" -T -f -- "$STAGEFILE" "$TARGET" || err "write-failed" "x"; STAGEFILE=""; publish_mode="rename"; : \\@'
+
+# And the seam that reaches that branch has to actually reach it.
+probe "publish: the no-exchange seam is honoured" "$SHELL_SUITE" bin/omarchy-autostart-hypr-write \
+  's@    if \[\[ "$NO_EXCHANGE" != "1" \]\] \\@    if [[ "$NO_EXCHANGE" != "0" ]] \\@'
 
 # --- THE EXECUTION BOUNDARY (finding 3) -------------------------------------
 

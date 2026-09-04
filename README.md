@@ -131,17 +131,28 @@ reloads nothing.
   **absolute path** from a block at the top of each script, and each script
   runs with `PATH` set to nothing, so none of these is resolved through the
   environment.
-- **`mv --exchange` (coreutils 9.5 or newer) is used but not required.** The
-  publish of `autostart.lua` is an atomic *exchange* rather than a one-way
-  rename, which is what lets the writer notice a version of the file that
-  appeared while it was working and preserve it instead of overwriting it. It
-  needs `RENAME_EXCHANGE`, so coreutils 9.5+ and a filesystem that supports
-  the call -- ext4, btrfs, xfs and tmpfs all do, and that covers `~/.config`
-  on Omarchy. **Where it is unavailable the writer falls back to the plain
-  rename it used before** and says so in its answer (`"publish":"rename"`
-  instead of `"publish":"exchange"`); the write still happens, but on that
-  path an intervening version can still be overwritten without notice. No
-  version floor is enforced and nothing new is installed.
+- **`mv --exchange`, and therefore coreutils 9.5 or newer, is REQUIRED to
+  save.** This is the one hard platform requirement this plugin adds, so it is
+  spelled out rather than left in a commit message.
+
+  The publish of `autostart.lua` is an atomic *exchange* (`RENAME_EXCHANGE`)
+  rather than a one-way rename. That is not a detail: it is what leaves the
+  writer holding whatever was actually replaced, so a version of the file that
+  appeared while the writer was working can be recognised and **preserved**
+  instead of silently overwritten. `--exchange` arrived in coreutils 9.5
+  (2024), and the filesystem has to support the call -- ext4, btrfs, xfs and
+  tmpfs all do, which covers `~/.config` on any normal Omarchy install.
+
+  **Where it is unavailable, the panel REFUSES to save and says so** (a worded
+  message; the envelope code is `no-atomic-exchange`). It does not fall back to
+  a plain rename. That fallback existed during development and was removed on
+  purpose: it publishes with exactly the defect the exchange exists to close --
+  an intervening version overwritten with nothing said -- and a plugin may
+  refuse to write a login file, but it may not write one unsafely and file a
+  note about it. A refusal costs nothing that matters: the backup is taken
+  before the publish, so the validated state is still on disk, and your own
+  file is untouched. Reading `autostart.lua` needs none of this; only saving
+  does. Nothing is fetched or installed either way.
 - **`hyprctl`** only for the running-programs picker, which reads
   `hyprctl -j clients`. That picker is switched off in this release, so
   nothing in this plugin currently calls `hyprctl` at all -- the script that

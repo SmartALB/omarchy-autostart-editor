@@ -100,9 +100,9 @@ var MAX_COMMAND    = 500;
 // second emitter and put them in front of the assertion.
 function envelopeCodes() {
     return ["does-not-compile", "foreign-owner", "insecure-permissions",
-            "internal", "is-a-symlink", "multiply-linked", "no-lua-compiler",
-            "not-a-file", "stale", "substituted", "too-large", "unreadable",
-            "write-failed"];
+            "internal", "is-a-symlink", "multiply-linked", "no-atomic-exchange",
+            "no-lua-compiler", "not-a-file", "stale", "substituted",
+            "too-large", "unreadable", "write-failed"];
 }
 
 // Plain wording for the envelope the bin/ helpers answer with. Every code the
@@ -162,6 +162,16 @@ function envelopeText(code, detail) {
              + " name for it -- a write here would change a file somewhere"
              + " else too. Nothing was written. Replace the link with a real"
              + " copy, or edit the file by hand." + extra;
+    // The one refusal that is about the SYSTEM rather than about the file. It
+    // says what is missing and what the user can still do, because "your
+    // filesystem cannot do this" is useless on its own.
+    if (code === "no-atomic-exchange")
+        return "This system cannot replace autostart.lua in one atomic step,"
+             + " and a file that runs at every login is not written any other"
+             + " way -- a half-finished write here breaks your session. Nothing"
+             + " was changed. This needs coreutils 9.5 or newer and a"
+             + " filesystem that supports atomic exchange; edit the file by"
+             + " hand instead." + extra;
     if (code === "write-failed")
         return "autostart.lua could not be written, so nothing was changed." + extra;
     if (code === "internal")

@@ -185,6 +185,14 @@ STAMP_OVERRIDE="${OMARCHY_AUTOSTART_STAMP:-}"
 # allowlist and this name is not on it. The same argument the two seams above
 # already stand on, and this is the weaker seam of the three: HYPRCTL names an
 # arbitrary BINARY TO EXECUTE.
+# THE THIRD NAMED SEAM, and the only way the "this system cannot exchange"
+# path can be reached on a system that can. Exactly the string "1" forces it;
+# anything else is ignored. It cannot make this script do something it would
+# not otherwise do -- it can only make it take the OTHER implemented answer,
+# which is a refusal. A branch nobody has executed is a guess about what would
+# happen, and this is what turns that branch into a test.
+NO_EXCHANGE="${OMARCHY_AUTOSTART_NO_EXCHANGE:-}"
+
 PUBLISH_DELAY="${OMARCHY_AUTOSTART_PUBLISH_DELAY:-}"
 # AND IT ANNOUNCES THAT IT HAS ENTERED THE WINDOW, which is the difference
 # between a deterministic test and a flaky one.
@@ -891,7 +899,8 @@ cmd_write() {
     # the meantime would take the staged file INSIDE it and leave the link
     # standing as the user's autostart.lua.
     local publish_mode="exchange"
-    if "$MV" --exchange -T -- "$STAGEFILE" "$TARGET" 2>/dev/null; then
+    if [[ "$NO_EXCHANGE" != "1" ]] \
+       && "$MV" --exchange -T -- "$STAGEFILE" "$TARGET" 2>/dev/null; then
         # The staged name now holds the file that WAS the user's autostart.lua,
         # so it is not scratch any more and cleanup must not remove it. Handed
         # over by name.
@@ -910,19 +919,33 @@ cmd_write() {
         [[ -e "$TARGET" || -L "$TARGET" ]] \
             || err "stale" "$TARGET disappeared while it was being written; nothing was written"
         # The other is that RENAME_EXCHANGE is not available: coreutils older
-        # than 9.5 has no --exchange, and a filesystem can refuse the call
-        # (NFS, some overlays). ~/.config on Omarchy is ext4 or btrfs, where
-        # it works -- measured on this machine -- but a plugin must not refuse
-        # to write a user's file over a syscall.
+        # than 9.5 has no --exchange at all, and a filesystem can refuse the
+        # call (NFS, some overlay and network stores).
         #
-        # SO IT FALLS BACK TO THE OLD ONE-WAY RENAME, WITH THE OLD WEAKNESS,
-        # AND SAYS SO IN THE ANSWER. publish:"rename" in the envelope is not
-        # decoration: on that path an intervening version CAN still be
-        # overwritten silently, and a caller reading the field can tell which
-        # of the two guarantees it got.
-        publish_mode="rename"
-        "$MV" -T -f -- "$STAGEFILE" "$TARGET" || err "write-failed" "could not publish $TARGET"
-        STAGEFILE=""
+        # AND THE ANSWER TO THAT IS A REFUSAL, NOT A QUIETER WRITE.
+        #
+        # THE ONE-WAY RENAME WAS TRIED HERE FIRST AND TAKEN BACK OUT. It
+        # publishes, and it publishes with exactly the weakness the second
+        # finding is about: a version that appeared after the validation is
+        # overwritten with nothing said. Reporting that in a field the panel
+        # did not show made it a fact nobody would ever read -- which is the
+        # same as silence. A plugin may refuse to write a login file; it may
+        # not write one unsafely and file a note about it.
+        #
+        # A MOVE-AWAY-THEN-MOVE-IN PAIR WAS THE OTHER CANDIDATE and it is not
+        # here either. `mv -T target scratch` does capture the object
+        # atomically, so it looks equivalent -- but between that rename and
+        # the next one THE NAME HAS NOTHING AT IT, and a writer landing in
+        # that gap creates a file the second rename then overwrites, unseen.
+        # It narrows the window and keeps the defect, so it buys a smaller
+        # number and not the property.
+        #
+        # NOTHING IS LOST BY REFUSING. The backup was taken before this point
+        # and it holds the validated bytes; the user's own file has not been
+        # touched. What they get is a sentence telling them why, which is more
+        # than the rename gave them.
+        err "no-atomic-exchange" \
+            "this system cannot replace $TARGET atomically -- mv --exchange is unavailable, and it needs coreutils 9.5 or newer plus a filesystem supporting RENAME_EXCHANGE -- and this plugin will not publish a login file any other way; nothing was written"
     fi
     # The descriptor's work is done -- it named the file that was replaced, and
     # that file is now the previous state. Closed here rather than left to the

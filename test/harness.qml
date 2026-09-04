@@ -114,13 +114,15 @@ QtObject {
             check("envelopeText: every code the bin/ helpers can emit has plain wording",
                   unwordedAmong(Model.envelopeCodes(),
                                 function(c) { return Model.envelopeText(c, ""); }), "");
-            // Thirteen, up from ten: the writer's open stopped trusting the
+            // Fourteen, up from ten. The writer's open stopped trusting the
             // pathname and gained three refusals of its own -- substituted,
-            // foreign-owner and multiply-linked. The number is spelled out
-            // rather than derived so that a list which quietly EMPTIES fails
-            // here; test/run-tests.sh is what proves the list is the scripts'.
+            // foreign-owner and multiply-linked -- and its publish gained a
+            // fourth, no-atomic-exchange, for the system that cannot replace
+            // the file in one step. The number is spelled out rather than
+            // derived so that a list which quietly EMPTIES fails here;
+            // test/run-tests.sh is what proves the list is the scripts'.
             check("envelopeText: the list it checks is not empty",
-                  Model.envelopeCodes().length, 13);
+                  Model.envelopeCodes().length, 14);
 
             // THE EMPTY ENVELOPE. Empty stdout is what a missing script, a
             // timeout kill and a non-zero exit outside the script's own two
