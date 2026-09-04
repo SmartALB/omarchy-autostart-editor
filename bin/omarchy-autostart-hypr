@@ -1,4 +1,4 @@
-#!/usr/bin/env bash
+#!/bin/bash
 # Delivers the user's autostart.lua RAW, as one JSON envelope.
 #
 # It reads. It does not parse, and it does not write -- there is no write
@@ -25,6 +25,70 @@
 # per-name and do not change because there is one name.
 set -uo pipefail
 
+# THE EXECUTION BOUNDARY, THIS SCRIPT'S HALF OF IT.
+#
+# A reported defect, and the third of three: this script edits a file that
+# runs at every login, and it reached that file through tools resolved by an
+# AMBIENT PATH, under an interpreter resolved the same way. Both are inputs an
+# attacker of the same user controls without touching a single byte of this
+# repository.
+#
+# MEASURED, all three legs, rather than assumed (bash 5.3.15, coreutils 9.11):
+#
+#   PATH=<dir with a fake bash>  ./script  with `#!/usr/bin/env bash`
+#       -> THE FAKE RAN. `env` resolves the interpreter through PATH, so the
+#          shebang itself was a PATH lookup. Hence `#!/bin/bash` above.
+#   BASH_ENV=<file>  ./script
+#       -> THE FILE'S CODE RAN BEFORE THE SCRIPT BODY. bash sources $BASH_ENV
+#          in a NON-interactive shell. Also measured THROUGH
+#          `/usr/bin/timeout`, which is the route the panel actually uses.
+#   BASH_ENV=<file>  ./script  with the fixed `#!/bin/bash` shebang
+#       -> IT STILL RAN. A fixed interpreter does not close this one.
+#
+# SO THE TWO HALVES ARE NOT INTERCHANGEABLE, and this block is only one of
+# them. BASH_ENV is consumed by bash at STARTUP -- before the first line
+# below is read -- so no assignment here can undo it. That half is closed at
+# the process boundary, where the panel constructs the environment explicitly
+# instead of inheriting it (Runners.qml's toolEnv, with clearEnvironment).
+# What this block closes is everything resolved AFTER startup: the tools.
+#
+# PATH IS SET TO NOTHING, WHICH IS DELIBERATELY STRONGER THAN SETTING IT TO
+# /usr/bin:/bin.
+#
+# A minimal trusted PATH would make a tool name this file forgot to spell
+# absolutely keep working -- silently, from a directory that happens to be
+# right -- and the whole point of the block below is that there is no such
+# name. Empty means a bare name resolves to NOTHING and the script fails
+# loudly instead. A missed name becomes a visible bug rather than a quiet
+# dependency on the environment, and that is the property the suite probes.
+#
+# MEASURED, all four scripts, under `env -i` with PATH= and nothing but the
+# variables the panel passes: the application list, the Hyprland read, the
+# window list (through hyprctl) and a real write all succeed. Nothing in this
+# plugin needs a PATH.
+#
+# The panel still hands the process a minimal PATH of its own (Runners.qml's
+# toolEnv) rather than no PATH at all: that is the layer that keeps an
+# INHERITED, poisoned PATH out. This line is the layer that makes this file
+# independent of any PATH whatsoever.
+PATH=
+export PATH
+# Whitespace, explicitly. An inherited IFS changes how every unquoted
+# expansion in this file splits.
+IFS=$' \t\n'
+
+# THE TOOLS, ABSOLUTE, IN ONE BLOCK, AND USED AT EVERY CALL SITE BELOW.
+# Named here rather than resolved per call so the list is auditable in one
+# place; test/run-tests.sh requires this block to be complete and requires no
+# bare tool name to survive anywhere in this file's code.
+readonly HEAD=/usr/bin/head
+readonly JQ=/usr/bin/jq
+readonly MKTEMP=/usr/bin/mktemp
+readonly MV=/usr/bin/mv
+readonly RM=/usr/bin/rm
+readonly STAT=/usr/bin/stat
+readonly WC=/usr/bin/wc
+
 HYPR_DIR="${XDG_CONFIG_HOME:-$HOME/.config}/hypr"
 MAX_BYTES_PER_FILE=65536   # 64 KiB -- ample for 31 lines
 FILES=(autostart.lua)
@@ -44,9 +108,9 @@ TMPFILE=""      # one file's raw bytes
 CUTFILE=""      # the same, cut back to exactly the cap
 LISTFILE=""     # one JSON object per file, slurped at the end
 cleanup() {
-    [[ -n "${TMPFILE:-}" ]]  && rm -f -- "$TMPFILE"
-    [[ -n "${CUTFILE:-}" ]]  && rm -f -- "$CUTFILE"
-    [[ -n "${LISTFILE:-}" ]] && rm -f -- "$LISTFILE"
+    [[ -n "${TMPFILE:-}" ]]  && "$RM" -f -- "$TMPFILE"
+    [[ -n "${CUTFILE:-}" ]]  && "$RM" -f -- "$CUTFILE"
+    [[ -n "${LISTFILE:-}" ]] && "$RM" -f -- "$LISTFILE"
     return 0
 }
 trap cleanup EXIT
@@ -56,11 +120,11 @@ trap cleanup EXIT
 # stdout and exit 0 -- otherwise a caller sees nothing at all and cannot tell
 # why.
 ok() {
-    jq -nc "$@" || printf '{"ok":false,"error":"internal","detail":"could not build the answer"}\n'
+    "$JQ" -nc "$@" || printf '{"ok":false,"error":"internal","detail":"could not build the answer"}\n'
     exit 0
 }
 err() {
-    jq -nc --arg e "$1" --arg d "${2:-}" '{ok:false,error:$e,detail:$d}' \
+    "$JQ" -nc --arg e "$1" --arg d "${2:-}" '{ok:false,error:$e,detail:$d}' \
         || printf '{"ok":false,"error":"internal","detail":"could not build the error answer"}\n'
     exit 0
 }
@@ -77,18 +141,18 @@ err() {
 TRUNCATED=false
 read_bounded() {
     local src="$1" dst="$2" size
-    head -c $((MAX_BYTES_PER_FILE + 1)) "$src" > "$dst" 2>/dev/null \
+    "$HEAD" -c $((MAX_BYTES_PER_FILE + 1)) "$src" > "$dst" 2>/dev/null \
         || err "unreadable" "could not read $src"
-    size="$(wc -c < "$dst")"
+    size="$("$WC" -c < "$dst")"
     if (( size > MAX_BYTES_PER_FILE )); then
         TRUNCATED=true
         # Keep exactly MAX bytes, never MAX+1: the extra byte was read to
         # DETECT the overrun, and handing it on would put a byte in the
         # content that the cap says is not there.
-        CUTFILE="$(mktemp)" || err "internal" "could not create a temporary file"
-        head -c "$MAX_BYTES_PER_FILE" "$dst" > "$CUTFILE" 2>/dev/null \
+        CUTFILE="$("$MKTEMP")" || err "internal" "could not create a temporary file"
+        "$HEAD" -c "$MAX_BYTES_PER_FILE" "$dst" > "$CUTFILE" 2>/dev/null \
             || err "unreadable" "could not truncate the copy of $src"
-        mv -f "$CUTFILE" "$dst" || err "internal" "could not replace the scratch copy"
+        "$MV" -f "$CUTFILE" "$dst" || err "internal" "could not replace the scratch copy"
         CUTFILE=""
     fi
 }
@@ -96,7 +160,7 @@ read_bounded() {
 cmd_read() {
     local name path mtime present
 
-    LISTFILE="$(mktemp)" || err "internal" "could not create a temporary file"
+    LISTFILE="$("$MKTEMP")" || err "internal" "could not create a temporary file"
     [[ -n "$LISTFILE" && -f "$LISTFILE" ]] || err "internal" "could not create a temporary file"
     : > "$LISTFILE"
 
@@ -106,7 +170,7 @@ cmd_read() {
         mtime=0
         TRUNCATED=false
 
-        TMPFILE="$(mktemp)" || err "internal" "could not create a temporary file"
+        TMPFILE="$("$MKTEMP")" || err "internal" "could not create a temporary file"
         [[ -n "$TMPFILE" && -f "$TMPFILE" ]] || err "internal" "could not create a temporary file"
         : > "$TMPFILE"
 
@@ -118,7 +182,7 @@ cmd_read() {
             # be handed content newer than the stamp it was told about. A file
             # that vanishes here produces the absent entry, not an error
             # envelope: it simply is not there any more.
-            if mtime="$(stat -c %Y "$path" 2>/dev/null)" && [[ "$mtime" =~ ^[0-9]+$ ]]; then
+            if mtime="$("$STAT" -c %Y "$path" 2>/dev/null)" && [[ "$mtime" =~ ^[0-9]+$ ]]; then
                 read_bounded "$path" "$TMPFILE"
                 present=true
             else
@@ -132,7 +196,7 @@ cmd_read() {
         # else in this plugin: a Lua string literal may carry "\\." and a
         # mangled backslash would silently change the command the panel shows
         # -- and, through the writer, the command that runs at login.
-        jq -nc --arg n "$name" --arg p "$path" \
+        "$JQ" -nc --arg n "$name" --arg p "$path" \
                --argjson m "$mtime" --argjson pr "$present" --argjson t "$TRUNCATED" \
                --rawfile c "$TMPFILE" \
                '{name:$n, path:$p, present:$pr, mtime:$m, truncated:$t, content:$c}' \
@@ -141,7 +205,7 @@ cmd_read() {
 
         # Removed here rather than left to the trap: the loop runs once per
         # file and only the last path would otherwise be cleaned up.
-        rm -f -- "$TMPFILE"
+        "$RM" -f -- "$TMPFILE"
         TMPFILE=""
     done
 

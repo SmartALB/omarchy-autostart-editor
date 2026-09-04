@@ -1,4 +1,5 @@
 import QtQuick
+import Quickshell
 import Quickshell.Io
 import "Model.js" as Model
 
@@ -21,6 +22,103 @@ Item {
     // running-programs picker needs it.
     readonly property string binTimeout: "/usr/bin/timeout"
     readonly property string binBash: "/usr/bin/bash"
+    // The producer limit's own tool. It was the one binary this file named
+    // BARE -- it sits inside the command string runnerOut/runnerErr build, so
+    // check 1's quoted-and-bare pattern could not see it -- and it was
+    // therefore resolved through the ambient PATH like any other.
+    readonly property string binHead: "/usr/bin/head"
+
+    // THE ENVIRONMENT EVERY PROCESS OF THIS PLUGIN GETS, CONSTRUCTED HERE
+    // RATHER THAN INHERITED FROM THE SESSION.
+    //
+    // A reported defect. Every route out of this plugin runs one of our own
+    // bin/ scripts, each of them bash, and the whole ambient environment went
+    // with them -- so a variable an attacker of the same user can set decided
+    // what those scripts executed. MEASURED (bash 5.3.15): with
+    // BASH_ENV=<file> in the environment, that file's code RAN BEFORE THE
+    // SCRIPT BODY, in a non-interactive shell, and it still ran through
+    // `/usr/bin/timeout`, which is the route below. A fixed `#!/bin/bash`
+    // shebang does NOT close that -- measured too -- because bash consumes
+    // BASH_ENV at startup, before the first line of the script is read. It
+    // has to be ABSENT FROM THE ENVIRONMENT, and that is what this is.
+    //
+    // AN ALLOWLIST, NOT A DENYLIST, and that is the whole point: with
+    // clearEnvironment the child starts from NOTHING and receives exactly
+    // what is named here, so BASH_ENV, ENV, SHELLOPTS, BASHOPTS, LD_PRELOAD,
+    // LD_LIBRARY_PATH and IFS are gone BY CONSTRUCTION rather than by being
+    // remembered. A denylist would have to be extended for every variable
+    // bash, ld.so or a coreutils tool ever learns to read.
+    //
+    // IT ALSO CLOSES THE TEST SEAMS AS AN INJECTION ROUTE, which was not the
+    // reason for the change but is the largest single thing it buys.
+    // bin/omarchy-autostart-windows honours HYPRCTL, WHICH NAMES A BINARY IT
+    // EXECUTES, and bin/omarchy-autostart-hypr-write honours
+    // OMARCHY_AUTOSTART_STAMP; both exist so the suites can reach what a
+    // sandbox cannot otherwise reach. Neither is in this list, so through the
+    // panel neither can be set at all and the production value is the only
+    // one reachable.
+    //
+    // `clearEnvironment: true` ALONE WOULD BREAK THIS PLUGIN, which is why
+    // every name below is here for a stated reason rather than for tidiness.
+    // Each was measured by running the script under `env -i` plus the one
+    // variable:
+    //
+    //   HOME                        the writer and the reader resolve
+    //                               ${XDG_CONFIG_HOME:-$HOME/.config}
+    //   XDG_CONFIG_HOME             the same expansion, when the user sets it
+    //   XDG_DATA_HOME               the .desktop search path of
+    //   XDG_DATA_DIRS               bin/omarchy-autostart-apps; without them
+    //                               the "Add program" picker is empty
+    //   HYPRLAND_INSTANCE_SIGNATURE `hyprctl -j clients` in
+    //                               bin/omarchy-autostart-windows. MEASURED:
+    //                               under `env -i` hyprctl answers
+    //                               "HYPRLAND_INSTANCE_SIGNATURE not set! (is
+    //                               hyprland running?)" and the running-
+    //                               programs list comes back empty. This one
+    //                               is in no finding and would have been the
+    //                               silent breakage.
+    //   XDG_RUNTIME_DIR             the socket hyprctl opens. Measured: it
+    //                               resolves /run/user/<uid> without this on
+    //                               this machine, so passing it is the
+    //                               documented path rather than a guess.
+    //   LANG                        `sort` is locale-sensitive and it orders
+    //                               the application picker. Dropping it would
+    //                               silently reorder that list for every user
+    //                               outside the C locale, so it is passed to
+    //                               keep the panel's behaviour UNCHANGED.
+    //                               LC_ALL is deliberately not passed --
+    //                               nothing here needs it -- and neither are
+    //                               LOCPATH or GCONV_PATH, which name
+    //                               loadable modules, for the same reason
+    //                               LD_PRELOAD is not.
+    //   TMPDIR                      bin/omarchy-autostart-hypr's mktemp. It
+    //                               falls back to /tmp on its own, so this is
+    //                               for the user who redirected it.
+    //
+    // PATH IS FIXED RATHER THAN PASSED: it is the one variable in the list
+    // whose inherited value is itself the defect.
+    readonly property string toolPath: "/usr/bin:/bin"
+    readonly property var toolEnvPass: ["HOME", "XDG_CONFIG_HOME",
+        "XDG_DATA_HOME", "XDG_DATA_DIRS", "XDG_RUNTIME_DIR",
+        "HYPRLAND_INSTANCE_SIGNATURE", "LANG", "TMPDIR"]
+
+    // A variable that is not set stays UNSET rather than arriving as an empty
+    // string. "Absent" is the honest translation of absent, and it is also
+    // what the scripts are written against: ${XDG_CONFIG_HOME:-$HOME/.config}
+    // substitutes for set-but-empty too, but nothing here should depend on
+    // that reading.
+    readonly property var toolEnv: root.buildToolEnv()
+
+    function buildToolEnv() {
+        var env = { "PATH": root.toolPath }
+        for (var i = 0; i < root.toolEnvPass.length; i++) {
+            var name = root.toolEnvPass[i]
+            var value = Quickshell.env(name)
+            if (value !== undefined && value !== null && String(value) !== "")
+                env[name] = String(value)
+        }
+        return env
+    }
 
     readonly property int shellSeconds: 120
 
@@ -71,7 +169,7 @@ Item {
     // the exit status a caller reads. Every other non-zero status is a real
     // failure and passes straight through.
     function runnerOut(cmd) {
-        return root.runner("{ " + cmd + "\n} | head -c " + root.maxOutBytes
+        return root.runner("{ " + cmd + "\n} | " + root.binHead + " -c " + root.maxOutBytes
             + "\ns=${PIPESTATUS[0]}"
             + "\nif [ $s -eq 141 ]; then echo 'runnerOut: producer output exceeded the cap -- truncated, not a failure' >&2; exit 0; fi"
             + "\nexit $s")
@@ -87,7 +185,7 @@ Item {
     // writing to stderr gets SIGPIPE itself, so $? becomes 141 directly --
     // and the same rule applies: 141 means truncated, not failed.
     function runnerErr(cmd) {
-        return root.runner("{ " + cmd + "\n} 2> >(head -c " + root.maxOutBytes + " >&2)"
+        return root.runner("{ " + cmd + "\n} 2> >(" + root.binHead + " -c " + root.maxOutBytes + " >&2)"
             + "\ns=$?"
             + "\nif [ $s -eq 141 ]; then echo 'runnerErr: producer output exceeded the cap -- truncated, not a failure' >&2; exit 0; fi"
             + "\nexit $s")

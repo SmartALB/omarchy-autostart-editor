@@ -165,12 +165,20 @@ fi
 
 # 3 -- both collecting helpers carry a producer limit, in real code -- a
 #      comment claiming one is stripped before this check ever sees it.
-grep -A2 'function runnerOut' <<<"$stripped_runners" | grep -q 'head -c' \
-  && ok "runnerOut carries a producer byte limit" \
-  || bad "runnerOut carries a producer byte limit" "no head -c near runnerOut (in real code)"
-grep -A2 'function runnerErr' <<<"$stripped_runners" | grep -q 'head -c' \
-  && ok "runnerErr carries a producer byte limit" \
-  || bad "runnerErr carries a producer byte limit" "no head -c near runnerErr (in real code)"
+# RE-POINTED: the limit's own tool is named absolutely now, so the literal
+# "head -c" these two looked for is "binHead + \" -c \"". Both halves are
+# required -- the tool AND the byte count -- because either alone is a limit
+# that does not limit: `binHead` with no -c reads everything, and a -c with a
+# PATH-resolved head is the defect check 1 exists for.
+for fn in runnerOut runnerErr; do
+  near="$(grep -A2 "function $fn" <<<"$stripped_runners")"
+  if grep -q 'binHead' <<<"$near" && grep -q -- '-c " + root.maxOutBytes' <<<"$near"; then
+    ok "$fn carries a producer byte limit, through an absolutely named head"
+  else
+    bad "$fn carries a producer byte limit, through an absolutely named head" \
+        "no 'binHead ... -c \" + root.maxOutBytes' near $fn (in real code)"
+  fi
+done
 
 # 4 -- runnerErr uses process substitution, not a pipe: a pipe would replace
 #      the exit status of the command, which callers read. Same
@@ -1456,6 +1464,92 @@ fn_body() {
       if (opens > 0) started = 1
     }'
 }
+
+# 6b -- EVERY DECLARED Process CONSTRUCTS ITS ENVIRONMENT INSTEAD OF
+#       INHERITING ONE, and it is the same shape as check 6 one property over:
+#       an opener count against a declaration count, per file, so a Process
+#       added in a future task cannot arrive without one.
+#
+#       THE FINDING this answers: "the process environment is inherited. Thus
+#       the reviewed route can execute substituted interpreters/tools (and
+#       non-interactive Bash startup through inherited BASH_ENV) before it
+#       edits login configuration."
+#
+#       BOTH LINES ARE REQUIRED AND NEITHER IS SUFFICIENT. `clearEnvironment`
+#       alone starts the child from nothing, which BREAKS this plugin -- the
+#       scripts resolve ${XDG_CONFIG_HOME:-$HOME/.config} and hyprctl needs
+#       HYPRLAND_INSTANCE_SIGNATURE. `environment` alone only ADDS to the
+#       inherited set, which leaves BASH_ENV exactly where it was. So the two
+#       counts are asserted against the opener count separately, and a file
+#       carrying one of them without the other fails by name.
+#
+#       AND THE ENVIRONMENT MUST BE THE VETTED ONE: `environment: run.toolEnv`
+#       and nothing else. A hand-built object literal at a Process would be a
+#       second allowlist nobody audits, which is the same rule check 5b
+#       enforces for `command`.
+for file in $(qml_files); do
+  clean="$(strip_comments "$file")"
+  n_proc="$(grep -oE 'Process[[:space:]]*\{' <<<"$clean" | grep -c . || true)"
+  [[ "$n_proc" -eq 0 ]] && continue
+  n_clear="$(grep -cE '^[[:space:]]*clearEnvironment:[[:space:]]*true[[:space:]]*$' <<<"$clean" || true)"
+  n_env="$(grep -cE '^[[:space:]]*environment:[[:space:]]*run\.toolEnv[[:space:]]*$' <<<"$clean" || true)"
+  [[ "$n_clear" -eq "$n_proc" ]] \
+    && ok "$file: every declared Process clears the inherited environment" \
+    || bad "$file: every declared Process clears the inherited environment" \
+           "$n_proc Process block(s) but $n_clear 'clearEnvironment: true' line(s)"
+  [[ "$n_env" -eq "$n_proc" ]] \
+    && ok "$file: and every one of them is given the vetted environment" \
+    || bad "$file: and every one of them is given the vetted environment" \
+           "$n_proc Process block(s) but $n_env 'environment: run.toolEnv' line(s)"
+  # An `environment:` that is anything BUT run.toolEnv is the hand-built
+  # allowlist this forbids.
+  other="$(grep -nE '^[[:space:]]*environment:' <<<"$clean" \
+           | grep -vE 'environment:[[:space:]]*run\.toolEnv[[:space:]]*$' || true)"
+  [[ -z "$other" ]] \
+    && ok "$file: no Process builds an environment of its own" \
+    || bad "$file: no Process builds an environment of its own" "$other"
+done
+
+# 6c -- THE ALLOWLIST ITSELF: what it contains, and what it must never.
+#
+#       PATH is FIXED, not passed: it is the one variable whose inherited
+#       value is itself the defect, so it must be assigned a literal and must
+#       NOT appear among the names read out of the session.
+#
+#       AND NOTHING THAT CHOOSES CODE may be on the list. BASH_ENV and ENV are
+#       sourced by bash before the script body (measured); SHELLOPTS and
+#       BASHOPTS change how it parses; LD_PRELOAD and LD_LIBRARY_PATH and
+#       LOCPATH and GCONV_PATH name objects the loader maps; IFS changes how
+#       every unquoted expansion splits. HYPRCTL, PROC_DIR,
+#       OMARCHY_AUTOSTART_STAMP and OMARCHY_AUTOSTART_PUBLISH_DELAY are this
+#       project's own test seams -- and the first of them NAMES A BINARY A
+#       SCRIPT EXECUTES, which is this finding one layer down.
+pass_block="$(sed -n '/readonly property var toolEnvPass:/,/\]/p' <<<"$(strip_comments Runners.qml)")"
+if [[ -z "$pass_block" ]]; then
+  bad "Runners.qml declares an environment allowlist" \
+      "no 'readonly property var toolEnvPass:' declaration found -- the environment cannot be an allowlist"
+else
+  ok "Runners.qml declares an environment allowlist"
+  n_names="$(grep -oE '"[A-Z_]+"' <<<"$pass_block" | grep -c . || true)"
+  [[ "$n_names" -ge 5 ]] \
+    && ok "the allowlist is populated, so the checks on it are not vacuous" \
+    || bad "the allowlist is populated, so the checks on it are not vacuous" \
+           "only $n_names name(s) on it"
+  forbidden=""
+  for name in BASH_ENV ENV SHELLOPTS BASHOPTS LD_PRELOAD LD_LIBRARY_PATH LOCPATH \
+              GCONV_PATH IFS PATH HYPRCTL PROC_DIR OMARCHY_AUTOSTART_STAMP \
+              OMARCHY_AUTOSTART_PUBLISH_DELAY; do
+    grep -q "\"$name\"" <<<"$pass_block" && forbidden="$forbidden $name"
+  done
+  [[ -z "$forbidden" ]] \
+    && ok "nothing that chooses code, and no test seam, is passed to any process" \
+    || bad "nothing that chooses code, and no test seam, is passed to any process" \
+           "on the allowlist:$forbidden"
+  grep -qE 'readonly property string toolPath:[[:space:]]*"/' <<<"$(strip_comments Runners.qml)" \
+    && ok "PATH is given a fixed absolute value rather than inherited" \
+    || bad "PATH is given a fixed absolute value rather than inherited" \
+           "no 'readonly property string toolPath: \"/...\"' in real code"
+fi
 
 # --- THE WRITE OF autostart.lua --------------------------------------------
 #

@@ -69,7 +69,7 @@ def main():
             tokens.append(("lit", sm.group(1).encode().decode("unicode_escape")))
             pos = sm.end()
             continue
-        var_m = re.match(r'root\.maxOutBytes|cmd', expr[pos:])
+        var_m = re.match(r'root\.maxOutBytes|root\.binHead|cmd', expr[pos:])
         if var_m:
             tokens.append(("var", var_m.group(0)))
             pos += var_m.end()
@@ -85,6 +85,18 @@ def main():
             out.append(test_cmd)
         elif val == "root.maxOutBytes":
             out.append(maxbytes)
+        elif val == "root.binHead":
+            # READ OUT OF THE SOURCE, never hard-coded here: the producer
+            # limit's tool is named absolutely in Runners.qml now, and a
+            # mirror of that path in this file would be a second place to
+            # forget. A declaration that has gone missing is an extraction
+            # failure, not a silent fallback to `head`.
+            hm = re.search(r'readonly\s+property\s+string\s+binHead\s*:\s*"([^"]*)"', src)
+            if not hm:
+                print("EXTRACT_FAILED: no binHead declaration in Runners.qml",
+                      file=sys.stderr)
+                return 1
+            out.append(hm.group(1))
     sys.stdout.write("".join(out))
     return 0
 

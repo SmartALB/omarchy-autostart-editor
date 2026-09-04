@@ -125,9 +125,23 @@ reloads nothing.
   (The backup pruner refuses by a different route -- an anchored match on the
   file name -- and needs no external command for it.)
 - **`bash`, `timeout`, and the usual coreutils** -- `awk`, `chmod`, `cp`,
-  `date`, `env`, `find`, `grep`, `head`, `mktemp`, `mv`, `rm`, `sed`, `stat`.
-  All present on any Omarchy install; none of them is optional and none is
-  fetched.
+  `date`, `env`, `find`, `grep`, `head`, `mktemp`, `mv`, `rm`, `sed`, `sleep`,
+  `sort`, `stat`, `tr`, `wc`. All present on any Omarchy install; none of them
+  is optional and none is fetched. Every one of them is invoked by an
+  **absolute path** from a block at the top of each script, and each script
+  runs with `PATH` set to nothing, so none of these is resolved through the
+  environment.
+- **`mv --exchange` (coreutils 9.5 or newer) is used but not required.** The
+  publish of `autostart.lua` is an atomic *exchange* rather than a one-way
+  rename, which is what lets the writer notice a version of the file that
+  appeared while it was working and preserve it instead of overwriting it. It
+  needs `RENAME_EXCHANGE`, so coreutils 9.5+ and a filesystem that supports
+  the call -- ext4, btrfs, xfs and tmpfs all do, and that covers `~/.config`
+  on Omarchy. **Where it is unavailable the writer falls back to the plain
+  rename it used before** and says so in its answer (`"publish":"rename"`
+  instead of `"publish":"exchange"`); the write still happens, but on that
+  path an intervening version can still be overwritten without notice. No
+  version floor is enforced and nothing new is installed.
 - **`hyprctl`** only for the running-programs picker, which reads
   `hyprctl -j clients`. That picker is switched off in this release, so
   nothing in this plugin currently calls `hyprctl` at all -- the script that

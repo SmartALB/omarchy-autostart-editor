@@ -121,12 +121,18 @@ assert_contains() {
 fake_hyprctl() {
     local path="$SANDBOX/bin/hyprctl"
     mkdir -p "$SANDBOX/bin"
+    # A FIXED INTERPRETER AND AN ABSOLUTE `cat`, and this is not tidiness: the
+    # scripts under test now run with PATH set to NOTHING, so this stand-in is
+    # executed with an empty PATH too. With `#!/usr/bin/env bash` the kernel
+    # asks env to find bash on PATH and there is no PATH -- measured, it broke
+    # eight window assertions the moment the scripts stopped depending on one.
+    # The fake has to hold itself to the same rule as the code it stands in for.
     cat > "$path" <<'FAKE'
-#!/usr/bin/env bash
+#!/bin/bash
 printf '%s\n' "$(printf '%s\t' "$@")" >> "$FAKE_LOG"
 case "$1" in
   eval) echo ok ;;
-  *)    cat "${FAKE_HYPRCTL_REPLY:-/dev/null}" ;;
+  *)    /usr/bin/cat "${FAKE_HYPRCTL_REPLY:-/dev/null}" ;;
 esac
 FAKE
     chmod +x "$path"

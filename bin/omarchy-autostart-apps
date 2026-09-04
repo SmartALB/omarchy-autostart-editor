@@ -1,4 +1,4 @@
-#!/usr/bin/env bash
+#!/bin/bash
 # Lists installed .desktop entries as JSON, for the "Add program" picker.
 #
 # Pure reader: it opens no configuration, runs no program, and talks to no
@@ -8,6 +8,68 @@
 # Exec= is emitted raw, field codes and all. Stripping them is Model.js's job,
 # where the test runner is fast and the cases are easy to enumerate.
 set -uo pipefail
+
+# THE EXECUTION BOUNDARY, THIS SCRIPT'S HALF OF IT.
+#
+# A reported defect, and the third of three: this script edits a file that
+# runs at every login, and it reached that file through tools resolved by an
+# AMBIENT PATH, under an interpreter resolved the same way. Both are inputs an
+# attacker of the same user controls without touching a single byte of this
+# repository.
+#
+# MEASURED, all three legs, rather than assumed (bash 5.3.15, coreutils 9.11):
+#
+#   PATH=<dir with a fake bash>  ./script  with `#!/usr/bin/env bash`
+#       -> THE FAKE RAN. `env` resolves the interpreter through PATH, so the
+#          shebang itself was a PATH lookup. Hence `#!/bin/bash` above.
+#   BASH_ENV=<file>  ./script
+#       -> THE FILE'S CODE RAN BEFORE THE SCRIPT BODY. bash sources $BASH_ENV
+#          in a NON-interactive shell. Also measured THROUGH
+#          `/usr/bin/timeout`, which is the route the panel actually uses.
+#   BASH_ENV=<file>  ./script  with the fixed `#!/bin/bash` shebang
+#       -> IT STILL RAN. A fixed interpreter does not close this one.
+#
+# SO THE TWO HALVES ARE NOT INTERCHANGEABLE, and this block is only one of
+# them. BASH_ENV is consumed by bash at STARTUP -- before the first line
+# below is read -- so no assignment here can undo it. That half is closed at
+# the process boundary, where the panel constructs the environment explicitly
+# instead of inheriting it (Runners.qml's toolEnv, with clearEnvironment).
+# What this block closes is everything resolved AFTER startup: the tools.
+#
+# PATH IS SET TO NOTHING, WHICH IS DELIBERATELY STRONGER THAN SETTING IT TO
+# /usr/bin:/bin.
+#
+# A minimal trusted PATH would make a tool name this file forgot to spell
+# absolutely keep working -- silently, from a directory that happens to be
+# right -- and the whole point of the block below is that there is no such
+# name. Empty means a bare name resolves to NOTHING and the script fails
+# loudly instead. A missed name becomes a visible bug rather than a quiet
+# dependency on the environment, and that is the property the suite probes.
+#
+# MEASURED, all four scripts, under `env -i` with PATH= and nothing but the
+# variables the panel passes: the application list, the Hyprland read, the
+# window list (through hyprctl) and a real write all succeed. Nothing in this
+# plugin needs a PATH.
+#
+# The panel still hands the process a minimal PATH of its own (Runners.qml's
+# toolEnv) rather than no PATH at all: that is the layer that keeps an
+# INHERITED, poisoned PATH out. This line is the layer that makes this file
+# independent of any PATH whatsoever.
+PATH=
+export PATH
+# Whitespace, explicitly. An inherited IFS changes how every unquoted
+# expansion in this file splits.
+IFS=$' \t\n'
+
+# THE TOOLS, ABSOLUTE, IN ONE BLOCK, AND USED AT EVERY CALL SITE BELOW.
+# Named here rather than resolved per call so the list is auditable in one
+# place; test/run-tests.sh requires this block to be complete and requires no
+# bare tool name to survive anywhere in this file's code.
+readonly AWK=/usr/bin/awk
+readonly FIND=/usr/bin/find
+readonly HEAD=/usr/bin/head
+readonly JQ=/usr/bin/jq
+readonly SORT=/usr/bin/sort
 
 MAX_FILES=2000
 MAX_BYTES_PER_FILE=65536   # 64 KiB
@@ -32,7 +94,7 @@ dirs() {
 # Read only the first group of the file and only the keys we need. Values are
 # taken from the first occurrence, which is what the desktop entry spec says.
 parse_entry() {
-    head -c "$MAX_BYTES_PER_FILE" "$1" | awk -F= '
+    "$HEAD" -c "$MAX_BYTES_PER_FILE" "$1" | "$AWK" -F= '
         /^\[/          { if (seen_group) exit; seen_group = 1; next }
         !seen_group    { next }
         /^Type=/       { if (type == "")    { type = substr($0, 6) } }
@@ -66,8 +128,8 @@ count=0
             (( count >= MAX_FILES )) && break 2
             count=$((count + 1))
             parse_entry "$file"
-        done < <(find "$dir" -maxdepth 1 -type f -name '*.desktop' | sort)
+        done < <("$FIND" "$dir" -maxdepth 1 -type f -name '*.desktop' | "$SORT")
     done < <(dirs)
-} | jq -R -s 'split("\n")
+} | "$JQ" -R -s 'split("\n")
               | map(select(length > 0) | split("\t"))
               | map({name: .[0], exec: .[1], wmclass: (.[2] // ""), icon: (.[3] // "")})'

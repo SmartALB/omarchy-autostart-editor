@@ -99,9 +99,10 @@ var MAX_COMMAND    = 500;
 // unknown-code fallback. Losing the config script is what made the writer the
 // second emitter and put them in front of the assertion.
 function envelopeCodes() {
-    return ["does-not-compile", "insecure-permissions", "internal",
-            "is-a-symlink", "no-lua-compiler", "not-a-file", "stale",
-            "too-large", "unreadable", "write-failed"];
+    return ["does-not-compile", "foreign-owner", "insecure-permissions",
+            "internal", "is-a-symlink", "multiply-linked", "no-lua-compiler",
+            "not-a-file", "stale", "substituted", "too-large", "unreadable",
+            "write-failed"];
 }
 
 // Plain wording for the envelope the bin/ helpers answer with. Every code the
@@ -144,6 +145,23 @@ function envelopeText(code, detail) {
         return "luac5.1 is not installed, so the changed file cannot be checked"
              + " before it is written -- and a file that runs at every login is"
              + " not written unchecked. Install lua51 (or luac5.1) and try again." + extra;
+    // The three codes the writer gained when its open stopped trusting the
+    // pathname. Each says what was found rather than naming a mechanism: a
+    // user reading this has to be able to act on it.
+    if (code === "substituted")
+        return "autostart.lua was swapped for a different file while the panel"
+             + " was checking it, so nothing was written. Nothing else on this"
+             + " machine should be replacing that file -- if this repeats,"
+             + " something is doing it deliberately." + extra;
+    if (code === "foreign-owner")
+        return "autostart.lua belongs to another user, so it was not touched."
+             + " A login file the panel does not own is not the panel's to"
+             + " write." + extra;
+    if (code === "multiply-linked")
+        return "autostart.lua has a second hard link, so this is not the only"
+             + " name for it -- a write here would change a file somewhere"
+             + " else too. Nothing was written. Replace the link with a real"
+             + " copy, or edit the file by hand." + extra;
     if (code === "write-failed")
         return "autostart.lua could not be written, so nothing was changed." + extra;
     if (code === "internal")
@@ -153,6 +171,27 @@ function envelopeText(code, detail) {
     // Named rather than shown bare -- the same rule every other wording
     // function in this file follows.
     return "The helper reported an unknown problem: " + String(code) + "." + extra;
+}
+
+// THE ONE THING A SUCCESSFUL WRITE CAN STILL HAVE TO SAY.
+//
+// The writer publishes with an atomic exchange, which leaves it holding
+// whatever was actually replaced. Almost always that is the file the panel
+// validated. When it is NOT -- something wrote autostart.lua in the moment
+// between the last check and the exchange -- those bytes are somebody else's
+// newer version, and the writer preserves them under a name of its own
+// instead of discarding them. This is the sentence that tells the user, since
+// a preserved file nobody is told about is a file nobody will look at.
+//
+// Empty in, empty out: an ordinary write reports rescued:"" and this returns
+// "", which is what the panel binds its visibility on.
+function rescuedText(path) {
+    var p = (path === undefined || path === null) ? "" : String(path);
+    if (p === "") return "";
+    return "Someone changed autostart.lua while this was being saved. Your new"
+         + " version is in place, and THEIR version was not thrown away -- it"
+         + " was saved as " + p + ". If you did not expect this, look at that"
+         + " file before anything else.";
 }
 
 // The build, as the panel's footer shows it. A "v" prefix and nothing else:
@@ -921,9 +960,17 @@ function autostartWriteReasonText(code) {
 // What the panel says after a successful write, and it is the whole of what
 // this task promises: the file changed, the desktop did not. No
 // `hyprctl reload`, nothing evaluated, nothing started, nothing killed.
-function autostartWrittenText() {
-    return "Written. This takes effect at your next login -- this panel "
-         + "starts nothing and reloads nothing.";
+// THE RESCUE NOTICE RIDES ON THIS ONE, and it is composed HERE rather than
+// in Panel.qml for the reason every other wording in this file was moved
+// here: wording in QML is wording no suite in this project can execute. The
+// argument is optional, so the ordinary write is the ordinary sentence and
+// nothing else -- and an old caller passing nothing gets exactly what it got
+// before.
+function autostartWrittenText(rescuedPath) {
+    var base = "Written. This takes effect at your next login -- this panel "
+             + "starts nothing and reloads nothing.";
+    var notice = rescuedText(rescuedPath);
+    return notice === "" ? base : base + " " + notice;
 }
 
 // The content lines of a file. `hyprLines` splits on "\n", so a file that

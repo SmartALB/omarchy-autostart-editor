@@ -1,4 +1,4 @@
-#!/usr/bin/env bash
+#!/bin/bash
 # Writes ~/.config/hypr/autostart.lua, and nothing else.
 #
 # THE FILE THIS REPLACES RUNS AT EVERY LOGIN. A malformed autostart.lua means
@@ -19,6 +19,77 @@
 # plugin, and a writer that can be pointed at a path is a writer that can be
 # pointed at the wrong one.
 set -uo pipefail
+
+# THE EXECUTION BOUNDARY, THIS SCRIPT'S HALF OF IT.
+#
+# A reported defect, and the third of three: this script edits a file that
+# runs at every login, and it reached that file through tools resolved by an
+# AMBIENT PATH, under an interpreter resolved the same way. Both are inputs an
+# attacker of the same user controls without touching a single byte of this
+# repository.
+#
+# MEASURED, all three legs, rather than assumed (bash 5.3.15, coreutils 9.11):
+#
+#   PATH=<dir with a fake bash>  ./script  with `#!/usr/bin/env bash`
+#       -> THE FAKE RAN. `env` resolves the interpreter through PATH, so the
+#          shebang itself was a PATH lookup. Hence `#!/bin/bash` above.
+#   BASH_ENV=<file>  ./script
+#       -> THE FILE'S CODE RAN BEFORE THE SCRIPT BODY. bash sources $BASH_ENV
+#          in a NON-interactive shell. Also measured THROUGH
+#          `/usr/bin/timeout`, which is the route the panel actually uses.
+#   BASH_ENV=<file>  ./script  with the fixed `#!/bin/bash` shebang
+#       -> IT STILL RAN. A fixed interpreter does not close this one.
+#
+# SO THE TWO HALVES ARE NOT INTERCHANGEABLE, and this block is only one of
+# them. BASH_ENV is consumed by bash at STARTUP -- before the first line
+# below is read -- so no assignment here can undo it. That half is closed at
+# the process boundary, where the panel constructs the environment explicitly
+# instead of inheriting it (Runners.qml's toolEnv, with clearEnvironment).
+# What this block closes is everything resolved AFTER startup: the tools.
+#
+# PATH IS SET TO NOTHING, WHICH IS DELIBERATELY STRONGER THAN SETTING IT TO
+# /usr/bin:/bin.
+#
+# A minimal trusted PATH would make a tool name this file forgot to spell
+# absolutely keep working -- silently, from a directory that happens to be
+# right -- and the whole point of the block below is that there is no such
+# name. Empty means a bare name resolves to NOTHING and the script fails
+# loudly instead. A missed name becomes a visible bug rather than a quiet
+# dependency on the environment, and that is the property the suite probes.
+#
+# MEASURED, all four scripts, under `env -i` with PATH= and nothing but the
+# variables the panel passes: the application list, the Hyprland read, the
+# window list (through hyprctl) and a real write all succeed. Nothing in this
+# plugin needs a PATH.
+#
+# The panel still hands the process a minimal PATH of its own (Runners.qml's
+# toolEnv) rather than no PATH at all: that is the layer that keeps an
+# INHERITED, poisoned PATH out. This line is the layer that makes this file
+# independent of any PATH whatsoever.
+PATH=
+export PATH
+# Whitespace, explicitly. An inherited IFS changes how every unquoted
+# expansion in this file splits.
+IFS=$' \t\n'
+
+# THE TOOLS, ABSOLUTE, IN ONE BLOCK, AND USED AT EVERY CALL SITE BELOW.
+# Named here rather than resolved per call so the list is auditable in one
+# place; test/run-tests.sh requires this block to be complete and requires no
+# bare tool name to survive anywhere in this file's code.
+readonly CHMOD=/usr/bin/chmod
+readonly CP=/usr/bin/cp
+readonly DATE=/usr/bin/date
+readonly GREP=/usr/bin/grep
+readonly HEAD=/usr/bin/head
+readonly JQ=/usr/bin/jq
+readonly MKTEMP=/usr/bin/mktemp
+readonly MV=/usr/bin/mv
+readonly RM=/usr/bin/rm
+readonly SED=/usr/bin/sed
+readonly SLEEP=/usr/bin/sleep
+readonly SORT=/usr/bin/sort
+readonly STAT=/usr/bin/stat
+readonly WC=/usr/bin/wc
 
 HYPR_DIR="${XDG_CONFIG_HOME:-$HOME/.config}/hypr"
 TARGET="$HYPR_DIR/autostart.lua"
@@ -54,6 +125,18 @@ MAX_BYTES=65536           # the same cap bin/omarchy-autostart-hypr reads with
 # YYYYMMDD-HHMMSS sorts lexicographically in the same order it sorts
 # chronologically, which is why the pruning below sorts by name.
 BACKUP_AUTHOR="smartalb-autostart"
+# THE OTHER AUTHOR SEGMENT, and it exists for one narrow case: a version of
+# autostart.lua that appeared AFTER this write had validated the file and was
+# therefore replaced by the publish. Those bytes are not a backup of anything
+# this script read -- they are somebody else's newer file -- so they get a
+# name of their own rather than being filed among our dated backups.
+#
+# IT DELIBERATELY DOES NOT MATCH BACKUP_RE OR BACKUP_GLOB. Both require a
+# literal "." after "smartalb-autostart", and this name continues
+# "-rescued.", so the pruner cannot see a rescued file at all and MAX_BACKUPS
+# can never remove one. A rescued file is the only copy of a state nobody else
+# saved; nothing in this script deletes it, ever.
+RESCUE_AUTHOR="smartalb-autostart-rescued"
 BACKUP_GLOB="autostart.lua.$BACKUP_AUTHOR.*.bak"
 # ANCHORED, and the anchors are the whole point: a name that merely CONTAINS
 # the pattern -- "x.autostart.lua.smartalb-autostart.20260903-101810.bak", or
@@ -78,6 +161,40 @@ MAX_BACKUPS=5
 # still lands in $HYPR_DIR under our own pattern or the write is refused.
 STAMP_OVERRIDE="${OMARCHY_AUTOSTART_STAMP:-}"
 
+# THE SECOND NAMED SEAM, and the narrowest thing in this file that could be
+# called one: a whole-second delay inserted at ONE point, immediately before
+# the publish.
+#
+# WHY IT HAS TO EXIST. The publish below detects a version of the file that
+# appeared after the validation and preserves it instead of discarding it.
+# That branch is reachable only inside a window measured in microseconds, and
+# a test that cannot reach it is a test that proves the branch compiles. The
+# alternative was an assertion that greps this file for the code it hopes is
+# there, which is the shape this project has already been burned by.
+#
+# WHAT IT CAN AND CANNOT DO. It is validated to a SINGLE DIGIT and handed to
+# /usr/bin/sleep. It cannot carry a path, a command, an option, or a number
+# large enough to hang the panel -- the panel's own `timeout` is 120 seconds
+# and this caps at nine. It can only ever make OUR OWN write slower.
+#
+# THE HONEST COST, because there is one: someone who can already set this
+# process's environment can use it to WIDEN the window this whole fix
+# narrows. That is a real regression in exactly the class finding three is
+# about -- and it is why finding three's other half matters, since through the
+# panel this variable cannot be set at all: Runners.qml's toolEnv is an
+# allowlist and this name is not on it. The same argument the two seams above
+# already stand on, and this is the weaker seam of the three: HYPRCTL names an
+# arbitrary BINARY TO EXECUTE.
+PUBLISH_DELAY="${OMARCHY_AUTOSTART_PUBLISH_DELAY:-}"
+publish_delay() {
+    [[ -n "$PUBLISH_DELAY" ]] || return 0
+    # A single digit or nothing happens. Not an error: a malformed seam value
+    # must not be able to fail a write of the user's.
+    [[ "$PUBLISH_DELAY" =~ ^[0-9]$ ]] || return 0
+    "$SLEEP" "$PUBLISH_DELAY"
+    return 0
+}
+
 # One cleanup for the whole script. The trap body must never name a
 # function-local variable: the trap runs at exit, when that local is out of
 # scope, and under `set -u` the expansion is fatal -- so the trap removes
@@ -94,8 +211,8 @@ BACKUPTMP=""   # the backup, staged beside the destination before it is named
 TARGETFD=""
 TARGET_FD_PATH=""
 cleanup() {
-    [[ -n "${STAGEFILE:-}" ]] && rm -f -- "$STAGEFILE"
-    [[ -n "${BACKUPTMP:-}" ]] && rm -f -- "$BACKUPTMP"
+    [[ -n "${STAGEFILE:-}" ]] && "$RM" -f -- "$STAGEFILE"
+    [[ -n "${BACKUPTMP:-}" ]] && "$RM" -f -- "$BACKUPTMP"
     return 0
 }
 trap cleanup EXIT
@@ -104,11 +221,11 @@ trap cleanup EXIT
 # Even jq itself failing must still produce exactly one JSON object on stdout
 # and exit 0 -- otherwise a caller sees nothing at all and cannot tell why.
 ok() {
-    jq -nc "$@" || printf '{"ok":false,"error":"internal","detail":"could not build the answer"}\n'
+    "$JQ" -nc "$@" || printf '{"ok":false,"error":"internal","detail":"could not build the answer"}\n'
     exit 0
 }
 err() {
-    jq -nc --arg e "$1" --arg d "${2:-}" '{ok:false,error:$e,detail:$d}' \
+    "$JQ" -nc --arg e "$1" --arg d "${2:-}" '{ok:false,error:$e,detail:$d}' \
         || printf '{"ok":false,"error":"internal","detail":"could not build the error answer"}\n'
     exit 0
 }
@@ -136,7 +253,7 @@ resolve_luac() {
     local candidate
     for candidate in /usr/bin/luac5.1 /usr/bin/luac /usr/bin/luac5.4; do
         [[ -x "$candidate" ]] || continue
-        "$candidate" -v 2>&1 | grep -q "^Lua " && { printf '%s\n' "$candidate"; return 0; }
+        "$candidate" -v 2>&1 | "$GREP" -q "^Lua " && { printf '%s\n' "$candidate"; return 0; }
     done
     return 1
 }
@@ -155,12 +272,107 @@ resolve_luac() {
 check_permissions() {
     local path="$1" kind="$2" mode
     [[ -e "$path" ]] || return 0
-    mode="$(stat -c %a "$path" 2>/dev/null)" \
+    mode="$("$STAT" -c %a "$path" 2>/dev/null)" \
         || err "insecure-permissions" "cannot determine the permissions of $kind $path"
     if (( 8#$mode & 8#22 )); then
         err "insecure-permissions" \
             "$kind $path is writable by group or others (mode $mode); run: chmod g-w,o-w $path"
     fi
+}
+
+# EVERYTHING SECURITY-RELEVANT ABOUT THE FILE, ASKED OF THE DESCRIPTOR.
+#
+# A reported defect, and the reviewer's words for it were exact: the old code
+# "checks the pathname first and then opens it with a normal shell
+# redirection", and the descriptor was rechecked only for `-f`. So the open
+# was a SECOND resolution of the name, unbound to the object that had passed
+# the type and permission tests, and owner, mode and link count were never
+# asked of the thing actually opened at all.
+#
+# WHAT THIS IS, STATED PLAINLY: DETECTION, NOT PREVENTION. Bash has no
+# O_NOFOLLOW for a redirection -- there is no `exec {fd}<` flag for it and no
+# builtin that opens one -- so the open below CAN follow a link that was
+# swapped in, and this function's job is to make that impossible to get away
+# with rather than impossible to attempt. A substitution is CAUGHT and the
+# write is refused; it is not ruled out in advance.
+#
+# `dd iflag=nofollow` IS a real O_NOFOLLOW open and was measured (it refuses a
+# symlink with "Zu viele Ebenen aus symbolischen Links"). It is not usable
+# here: it delivers BYTES to a pipe, not a held descriptor, and every
+# guarantee downstream in this script -- the freshness check, the backup, the
+# mode of the staged file -- is built on holding one. Reaching a real
+# O_NOFOLLOW open would mean a second interpreter (python3, perl) in a plugin
+# that ships four bash scripts and a QML panel, which is a dependency the
+# README would have to declare. Not taken; named here so the choice is
+# arguable rather than invisible.
+#
+# THE IDENTITY COMPARISON IS WHAT SUBSUMES O_NOFOLLOW for the one question
+# that matters -- "is this descriptor the object the NAME refers to?" --
+# because the two stats it compares disagree on exactly the symlink case.
+# MEASURED (bash 5.3.15, coreutils 9.11), a symlink `slink` -> `real`:
+#
+#   stat -c '%d:%i' slink                (lstat)  -> 58:1754157   the LINK
+#   exec {fd}<slink; stat -L -c '%d:%i' /proc/self/fd/$fd -> 58:1754156  the TARGET
+#   stat -c '%d:%i' real                 (lstat)  -> 58:1754156
+#
+# and on a plain file the first and second are the same number. So a
+# descriptor reached THROUGH a link can never match the lstat of the name it
+# was opened by, whatever the link was pointing at.
+#
+# DEVICE AND INODE, NOT INODE ALONE: inode numbers are unique per filesystem,
+# so a bind mount or a different filesystem swapped in at the name can
+# otherwise collide.
+#
+# THE MODE CHECK LIVES HERE AND NOWHERE ELSE. check_permissions is still
+# called for the DIRECTORY, which has no descriptor in this script, but the
+# path-based check on the FILE is gone deliberately: keeping both would make
+# this one unprobeable -- a mutation removing it would be caught by the other
+# and the suite would stay green over a check that had stopped working. The
+# wording is the same wording, so the answer the user reads has not changed.
+validate_descriptor() {
+    local path_ident="$1" fd_path="$2" fields ident uid mode links
+    # A plain file and nothing else, asked of the OPEN FILE.
+    [[ -f "$fd_path" ]] || err "not-a-file" "$TARGET is not a plain file"
+    # ONE stat for all five fields: every fork between the open and the last
+    # check is time an attacker gets, so the number of them is part of the
+    # guarantee.
+    fields="$("$STAT" -L -c '%d:%i %u %a %h' "$fd_path" 2>/dev/null)" \
+        || err "not-a-file" "$TARGET could not be inspected after it was opened"
+    read -r ident uid mode links <<<"$fields"
+
+    [[ "$ident" =~ ^[0-9]+:[0-9]+$ && "$uid" =~ ^[0-9]+$ \
+       && "$mode" =~ ^[0-7]{3,4}$ && "$links" =~ ^[0-9]+$ ]] \
+        || err "not-a-file" "implausible metadata for $TARGET"
+
+    # THE OBJECT OPENED IS THE OBJECT NAMED. Anything else means the name was
+    # repointed between the tests above and the open, and there is exactly one
+    # safe answer to that.
+    [[ "$ident" == "$path_ident" ]] \
+        || err "substituted" \
+               "$TARGET was replaced between being checked and being opened (the open landed on $ident, the name was $path_ident); nothing was written"
+
+    # OURS. This script never runs as root and has no business editing a login
+    # file that belongs to somebody else.
+    [[ "$uid" == "$EUID" ]] \
+        || err "foreign-owner" "$TARGET is owned by uid $uid, not by you (uid $EUID); nothing was written"
+
+    # THE MODE, ON THE DESCRIPTOR. Same test and same sentence as
+    # check_permissions, moved onto the object.
+    (( 8#$mode & 8#22 )) \
+        && err "insecure-permissions" \
+               "file $TARGET is writable by group or others (mode $mode); run: chmod g-w,o-w $TARGET"
+
+    # ONE LINK, so this name is the ONLY name for these bytes. A second
+    # hardlink is a second door into the file that runs at every login, and it
+    # can be in a directory whose permissions say nothing about this one --
+    # which is why a link count is a permission question, not a curiosity.
+    # Refused rather than warned about, the same way a symlink is: a user who
+    # hardlinks their autostart.lua from a dotfiles directory is asking for a
+    # write this plugin has no safe way to make.
+    [[ "$links" == "1" ]] \
+        || err "multiply-linked" \
+               "$TARGET has $links hard links, so this is not the only name for it; nothing was written"
+    return 0
 }
 
 # Read at most MAX+1 bytes and reject when the extra byte arrived. Checking
@@ -200,7 +412,63 @@ remove_our_backup() {
     path="$HYPR_DIR/$name"
     [[ ! -h "$path" ]] || return 1
     [[ -f "$path" ]] || return 1
-    rm -f -- "$path"
+    "$RM" -f -- "$path"
+}
+
+# WHAT WAS ACTUALLY REPLACED, AND WHAT TO DO IF IT WAS NOT WHAT WE VALIDATED.
+#
+# This runs AFTER the publish and it can only run because the publish is an
+# EXCHANGE rather than a one-way rename: `mv --exchange` swaps the two names,
+# so the object that was the user's autostart.lua a moment ago is now sitting
+# at our staged name, in our hands, where it can be looked at.
+#
+# MEASURED (coreutils 9.11, RENAME_EXCHANGE), `s` staged and `t` the target:
+#
+#   mv --exchange -T s t   -> exit 0; t has s's content and s's inode,
+#                             AND s NOW HOLDS THE FILE THAT WAS t, inode
+#                             preserved (1754147 moved from t to s)
+#   mv --exchange -T s t, t missing
+#                          -> EXIT 1, NOTHING MOVED. The exchange is
+#                             conditional on the target existing, which a
+#                             plain `mv -T` is not: that would have CREATED
+#                             it.
+#   mv --exchange -T s link, link a symlink to victim
+#                          -> exit 0; victim UNTOUCHED, the link replaced,
+#                             and the LINK ITSELF ends up at s. It does not
+#                             follow, exactly like `mv -T`.
+#
+# THE EXPECTED CASE is that the replaced object is the file this write
+# validated -- same inode, same mtime. Its bytes are already in the backup
+# taken from the descriptor, so the copy at the staged name is redundant and
+# is removed.
+#
+# THE OTHER CASE is the one the reviewer's second finding is about: something
+# replaced or rewrote the file after the last check and before the exchange.
+# The old code overwrote that version and left only the OLDER validated bytes
+# in the backup, so the newer state was gone with nothing said. Here it is
+# PRESERVED under a name of its own and REPORTED, because it is in our hands.
+# Nothing on this path deletes it: if it cannot be renamed it is left exactly
+# where it is and that path is what the caller is told.
+RESCUED_PATH=""
+publish_check_replaced() {
+    local replaced="$1" want_inode="$2" want_mtime="$3" got base
+    RESCUED_PATH=""
+    got="$("$STAT" -c '%i %Y' -- "$replaced" 2>/dev/null)" || got="unreadable"
+    if [[ "$got" == "$want_inode $want_mtime" ]]; then
+        # The file we validated, and the backup already holds it.
+        "$RM" -f -- "$replaced"
+        return 0
+    fi
+    # NOT the file we validated. Keep it.
+    if base="$(backup_name_for_now "$RESCUE_AUTHOR")" \
+       && "$MV" -T -- "$replaced" "$HYPR_DIR/$base"; then
+        RESCUED_PATH="$HYPR_DIR/$base"
+    else
+        # No free name, or the rename failed. The bytes matter more than the
+        # name: leave the file at the staged path and report THAT.
+        RESCUED_PATH="$replaced"
+    fi
+    return 0
 }
 
 # Keep the newest MAX_BACKUPS of OUR backups and remove the rest.
@@ -222,7 +490,7 @@ prune_our_backups() {
     (( ${#names[@]} > MAX_BACKUPS )) || return 0
     # By NAME, newest first -- see the comment on BACKUP_AUTHOR for why not by
     # mtime.
-    mapfile -t sorted < <(printf '%s\n' "${names[@]}" | sort -r)
+    mapfile -t sorted < <(printf '%s\n' "${names[@]}" | "$SORT" -r)
     for (( i = MAX_BACKUPS; i < ${#sorted[@]}; i++ )); do
         remove_our_backup "${sorted[$i]}" || true
     done
@@ -268,17 +536,17 @@ name_is_free() {
 #
 # "Taken" is name_is_free's answer, not `-e`'s; see the comment on it.
 backup_name_for_now() {
-    local stamp base n
+    local author="${1:-$BACKUP_AUTHOR}" stamp base n
     if [[ -n "$STAMP_OVERRIDE" ]]; then
         stamp="$STAMP_OVERRIDE"
     else
-        stamp="$(date +%Y%m%d-%H%M%S 2>/dev/null)" || return 1
+        stamp="$("$DATE" +%Y%m%d-%H%M%S 2>/dev/null)" || return 1
     fi
     [[ "$stamp" =~ ^[0-9]{8}-[0-9]{6}$ ]] || return 1
-    base="autostart.lua.$BACKUP_AUTHOR.$stamp.bak"
+    base="autostart.lua.$author.$stamp.bak"
     if name_is_free "$base"; then printf '%s\n' "$base"; return 0; fi
     for (( n = 2; n <= 50; n++ )); do
-        base="autostart.lua.$BACKUP_AUTHOR.$stamp-$n.bak"
+        base="autostart.lua.$author.$stamp-$n.bak"
         if name_is_free "$base"; then printf '%s\n' "$base"; return 0; fi
     done
     return 1
@@ -286,9 +554,9 @@ backup_name_for_now() {
 
 read_bounded() {
     local src="$1" dst="$2" size
-    head -c $((MAX_BYTES + 1)) "$src" > "$dst" \
+    "$HEAD" -c $((MAX_BYTES + 1)) "$src" > "$dst" \
         || err "write-failed" "could not read the candidate content"
-    size="$(wc -c < "$dst")"
+    size="$("$WC" -c < "$dst")"
     if (( size > MAX_BYTES )); then
         err "too-large" "the candidate exceeds $MAX_BYTES bytes"
     fi
@@ -332,7 +600,21 @@ cmd_write() {
     [[ ! -h "$TARGET" ]] || err "is-a-symlink" "$TARGET is a symbolic link; this plugin will not write through one"
     [[ -f "$TARGET" ]] || err "not-a-file" "$TARGET is not a plain file"
     [[ -r "$TARGET" ]] || err "not-a-file" "$TARGET cannot be read"
-    check_permissions "$TARGET" "file"
+
+    # THE NAME'S OWN IDENTITY, TAKEN BEFORE THE OPEN so there is something for
+    # the descriptor to be compared against afterwards. lstat -- no -L -- on
+    # purpose: it is the identity OF THE NAME, and for a symlink that is the
+    # link itself, which is what makes the comparison in validate_descriptor
+    # disagree on exactly that case.
+    #
+    # The file's own permission check is NOT here any more. It is asked of the
+    # descriptor instead; see validate_descriptor. The DIRECTORY's is above,
+    # and stays a path check because there is no descriptor for it here.
+    local path_ident
+    path_ident="$("$STAT" -c '%d:%i' -- "$TARGET" 2>/dev/null)" \
+        || err "not-a-file" "$TARGET disappeared before it could be opened"
+    [[ "$path_ident" =~ ^[0-9]+:[0-9]+$ ]] \
+        || err "not-a-file" "implausible device and inode numbers for $TARGET"
 
     # THE DESCRIPTOR, HELD FROM HERE TO THE RENAME.
     #
@@ -362,10 +644,11 @@ cmd_write() {
     exec {TARGETFD}<"$TARGET" \
         || err "not-a-file" "$TARGET could not be opened for reading"
     TARGET_FD_PATH="/proc/self/fd/$TARGETFD"
-    # The open resolved the name one more time, so what it landed on is asked
-    # again HERE, through the descriptor: a plain file and nothing else.
-    [[ -f "$TARGET_FD_PATH" ]] \
-        || err "not-a-file" "$TARGET is not a plain file"
+    # The open resolved the name ONE MORE TIME, so everything that matters
+    # about what it landed on is asked again HERE, of the descriptor: that it
+    # is a plain file, that it is THE FILE THE NAME REFERS TO, that it is
+    # ours, that nobody else can write it, and that this is its only name.
+    validate_descriptor "$path_ident" "$TARGET_FD_PATH"
 
     # THE FRESHNESS CHECK. This is a file the user also maintains by hand: if
     # its mtime is not the one the panel read, somebody has touched it since,
@@ -376,9 +659,9 @@ cmd_write() {
     # same timestamp", which is a state anyone can produce with `touch -r`.
     # Both are what the re-check before the rename compares against.
     local current target_inode
-    current="$(stat -L -c %Y "$TARGET_FD_PATH" 2>/dev/null)" \
+    current="$("$STAT" -L -c %Y "$TARGET_FD_PATH" 2>/dev/null)" \
         || err "not-a-file" "$TARGET disappeared before it could be checked"
-    target_inode="$(stat -L -c %i "$TARGET_FD_PATH" 2>/dev/null)" \
+    target_inode="$("$STAT" -L -c %i "$TARGET_FD_PATH" 2>/dev/null)" \
         || err "not-a-file" "$TARGET disappeared before it could be checked"
     [[ "$current" =~ ^[0-9]+$ ]] || err "not-a-file" "implausible modification time for $TARGET"
     [[ "$target_inode" =~ ^[0-9]+$ ]] || err "not-a-file" "implausible inode number for $TARGET"
@@ -388,7 +671,7 @@ cmd_write() {
     # Stage beside the destination so the publish is an atomic rename, and
     # give the staged file the ORIGINAL's mode before any content reaches it.
     # Ownership needs nothing: this runs as the owner and never as root.
-    STAGEFILE="$(mktemp "$HYPR_DIR/.autostart.lua.XXXXXX")" \
+    STAGEFILE="$("$MKTEMP" "$HYPR_DIR/.autostart.lua.XXXXXX")" \
         || err "write-failed" "could not stage a replacement in $HYPR_DIR"
     [[ -n "$STAGEFILE" && -f "$STAGEFILE" ]] \
         || err "write-failed" "could not stage a replacement in $HYPR_DIR"
@@ -396,7 +679,7 @@ cmd_write() {
     # inherits has to be the mode of the file that was validated. `chmod
     # --reference` dereferences, so the /proc path reads the real mode (640 in
     # the measurement above) and not the 500 of the /proc symlink.
-    chmod --reference="$TARGET_FD_PATH" "$STAGEFILE" \
+    "$CHMOD" --reference="$TARGET_FD_PATH" "$STAGEFILE" \
         || err "write-failed" "could not give the staged file the permissions of $TARGET"
 
     read_bounded /dev/stdin "$STAGEFILE"
@@ -417,7 +700,7 @@ cmd_write() {
         # whole path and the abbreviated tail.
         local staged_name="${STAGEFILE##*/}"
         diagnostic="$(printf '%s\n' "$diagnostic" \
-                      | sed -e "s#[^ ]*${staged_name}#autostart.lua#g")"
+                      | "$SED" -e "s#[^ ]*${staged_name}#autostart.lua#g")"
         err "does-not-compile" \
             "the new autostart.lua would not compile, so nothing was written: $diagnostic"
     fi
@@ -462,7 +745,7 @@ cmd_write() {
     backup_base="$(backup_name_for_now)" \
         || err "write-failed" "could not find a free backup name in $HYPR_DIR; nothing was written"
     backup_path="$HYPR_DIR/$backup_base"
-    BACKUPTMP="$(mktemp "$HYPR_DIR/.autostart.lua.bak.XXXXXX")" \
+    BACKUPTMP="$("$MKTEMP" "$HYPR_DIR/.autostart.lua.bak.XXXXXX")" \
         || err "write-failed" "could not stage a backup of $TARGET in $HYPR_DIR; nothing was written"
     # AND IT IS READ FROM THE DESCRIPTOR, NOT FROM THE NAME. This is the half
     # of the finding that is provable rather than narrowed: whatever happens to
@@ -472,36 +755,19 @@ cmd_write() {
     # had been unlinked and replaced. A second `cp` from "$TARGET" here would
     # be a second resolution of the name and could copy someone else's file
     # into the user's backup.
-    cp -p -- "$TARGET_FD_PATH" "$BACKUPTMP" \
+    "$CP" -p -- "$TARGET_FD_PATH" "$BACKUPTMP" \
         || err "write-failed" "could not back $TARGET up to $backup_path; nothing was written"
-    mv -T -f -- "$BACKUPTMP" "$backup_path" \
+    "$MV" -T -f -- "$BACKUPTMP" "$backup_path" \
         || err "write-failed" "could not back $TARGET up to $backup_path; nothing was written"
     # Named: the staged backup path no longer exists, so take it out of
     # cleanup's hands rather than have it remove the backup we just took.
     BACKUPTMP=""
 
-    # -T here for the same reason, and it is the same class of defect one line
-    # further on: $TARGET was refused as a symlink long before this, but that
-    # answer is also about a moment that has passed. Without
-    # --no-target-directory a $TARGET that became a symlink to a directory in
-    # the meantime would take the staged file INSIDE it and leave the link
-    # standing as the user's autostart.lua.
-    # THE RE-CHECK, IMMEDIATELY BEFORE THE RENAME, and it is worth being exact
-    # about what it does and does not buy.
-    #
-    # IT DOES NOT CLOSE THE WINDOW. A POSIX rename cannot be made atomic with
-    # a check that precedes it: between the last `stat` here and `mv -T` on
-    # the next line there is still an interval, and no ordering of those two
-    # calls removes it. Nothing in this comment should be read as a claim that
-    # a concurrent substitution is impossible.
-    #
-    # WHAT IT BUYS is the rest of the distance. Before this, check and act were
-    # separated by a mktemp, a chmod, a whole luac5.1 run, a cp and two forks;
-    # a file swapped anywhere in there was overwritten without a word. Now the
-    # unnoticed interval is the rename itself, and anything slower than that is
-    # refused instead. Together with the backup above -- taken from the
-    # descriptor, so provably the validated bytes -- that is the honest
-    # statement of this fix.
+    # THE RE-CHECK IMMEDIATELY BEFORE THE PUBLISH. It is the cheap half, and
+    # what it is for is the COMMON case: anything slower than a rename that
+    # touched the file since the freshness check is refused here, with nothing
+    # written and the user's file untouched. It is NOT what closes the window
+    # -- see the exchange below for that.
     #
     # BOTH the inode and the mtime, against what the descriptor reported: an
     # inode that no longer matches means the name points at a different file,
@@ -513,17 +779,94 @@ cmd_write() {
     local now_mtime now_inode
     [[ ! -h "$TARGET" ]] \
         || err "is-a-symlink" "$TARGET became a symbolic link while it was being written; nothing was written"
-    now_mtime="$(stat -c %Y "$TARGET" 2>/dev/null)" \
+    now_mtime="$("$STAT" -c %Y "$TARGET" 2>/dev/null)" \
         || err "stale" "$TARGET disappeared while it was being written; nothing was written"
-    now_inode="$(stat -c %i "$TARGET" 2>/dev/null)" \
+    now_inode="$("$STAT" -c %i "$TARGET" 2>/dev/null)" \
         || err "stale" "$TARGET disappeared while it was being written; nothing was written"
     [[ "$now_inode" == "$target_inode" && "$now_mtime" == "$current" ]] \
         || err "stale" "$TARGET was replaced while it was being written (inode $now_inode, expected $target_inode; mtime $now_mtime, expected $current); nothing was written -- reopen the panel so it reads the file again"
 
-    mv -T -f -- "$STAGEFILE" "$TARGET" || err "write-failed" "could not publish $TARGET"
-    # Published: the staged path no longer exists, so take it out of cleanup's
-    # hands rather than have it try to remove the destination's former name.
-    STAGEFILE=""
+    # The seam, and nothing but a delay. See PUBLISH_DELAY.
+    publish_delay
+
+    # THE PUBLISH, AS AN EXCHANGE RATHER THAN A ONE-WAY RENAME, and this is
+    # the answer to the second finding.
+    #
+    # WHAT THE OLD CODE COULD NOT DO, in the reviewer's words: the final stat
+    # and the `mv -T` were separate operations, so "an edit or replacement
+    # after the final stat is silently overwritten, while the backup contains
+    # the earlier descriptor bytes rather than that intervening version". The
+    # previous comment in this place said honestly that the check did not
+    # close the window. IT STILL DOES NOT. What has changed is that the window
+    # NO LONGER SILENTLY DISCARDS ANYTHING.
+    #
+    # An exchange is atomic and it leaves EVIDENCE: after it, the thing that
+    # was at the name is at OUR name, so the question "was that actually the
+    # file we validated?" can be asked AFTERWARDS -- which is the only place
+    # it can be asked without a race. If the answer is no, those bytes are
+    # preserved under a name of their own and reported. See
+    # publish_check_replaced for the measurements.
+    #
+    # THE PROPERTY THIS BUYS, stated exactly, with the residue named:
+    #   * a version appearing before the re-check above -> REFUSED, nothing
+    #     written;
+    #   * a version appearing between that check and the exchange -> the
+    #     exchange publishes the new content and that version is PRESERVED and
+    #     NAMED IN THE ANSWER. It is not refused: by the time it can be
+    #     detected the exchange has already happened, and undoing it would be
+    #     a second exchange with a window of its own, into which a third
+    #     version could arrive. Preserve-and-report terminates; undo-on-detect
+    #     does not.
+    #   * THE RESIDUAL WINDOW IS THEREFORE NOT ZERO. What is zero is the set
+    #     of versions that can be overwritten with nothing said, which is what
+    #     the finding asked for.
+    #
+    # WHY NOT flock. It was considered and it is not here. A lock serialises
+    # only writers that take it: the two writers it could order are two panel
+    # writes, and those are ALREADY handled without it -- the second one's
+    # inode/mtime re-check above refuses cleanly. The writer this fix is about
+    # is the user's own editor, which takes no lock of ours, so a lock file
+    # beside the user's Hyprland configuration would buy nothing and would
+    # have to be cleaned up on every exit path.
+    #
+    # -T on both branches for the reason the old comment gave: without
+    # --no-target-directory a $TARGET that became a symlink to a DIRECTORY in
+    # the meantime would take the staged file INSIDE it and leave the link
+    # standing as the user's autostart.lua.
+    local publish_mode="exchange"
+    if "$MV" --exchange -T -- "$STAGEFILE" "$TARGET" 2>/dev/null; then
+        # The staged name now holds the file that WAS the user's autostart.lua,
+        # so it is not scratch any more and cleanup must not remove it. Handed
+        # over by name.
+        local replaced="$STAGEFILE"
+        STAGEFILE=""
+        publish_check_replaced "$replaced" "$target_inode" "$current"
+    else
+        # TWO REASONS AN EXCHANGE FAILS, AND THEY NEED DIFFERENT ANSWERS.
+        #
+        # The target being GONE is one of them, and it is a refusal: the
+        # exchange is conditional on the target existing (measured), which is
+        # the one thing a plain `mv -T` would paper over by creating the file.
+        # Distinguished by asking whether the name is there, NOT by reading
+        # mv's message -- messages are localised, and this machine answers in
+        # German.
+        [[ -e "$TARGET" || -L "$TARGET" ]] \
+            || err "stale" "$TARGET disappeared while it was being written; nothing was written"
+        # The other is that RENAME_EXCHANGE is not available: coreutils older
+        # than 9.5 has no --exchange, and a filesystem can refuse the call
+        # (NFS, some overlays). ~/.config on Omarchy is ext4 or btrfs, where
+        # it works -- measured on this machine -- but a plugin must not refuse
+        # to write a user's file over a syscall.
+        #
+        # SO IT FALLS BACK TO THE OLD ONE-WAY RENAME, WITH THE OLD WEAKNESS,
+        # AND SAYS SO IN THE ANSWER. publish:"rename" in the envelope is not
+        # decoration: on that path an intervening version CAN still be
+        # overwritten silently, and a caller reading the field can tell which
+        # of the two guarantees it got.
+        publish_mode="rename"
+        "$MV" -T -f -- "$STAGEFILE" "$TARGET" || err "write-failed" "could not publish $TARGET"
+        STAGEFILE=""
+    fi
     # The descriptor's work is done -- it named the file that was replaced, and
     # that file is now the previous state. Closed here rather than left to the
     # kernel so its life ends where a reader can see it.
@@ -531,7 +874,7 @@ cmd_write() {
     TARGETFD=""; TARGET_FD_PATH=""
 
     local mtime
-    mtime="$(stat -c %Y "$TARGET" 2>/dev/null)" \
+    mtime="$("$STAT" -c %Y "$TARGET" 2>/dev/null)" \
         || err "write-failed" "$TARGET vanished immediately after it was written"
     [[ "$mtime" =~ ^[0-9]+$ ]] || err "write-failed" "implausible modification time"
 
@@ -540,7 +883,14 @@ cmd_write() {
     # for one that might then fail to be taken.
     prune_our_backups
 
-    ok --argjson m "$mtime" --arg b "$backup_path" '{ok:true,mtime:$m,backup:$b}'
+    # TWO FIELDS MORE THAN BEFORE, and both are answers to the second finding.
+    # `publish` says which guarantee this write got -- "exchange" or the
+    # weaker "rename" fallback. `rescued` is empty on every ordinary write and
+    # names a file only when a version that appeared after validation was
+    # preserved instead of discarded; the panel words it for the user.
+    ok --argjson m "$mtime" --arg b "$backup_path" --arg r "$RESCUED_PATH" \
+       --arg p "$publish_mode" \
+       '{ok:true,mtime:$m,backup:$b,rescued:$r,publish:$p}'
 }
 
 usage() {

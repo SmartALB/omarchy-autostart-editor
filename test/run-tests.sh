@@ -179,12 +179,15 @@ WINDOWS_BIN="$PWD/../bin/omarchy-autostart-windows"
 # file. Windows needs two different answers, so give it a small router.
 fake_hyprctl_json() {
     mkdir -p "$SANDBOX/bin"
+    # Fixed interpreter and absolute `cat`, for the reason lib.sh's fake_hyprctl
+    # states: the script under test runs with PATH set to NOTHING now, and this
+    # stand-in inherits that.
     cat > "$SANDBOX/bin/hyprctl" <<'FAKE'
-#!/usr/bin/env bash
+#!/bin/bash
 for arg in "$@"; do
   case "$arg" in
-    clients)  cat "$FAKE_CLIENTS";  exit 0 ;;
-    monitors) cat "$FAKE_MONITORS"; exit 0 ;;
+    clients)  /usr/bin/cat "$FAKE_CLIENTS";  exit 0 ;;
+    monitors) /usr/bin/cat "$FAKE_MONITORS"; exit 0 ;;
   esac
 done
 exit 1
@@ -268,7 +271,7 @@ test_windows_filters_before_capping() {
 test_windows_survives_a_failing_hyprctl() {
     setup_sandbox
     mkdir -p "$SANDBOX/bin"
-    printf '#!/usr/bin/env bash\nexit 1\n' > "$SANDBOX/bin/hyprctl"
+    printf '#!/bin/bash\nexit 1\n' > "$SANDBOX/bin/hyprctl"
     chmod +x "$SANDBOX/bin/hyprctl"
     export HYPRCTL="$SANDBOX/bin/hyprctl"
     assert_eq "windows: a hyprctl that exits non-zero yields an empty array" \
@@ -905,10 +908,13 @@ test_write_publishes_a_good_candidate() {
     # renumbered rather than re-read every time another was added. Asserted as
     # "all of them are in $HYPR_DIR" so it cannot be satisfied by a count.
     local all_stages stages_beside
-    all_stages="$(write_code | grep -cF 'mktemp' || true)"
-    stages_beside="$(write_code | grep -cF 'mktemp "$HYPR_DIR/' || true)"
+    # RE-POINTED for the absolute tool names: every tool this script runs is
+    # now named through a variable from its own tool block, so the literal
+    # "mktemp" it used to say is "$MKTEMP".
+    all_stages="$(write_code | grep -cF '"$MKTEMP"' || true)"
+    stages_beside="$(write_code | grep -cF '"$MKTEMP" "$HYPR_DIR/' || true)"
     assert_eq "write: the script stages something at all" \
-              "$([[ "$all_stages" -gt 0 ]] && echo yes || echo 'NO mktemp at all -- the pattern no longer matches')" "yes"
+              "$([[ "$all_stages" -gt 0 ]] && echo yes || echo 'NO "$MKTEMP" at all -- the pattern no longer matches')" "yes"
     assert_eq "write: EVERY staged file is staged in the destination's own directory" \
               "$stages_beside" "$all_stages"
     teardown_sandbox
@@ -1007,9 +1013,14 @@ test_write_keeps_only_the_newest_backups() {
 test_the_pruner_refuses_every_name_that_is_not_ours() {
     setup_sandbox
     local fn
-    fn="$(sed -n '/^BACKUP_AUTHOR=/,/^MAX_BACKUPS=/p;/^is_our_backup() {/,/^}/p;/^remove_our_backup() {/,/^}/p' "$WRITE_BIN")"
+    # THE TOOL BLOCK COMES WITH THEM. remove_our_backup runs "$RM" now, not
+    # a bare `rm`, so lifting the function out without the block that assigns
+    # RM leaves it unbound -- and under `set -u` that is fatal rather than
+    # merely wrong. This is exactly the re-pointing the absolute-path change
+    # forces on every assertion that reads the script's characters.
+    fn="$(sed -n '/^readonly [A-Z]*=\/usr\/bin\//p;/^BACKUP_AUTHOR=/,/^MAX_BACKUPS=/p;/^is_our_backup() {/,/^}/p;/^remove_our_backup() {/,/^}/p' "$WRITE_BIN")"
     assert_eq "pruner: the guards could be read out of the script" \
-              "$([[ -n "$fn" ]] && grep -q 'rm -f' <<<"$fn" && grep -q 'BACKUP_RE=' <<<"$fn" \
+              "$([[ -n "$fn" ]] && grep -q '"$RM" -f' <<<"$fn" && grep -q 'BACKUP_RE=' <<<"$fn" \
                  && echo found || echo NOT-FOUND)" "found"
 
     local d="$SANDBOX/hypr"
@@ -1393,8 +1404,15 @@ test_write_touches_only_autostart_lua() {
     assert_eq "write: the comment stripper actually removes lines" \
               "$([[ "$(write_code | wc -l)" -lt "$(wc -l < "$WRITE_BIN")" ]] \
                  && echo stripped || echo NOTHING-STRIPPED)" "stripped"
+    # PRESENCE, NOT A COUNT. This exists to prove the stripper above removed
+    # something that would otherwise have satisfied the `grep -cE 'hyprctl'`
+    # assertion -- one such comment is enough, and pinning the exact number
+    # made it a line-counting assertion that broke the moment the execution-
+    # boundary comment mentioned hyprctl a second time.
     assert_eq "write: and the prose it removes really does mention hyprctl" \
-              "$(grep -cE '^[[:space:]]*#.*hyprctl' "$WRITE_BIN" || true)" "1"
+              "$([[ "$(grep -cE '^[[:space:]]*#.*hyprctl' "$WRITE_BIN" || true)" -ge 1 ]] \
+                 && echo mentioned || echo 'NOT MENTIONED -- the strip assertion above proves nothing')" \
+              "mentioned"
     teardown_sandbox
 }
 
@@ -1579,28 +1597,37 @@ test_write_refuses_when_every_backup_name_is_a_link() {
 test_the_backup_is_never_written_straight_to_its_final_name() {
     setup_sandbox
     assert_eq "symlink backup: no cp writes to the final backup name" \
-              "$(write_code | grep -cF 'cp -p -- "$TARGET" "$backup_path"' || true)" "0"
+              "$(write_code | grep -cF '"$CP" -p -- "$TARGET" "$backup_path"' || true)" "0"
     # The source is the held descriptor, not the name -- see the descriptor
     # assertions below, which is where that half is bound. Here it only has to
     # be the STAGED destination.
     assert_eq "symlink backup: the backup is copied to a staged name first" \
-              "$(write_code | grep -cF 'cp -p -- "$TARGET_FD_PATH" "$BACKUPTMP"' || true)" "1"
+              "$(write_code | grep -cF '"$CP" -p -- "$TARGET_FD_PATH" "$BACKUPTMP"' || true)" "1"
     assert_eq "symlink backup: and reaches its final name by a rename that replaces a link" \
-              "$(write_code | grep -cF 'mv -T -f -- "$BACKUPTMP" "$backup_path"' || true)" "1"
+              "$(write_code | grep -cF '"$MV" -T -f -- "$BACKUPTMP" "$backup_path"' || true)" "1"
     # The publish is the same class of defect one line further on: $TARGET was
     # refused as a symlink, but that answer is also about a moment that has
     # passed. Without -T a $TARGET that became a link to a directory in the
     # meantime would take the staged file inside it.
-    assert_eq "symlink backup: the publish cannot move into a directory either" \
-              "$(write_code | grep -cF 'mv -T -f -- "$STAGEFILE" "$TARGET"' || true)" "1"
+    # THE PUBLISH IS AN EXCHANGE NOW, and the one-way rename it used to be is
+    # the FALLBACK for a filesystem that cannot exchange. Both spellings are
+    # here, and both must carry -T for the reason above.
+    assert_eq "symlink backup: the publish exchanges, and cannot exchange into a directory" \
+              "$(write_code | grep -cF '"$MV" --exchange -T -- "$STAGEFILE" "$TARGET"' || true)" "1"
+    assert_eq "symlink backup: the fallback publish cannot move into a directory either" \
+              "$(write_code | grep -cF '"$MV" -T -f -- "$STAGEFILE" "$TARGET"' || true)" "1"
     # An mv without -T anywhere in this script is the defect coming back.
+    # An mv without -T anywhere in this script is the defect coming back --
+    # and the rescue rename and the exchange are two more spellings of it, so
+    # the pattern counts "-T immediately after the tool, with or without
+    # --exchange or -f in between" rather than one fixed string.
     assert_eq "symlink backup: every mv in this script is a --no-target-directory mv" \
-              "$(write_code | grep -oE '(^|[^-[:alnum:]])mv ' | grep -c . || true)" \
-              "$(write_code | grep -cF 'mv -T -f -- ' || true)"
+              "$(write_code | grep -cF '"$MV" ' || true)" \
+              "$(write_code | grep -cE '"\$MV" (--exchange )?-T( -f)? -- ' || true)"
     # And the staged backup is cleaned up like the staged candidate, or a
     # failed write leaves a dotfile beside the user's Hyprland configuration.
     assert_eq "symlink backup: the staged backup is removed by the exit trap" \
-              "$(write_code | grep -cF 'rm -f -- "$BACKUPTMP"' || true)" "1"
+              "$(write_code | grep -cF '"$RM" -f -- "$BACKUPTMP"' || true)" "1"
     teardown_sandbox
 }
 
@@ -1754,17 +1781,17 @@ test_the_writer_never_resolves_the_name_twice() {
     assert_eq "descriptor: the destination is opened once and held" \
               "$(write_code | grep -cF 'exec {TARGETFD}<"$TARGET"' || true)" "1"
     assert_eq "descriptor: the backup is copied from that descriptor" \
-              "$(write_code | grep -cF 'cp -p -- "$TARGET_FD_PATH" "$BACKUPTMP"' || true)" "1"
+              "$(write_code | grep -cF '"$CP" -p -- "$TARGET_FD_PATH" "$BACKUPTMP"' || true)" "1"
     # And NOT from the name: the closing quote is part of the pattern, so
     # "$TARGET_FD_PATH" is not what this matches.
     assert_eq "descriptor: and never from the name" \
-              "$(write_code | grep -cF 'cp -p -- "$TARGET"' || true)" "0"
+              "$(write_code | grep -cF '"$CP" -p -- "$TARGET"' || true)" "0"
     # The freshness check reads the descriptor, and it reads it WITH -L: GNU
     # stat does not dereference by default, so without -L this would report
     # the /proc symlink instead of the file (measured -- mode 500, type
     # "symbolic link").
     assert_eq "descriptor: the freshness check reads the descriptor, dereferenced" \
-              "$(write_code | grep -cE 'stat -L -c %[Yi] "\$TARGET_FD_PATH"' || true)" "2"
+              "$(write_code | grep -cE '"\$STAT" -L -c %[Yi] "\$TARGET_FD_PATH"' || true)" "2"
     # Both halves of the re-check, on one line, immediately before the rename.
     assert_eq "descriptor: the rename is preceded by an inode-and-mtime re-check" \
               "$(write_code | grep -cF '[[ "$now_inode" == "$target_inode" && "$now_mtime" == "$current" ]]' || true)" "1"
@@ -2337,5 +2364,394 @@ test_install_copies_the_plugin_into_the_sandbox
 test_install_removes_what_the_plugin_no_longer_ships
 test_neither_script_deletes_a_path_it_has_not_placed
 test_uninstall_removes_the_plugin_and_touches_nothing_else
+
+# --- THE OPEN, AND THE OBJECT IT LANDED ON --------------------------------
+#
+# THE FINDING, in the reviewer's words: the writer "checks the pathname first
+# and then opens it with a normal shell redirection. That open follows
+# symlinks and is not bound to the object that passed the earlier
+# type/permission checks. The descriptor is only rechecked for `-f`; its
+# owner, mode, link count, and identity against the checked pathname are not
+# verified."
+#
+# WHAT IS ASSERTED HERE AND WHAT IS NOT. Two of the four new refusals are
+# reachable end-to-end and are asserted that way below (a second hard link,
+# and a mode the descriptor reports). The IDENTITY comparison is not: a real
+# substitution between the lstat and the open is a microsecond race, and a
+# test that tried to win it would be a test that passes when it loses. So
+# validate_descriptor is LIFTED OUT AND ASKED DIRECTLY -- the same thing the
+# pruner assertions do, and for the same reason: a guard nobody has seen
+# refuse anything is a guard nobody knows works.
+#
+# The fourth, foreign-owner, is NOT asserted at all and is named here rather
+# than left looking covered: producing a file owned by another uid needs root,
+# which no test in this suite has or should ask for.
+test_the_descriptor_validation_is_asked_directly() {
+    setup_sandbox
+    local fn lib
+    # The tool block comes with it -- validate_descriptor runs "$STAT" -- and
+    # so does err(), because every refusal leaves through it.
+    fn="$(sed -n '/^readonly [A-Z]*=\/usr\/bin\//p;/^err() {/,/^}/p;/^validate_descriptor() {/,/^}/p' "$WRITE_BIN")"
+    assert_eq "validator: it could be read out of the script" \
+              "$([[ -n "$fn" ]] && grep -q 'validate_descriptor()' <<<"$fn" \
+                 && grep -q '"$STAT" -L -c' <<<"$fn" && echo found || echo NOT-FOUND)" "found"
+    lib="$SANDBOX/validator.sh"
+    printf '%s\n' "$fn" > "$lib"
+
+    # The subject: a plain file of ours, mode 644, one link.
+    local f="$SANDBOX/subject.lua"
+    printf 'o.launch_on_start("x")\n' > "$f"
+    chmod 644 "$f"
+
+    # Ask the lifted function, with the identity we hand it. `ACCEPTED` can
+    # only be printed if it returned instead of leaving through err().
+    ask() {
+        local target="$1" ident="$2"
+        TARGET="$target" /bin/bash -c '
+            set -uo pipefail
+            . "$1"
+            exec {fd}<"$TARGET"
+            validate_descriptor "$2" "/proc/self/fd/$fd"
+            echo ACCEPTED' _ "$lib" "$ident" 2>/dev/null
+    }
+
+    local real_ident; real_ident="$(stat -c '%d:%i' -- "$f")"
+    assert_eq "validator: the honest case is accepted" \
+              "$(ask "$f" "$real_ident")" "ACCEPTED"
+
+    # THE SUBSTITUTION. The identity it is told the NAME had is not the
+    # identity of the object the descriptor holds, which is exactly the state
+    # a swap between the lstat and the open produces.
+    assert_eq "validator: a descriptor that is not the object the name named is refused" \
+              "$(jq -r .error <<<"$(ask "$f" '1:1')")" "substituted"
+    assert_eq "validator: and it says nothing was written" \
+              "$([[ "$(jq -r .detail <<<"$(ask "$f" '1:1')")" == *"nothing was written"* ]] \
+                 && echo said || echo NOT-SAID)" "said"
+
+    # AND THE SYMLINK CASE IS THE SAME COMPARISON. The writer refuses a
+    # symlink by name long before this, so this is the identity check being
+    # shown to catch it on its own: lstat of the LINK can never equal stat of
+    # what the descriptor opened THROUGH the link.
+    ln -s "$f" "$SANDBOX/link.lua"
+    assert_eq "validator: a descriptor reached through a symlink is refused by identity alone" \
+              "$(jq -r .error <<<"$(ask "$SANDBOX/link.lua" "$(stat -c '%d:%i' -- "$SANDBOX/link.lua")")")" \
+              "substituted"
+
+    # THE MODE, ON THE DESCRIPTOR. This is the check that REPLACED the
+    # path-based one on the file, so it is the only thing standing between a
+    # group-writable login file and a write.
+    local g="$SANDBOX/groupwritable.lua"
+    printf 'x\n' > "$g"; chmod 664 "$g"
+    assert_eq "validator: a group-writable file is refused, asked of the descriptor" \
+              "$(jq -r .error <<<"$(ask "$g" "$(stat -c '%d:%i' -- "$g")")")" "insecure-permissions"
+    local o="$SANDBOX/otherwritable.lua"
+    printf 'x\n' > "$o"; chmod 646 "$o"
+    assert_eq "validator: and so is a world-writable one" \
+              "$(jq -r .error <<<"$(ask "$o" "$(stat -c '%d:%i' -- "$o")")")" "insecure-permissions"
+
+    # THE LINK COUNT. A second name for the same bytes is a second door into
+    # the file that runs at login.
+    local h="$SANDBOX/hardlinked.lua"
+    printf 'x\n' > "$h"; chmod 644 "$h"; ln "$h" "$SANDBOX/second-name.lua"
+    assert_eq "validator: a file with a second hard link is refused" \
+              "$(jq -r .error <<<"$(ask "$h" "$(stat -c '%d:%i' -- "$h")")")" "multiply-linked"
+    unset -f ask
+    teardown_sandbox
+}
+
+# END TO END, because this one does not need a race: the link is there before
+# the write starts.
+test_a_second_hard_link_to_the_target_is_refused_end_to_end() {
+    setup_sandbox
+    write_autostart_fixture
+    local mtime; mtime="$(autostart_mtime)"
+    ln "$(autostart_path)" "$(hypr_dir)/second-name.lua"
+    local out
+    out="$(write_good_candidate | "$WRITE_BIN" write --expect-mtime "$mtime")"
+    assert_eq "hard link: the write is refused" "$(jq -r .error <<<"$out")" "multiply-linked"
+    assert_eq "hard link: and the user's file is byte for byte what it was" \
+              "$(cmp -s "$SANDBOX/before.lua" "$(autostart_path)" && echo unchanged || echo CHANGED)" \
+              "unchanged"
+    assert_eq "hard link: nothing was backed up either, because nothing was written" \
+              "$(backup_count)" "0"
+    teardown_sandbox
+}
+
+# --- A VERSION THAT APPEARS AFTER THE VALIDATION --------------------------
+#
+# THE FINDING: the final inode/mtime check and the publish were separate
+# operations, so "an edit or replacement after the final stat is silently
+# overwritten, while the backup contains the earlier descriptor bytes rather
+# than that intervening version".
+#
+# THE WINDOW IS REAL AND IT IS TINY, so it is reached through the one named
+# seam that exists for it (see PUBLISH_DELAY in the writer): a whole-second
+# delay at the publish, and nothing else. Without it this branch is
+# unreachable from a test and the fix would be asserted by grepping the
+# writer for the code it hopes is there.
+#
+# WHAT MUST BE TRUE AFTERWARDS, and the third assertion is the finding:
+#   * the user's new content IS published -- the exchange is atomic and it
+#     happened;
+#   * the backup holds the ORIGINAL, which is what this write validated;
+#   * THEIR version, the one that appeared in the window, is NOT GONE. It is
+#     preserved under a name of its own and the answer says which.
+test_a_version_that_appears_after_validation_is_not_silently_discarded() {
+    setup_sandbox
+    write_autostart_fixture
+    write_good_candidate > "$SANDBOX/expected.lua"
+    local mtime; mtime="$(autostart_mtime)"
+
+    # The write, held for two seconds immediately before the publish.
+    write_good_candidate \
+        | OMARCHY_AUTOSTART_STAMP="20260904-101010" \
+          OMARCHY_AUTOSTART_PUBLISH_DELAY=2 \
+          "$WRITE_BIN" write --expect-mtime "$mtime" > "$SANDBOX/answer.json" &
+    local writer=$!
+
+    # Inside the window: after the pre-publish re-check has passed, before the
+    # exchange. A whole new file at the name, so the inode changes too.
+    sleep 1
+    printf 'o.launch_on_start("their-own-edit")\n' > "$SANDBOX/theirs.lua"
+    mv -T -- "$SANDBOX/theirs.lua" "$(autostart_path)"
+    wait "$writer"
+
+    local out; out="$(cat "$SANDBOX/answer.json")"
+    assert_eq "intervening: the write reports success, because it did publish" \
+              "$(jq -r .ok <<<"$out")" "true"
+    assert_eq "intervening: and says it published by exchange" \
+              "$(jq -r .publish <<<"$out")" "exchange"
+    assert_eq "intervening: our candidate is what is at the name now" \
+              "$(cmp -s "$SANDBOX/expected.lua" "$(autostart_path)" && echo published || echo NOT-PUBLISHED)" \
+              "published"
+    # THE FINDING ITSELF.
+    local rescued; rescued="$(jq -r .rescued <<<"$out")"
+    assert_eq "intervening: the answer names a preserved file" \
+              "$([[ -n "$rescued" && "$rescued" != "null" ]] && echo named || echo "NOT NAMED: ${rescued}")" \
+              "named"
+    assert_eq "intervening: the preserved file exists" \
+              "$([[ -f "$rescued" ]] && echo there || echo MISSING)" "there"
+    assert_eq "intervening: and it holds THEIR bytes, not ours and not the original" \
+              "$(cat "$rescued" 2>/dev/null)" 'o.launch_on_start("their-own-edit")'
+    # The backup is still the state this write validated.
+    assert_eq "intervening: the backup holds the original, as it always did" \
+              "$(cmp -s "$SANDBOX/before.lua" "$(newest_backup)" && echo original || echo NOT-THE-ORIGINAL)" \
+              "original"
+    # And the preserved file is not one of ours to prune: it is the only copy
+    # of a state nobody else saved.
+    assert_eq "intervening: the preserved file is not counted among our backups" \
+              "$(backup_count)" "1"
+    teardown_sandbox
+}
+
+# THE OTHER SIDE OF THE SAME PROPERTY: an ordinary write rescues nothing and
+# leaves no stray file behind. Without this, "rescued" could be set on every
+# write and the assertions above would still pass.
+test_an_ordinary_write_rescues_nothing() {
+    setup_sandbox
+    write_autostart_fixture
+    local out; out="$(write_at_stamp "20260904-111111" "$(write_good_candidate)")"
+    assert_eq "ordinary write: it published by exchange" "$(jq -r .publish <<<"$out")" "exchange"
+    assert_eq "ordinary write: and rescued nothing" "$(jq -r .rescued <<<"$out")" ""
+    assert_eq "ordinary write: no rescued file was left in the directory" \
+              "$(find "$(hypr_dir)" -maxdepth 1 -name '*rescued*' | wc -l)" "0"
+    # And no staged scratch file survived the exchange either: after an
+    # exchange the staged NAME holds the file that was replaced, which is a
+    # new way for a dotfile to be left beside the user's configuration.
+    assert_eq "ordinary write: no staged dotfile survived the exchange" \
+              "$(find "$(hypr_dir)" -maxdepth 1 -name '.autostart.lua.*' | wc -l)" "0"
+    teardown_sandbox
+}
+
+# The rescue name is deliberately outside the pruner's pattern. If it ever
+# matched, MAX_BACKUPS could delete the only copy of a state nobody saved.
+test_a_rescued_file_can_never_be_pruned() {
+    setup_sandbox
+    local fn lib
+    fn="$(sed -n '/^BACKUP_AUTHOR=/,/^MAX_BACKUPS=/p;/^is_our_backup() {/,/^}/p' "$WRITE_BIN")"
+    lib="$SANDBOX/pruner.sh"; printf '%s\n' "$fn" > "$lib"
+    local verdict
+    verdict="$(/bin/bash -c '
+        set -uo pipefail
+        . "$1"
+        for n in "autostart.lua.smartalb-autostart-rescued.20260904-101010.bak" \
+                 "autostart.lua.smartalb-autostart-rescued.20260904-101010-2.bak"; do
+            is_our_backup "$n" && printf "PRUNABLE " || printf "safe "
+        done' _ "$lib")"
+    assert_eq "rescue name: the pruner cannot see a rescued file at all" \
+              "$verdict" "safe safe "
+    # And the glob cannot either -- the pruner iterates it before it filters.
+    assert_eq "rescue name: nor can the glob the pruner iterates" \
+              "$(case "autostart.lua.smartalb-autostart-rescued.20260904-101010.bak" in \
+                   autostart.lua.smartalb-autostart.*.bak) echo MATCHED ;; \
+                   *) echo unmatched ;; esac)" "unmatched"
+    teardown_sandbox
+}
+
+# --- THE EXECUTION BOUNDARY, THE SCRIPTS' HALF ----------------------------
+#
+# THE FINDING: "the writer and the other helper scripts then invoke many tools
+# through ambient PATH, and the process environment is inherited. Thus the
+# reviewed route can execute substituted interpreters/tools (and
+# non-interactive Bash startup through inherited BASH_ENV) before it edits
+# login configuration."
+#
+# THREE PROPERTIES, ONE PER ASSERTION BLOCK, AND ALL FOUR SCRIPTS EVERY TIME.
+# The list of scripts is derived from bin/ rather than written out, so a fifth
+# script cannot arrive uncovered -- which is precisely how this class of
+# defect got into the fourth one after being fixed elsewhere.
+SHIPPED_SCRIPTS=()
+while IFS= read -r _s; do SHIPPED_SCRIPTS+=("$_s"); done < <(find "$PWD/../bin" -maxdepth 1 -type f | sort)
+
+test_every_shipped_script_fixes_its_interpreter() {
+    assert_eq "boundary: bin/ was found at all" \
+              "$([[ "${#SHIPPED_SCRIPTS[@]}" -ge 4 ]] && echo found \
+                 || echo "ONLY ${#SHIPPED_SCRIPTS[@]} scripts -- the discovery is broken")" "found"
+    local s bad_shebang="" bad_path=""
+    for s in "${SHIPPED_SCRIPTS[@]}"; do
+        # `#!/usr/bin/env bash` IS a PATH lookup, for the interpreter itself.
+        # Measured: with a fake `bash` earlier in PATH, the fake ran.
+        [[ "$(head -1 "$s")" == "#!/bin/bash" ]] || bad_shebang="$bad_shebang ${s##*/}"
+        # And PATH is emptied, not merely narrowed: see the block comment in
+        # any of them for why empty is the stronger choice.
+        grep -qx 'PATH=' "$s" || bad_path="$bad_path ${s##*/}"
+    done
+    assert_eq "boundary: every shipped script names its interpreter absolutely" \
+              "${bad_shebang:- none}" " none"
+    assert_eq "boundary: and every one of them empties PATH" \
+              "${bad_path:- none}" " none"
+}
+
+# THE CLASS-LEVEL ASSERTION, and it needs no list of tool names to maintain:
+# it looks for ANY bare word at a command position that is not a shell
+# builtin, a keyword, or one of this project's own functions.
+test_no_shipped_script_resolves_a_tool_by_name() {
+    local s offenders=""
+    for s in "${SHIPPED_SCRIPTS[@]}"; do
+        # Comment lines are stripped first: every one of these scripts NAMES
+        # the tools it runs in its prose, and a check a comment can satisfy --
+        # or defeat -- is not a check. Same rule as qml-structure.sh.
+        local hits
+        hits="$(grep -v '^[[:space:]]*#' "$s" \
+                | grep -nE '(^|[|&;({`]|\$\()[[:space:]]*(awk|cat|chmod|cp|cut|date|find|grep|head|hyprctl|id|jq|luac[0-9.]*|mkdir|mktemp|mv|readlink|rm|sed|sleep|sort|stat|tr|wc)([[:space:]]|\)|$)' \
+                || true)"
+        [[ -n "$hits" ]] && offenders="$offenders
+${s##*/}: $hits"
+    done
+    offenders="$(sed '/^$/d' <<<"$offenders")"
+    assert_eq "boundary: no shipped script invokes a tool by bare name" \
+              "${offenders:-none}" "none"
+}
+
+# EVERY TOOL VARIABLE IS AN ABSOLUTE PATH, whatever it is called. The
+# class-level answer to the fixed list above, the same way qml-structure.sh's
+# check 2b answers its own: a tool added in a future task is covered the
+# moment it is declared.
+test_every_tool_variable_is_an_absolute_path() {
+    local s relative="" empty=""
+    for s in "${SHIPPED_SCRIPTS[@]}"; do
+        local decls
+        decls="$(grep -nE '^readonly [A-Z][A-Z0-9_]*=' "$s" || true)"
+        if [[ -z "$decls" ]]; then
+            empty="$empty ${s##*/}"
+            continue
+        fi
+        grep -nE '^readonly [A-Z][A-Z0-9_]*=' "$s" | grep -vE '^[0-9]+:readonly [A-Z][A-Z0-9_]*=/' \
+            && relative="$relative ${s##*/}"
+    done
+    assert_eq "boundary: every script declares a tool block" "${empty:- none}" " none"
+    assert_eq "boundary: and every tool it declares is an absolute path" \
+              "${relative:- none}" " none"
+}
+
+# --- AND THE BOUNDARY, MEASURED RATHER THAN READ --------------------------
+#
+# THE PROOF THE OTHER ASSERTIONS CANNOT GIVE: each script is run with NO
+# ENVIRONMENT AT ALL except the variables the panel actually passes, PATH
+# among them set to EMPTY, and it still has to produce its answer. Nothing
+# here reads the source; if a single tool were resolved by name, or a variable
+# the scripts need were missing from the panel's allowlist, this is what goes
+# red.
+#
+# THIS IS THE ASSERTION THAT WOULD HAVE CAUGHT THE TWO TRAPS. Neither is in
+# the finding: bin/omarchy-autostart-apps needs XDG_DATA_HOME and
+# XDG_DATA_DIRS or the picker is empty, and bin/omarchy-autostart-windows
+# needs HYPRLAND_INSTANCE_SIGNATURE or hyprctl cannot find the compositor at
+# all.
+test_every_script_works_under_the_panels_environment_alone() {
+    setup_sandbox
+    mkdir -p "$XDG_CONFIG_HOME/hypr" "$XDG_DATA_HOME/applications"
+    printf 'o.launch_on_start("nimbus")\n' > "$XDG_CONFIG_HOME/hypr/autostart.lua"
+    printf '%s\n' '[Desktop Entry]' 'Type=Application' 'Name=Testprogramm' 'Exec=testprog' \
+        > "$XDG_DATA_HOME/applications/t.desktop"
+    fake_hyprctl_json
+    printf '[]\n' > "$FAKE_CLIENTS"
+
+    # EXACTLY the panel's allowlist, taken from Runners.qml rather than
+    # written out here, so the two cannot drift apart. HYPRCTL and
+    # FAKE_CLIENTS ride along only because the compositor is not reachable
+    # from a sandbox -- they are the seam, and the assertion right after this
+    # one is what proves they are not on the panel's list.
+    local names name env_args=()
+    names="$(sed -n '/readonly property var toolEnvPass:/,/\]/p' "$PWD/../Runners.qml" \
+             | grep -oE '"[A-Z_]+"' | tr -d '"')"
+    assert_eq "boundary: the panel's allowlist could be read out of Runners.qml" \
+              "$([[ -n "$names" ]] && echo found || echo NOT-FOUND)" "found"
+    while IFS= read -r name; do
+        [[ -n "$name" ]] || continue
+        [[ -v "$name" ]] && env_args+=("$name=${!name}")
+    done <<<"$names"
+    env_args+=("PATH=")
+
+    local apps hypr windows
+    apps="$(env -i "${env_args[@]}" "$APPS_BIN" 2>/dev/null)"
+    assert_eq "boundary: the application list still answers with nothing but that" \
+              "$(jq -r '.[0].name' <<<"$apps" 2>/dev/null)" "Testprogramm"
+    hypr="$(env -i "${env_args[@]}" "$HYPR_BIN" read 2>/dev/null)"
+    assert_eq "boundary: the Hyprland reader still answers" "$(jq -r .ok <<<"$hypr" 2>/dev/null)" "true"
+    windows="$(env -i "${env_args[@]}" HYPRCTL="$HYPRCTL" FAKE_CLIENTS="$FAKE_CLIENTS" \
+                   FAKE_MONITORS="$FAKE_MONITORS" "$WINDOWS_BIN" 2>/dev/null)"
+    assert_eq "boundary: the window list still answers" "$windows" "[]"
+    # AND A REAL WRITE, which is the one that matters.
+    local mtime; mtime="$(stat -c %Y "$XDG_CONFIG_HOME/hypr/autostart.lua")"
+    local out
+    out="$(printf 'o.launch_on_start("nimbus")\no.launch_on_start("notes-app")\n' \
+           | env -i "${env_args[@]}" "$WRITE_BIN" write --expect-mtime "$mtime" 2>/dev/null)"
+    assert_eq "boundary: and a real write succeeds with no ambient environment at all" \
+              "$(jq -r .ok <<<"$out" 2>/dev/null)" "true"
+    assert_eq "boundary: by exchange, with nothing rescued" \
+              "$(jq -r '.publish + "/" + .rescued' <<<"$out" 2>/dev/null)" "exchange/"
+    teardown_sandbox
+}
+
+# THE SEAMS ARE NOT ON THE PANEL'S LIST, and that is the largest single thing
+# the boundary buys: HYPRCTL names a BINARY THE SCRIPT EXECUTES. If it were
+# ever added to toolEnvPass, an ambient variable would choose that binary
+# again -- which is the finding, one layer down.
+test_no_test_seam_is_on_the_panels_allowlist() {
+    local names; names="$(sed -n '/readonly property var toolEnvPass:/,/\]/p' "$PWD/../Runners.qml")"
+    local seam found=""
+    for seam in HYPRCTL PROC_DIR OMARCHY_AUTOSTART_STAMP OMARCHY_AUTOSTART_PUBLISH_DELAY \
+                BASH_ENV ENV SHELLOPTS BASHOPTS LD_PRELOAD LD_LIBRARY_PATH IFS LOCPATH GCONV_PATH; do
+        grep -q "\"$seam\"" <<<"$names" && found="$found $seam"
+    done
+    assert_eq "boundary: neither a seam nor a loader variable is passed to any process" \
+              "${found:- none}" " none"
+    # And the list is not empty, or the loop above proves nothing.
+    assert_eq "boundary: the allowlist itself is not empty" \
+              "$([[ "$(grep -oE '"[A-Z_]+"' <<<"$names" | grep -c .)" -ge 5 ]] \
+                 && echo populated || echo 'EMPTY -- the loop above proves nothing')" "populated"
+}
+
+test_the_descriptor_validation_is_asked_directly
+test_a_second_hard_link_to_the_target_is_refused_end_to_end
+test_a_version_that_appears_after_validation_is_not_silently_discarded
+test_an_ordinary_write_rescues_nothing
+test_a_rescued_file_can_never_be_pruned
+test_every_shipped_script_fixes_its_interpreter
+test_no_shipped_script_resolves_a_tool_by_name
+test_every_tool_variable_is_an_absolute_path
+test_every_script_works_under_the_panels_environment_alone
+test_no_test_seam_is_on_the_panels_allowlist
 
 summary

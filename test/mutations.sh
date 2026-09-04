@@ -389,7 +389,7 @@ probe "hypr script: the truncation flag" "$SHELL_SUITE" bin/omarchy-autostart-hy
   's|^    if (( size > MAX_BYTES_PER_FILE )); then$|    if false; then|'
 
 probe "hypr script: the cut is to exactly the cap, not the detection byte" "$SHELL_SUITE" bin/omarchy-autostart-hypr \
-  's|head -c "\$MAX_BYTES_PER_FILE" "\$dst"|head -c $((MAX_BYTES_PER_FILE + 1)) "$dst"|'
+  's|"\$HEAD" -c "\$MAX_BYTES_PER_FILE" "\$dst"|"$HEAD" -c $((MAX_BYTES_PER_FILE + 1)) "$dst"|'
 
 probe "hypr script: only a readable plain file counts as present" "$SHELL_SUITE" bin/omarchy-autostart-hypr \
   's|if \[\[ -f "\$path" \&\& -r "\$path" \]\]; then|if [[ -e "$path" ]]; then|'
@@ -519,7 +519,7 @@ probe "writer: a file that changed on disk is refused" "$SHELL_SUITE" bin/omarch
 # renamed onto its final one, so that a link left at the final name cannot be
 # written through (see the symlink probes below). The pattern follows.
 probe "writer: the backup is taken before the replacement" "$SHELL_SUITE" bin/omarchy-autostart-hypr-write \
-  's|cp -p -- "$TARGET_FD_PATH" "$BACKUPTMP"|true|'
+  's|"$CP" -p -- "$TARGET_FD_PATH" "$BACKUPTMP"|true|'
 
 # --- THE FILE THE WRITER VALIDATED, HELD OPEN -------------------------------
 #
@@ -534,7 +534,7 @@ probe "writer: the descriptor must be what is read, not the name again" "$SHELL_
   's|TARGET_FD_PATH="/proc/self/fd/$TARGETFD"|TARGET_FD_PATH="$TARGET"|'
 
 probe "writer: the backup must come from the descriptor, not from the name" "$SHELL_SUITE" bin/omarchy-autostart-hypr-write \
-  's|cp -p -- "$TARGET_FD_PATH" "$BACKUPTMP"|cp -p -- "$TARGET" "$BACKUPTMP"|'
+  's|"$CP" -p -- "$TARGET_FD_PATH" "$BACKUPTMP"|"$CP" -p -- "$TARGET" "$BACKUPTMP"|'
 
 # The two halves of the re-check before the rename, one probe each. The inode
 # half is the one an mtime comparison cannot hold: `touch -d` gives a
@@ -579,12 +579,12 @@ probe "backups: the count must actually be capped" "$SHELL_SUITE" bin/omarchy-au
 # Keeping the OLDEST would satisfy a bare count, which is why the cap test
 # asserts which five survive rather than how many.
 probe "backups: the ones kept must be the newest" "$SHELL_SUITE" bin/omarchy-autostart-hypr-write \
-  's@ | sort -r)@ | sort)@'
+  's@ | "$SORT" -r)@ | "$SORT")@'
 
 # A name that does not carry the date is a name the next write overwrites,
 # which is the single-backup behaviour this change removed.
 probe "backups: the name must carry the date" "$SHELL_SUITE" bin/omarchy-autostart-hypr-write \
-  's|base="autostart.lua.$BACKUP_AUTHOR.$stamp.bak"|base="autostart.lua.$BACKUP_AUTHOR.fixed.bak"|'
+  's|base="autostart.lua.$author.$stamp.bak"|base="autostart.lua.$author.fixed.bak"|'
 
 # A second write inside the same second must not silently replace the backup
 # the first one took.
@@ -629,18 +629,18 @@ probe "backups: a symlink at a candidate name is not a free name" "$SHELL_SUITE"
 # which is what a link appearing between the check and the copy would then be
 # written through.
 probe "backups: the backup must not be copied straight to its final name" "$SHELL_SUITE" bin/omarchy-autostart-hypr-write \
-  's@    mv -T -f -- "$BACKUPTMP" "$backup_path" \\@    cp -p -- "$TARGET" "$backup_path" \\@'
+  's@    "$MV" -T -f -- "$BACKUPTMP" "$backup_path" \\@    "$CP" -p -- "$TARGET" "$backup_path" \\@'
 
 # -T IS NOT DECORATION. Measured: `mv` onto a symlink pointing at a DIRECTORY
 # moves the file INSIDE that directory and leaves the link standing;
 # `mv -T` replaces the link. The publish gets the same treatment as the backup.
 probe "writer: the publish cannot be diverted into a directory" "$SHELL_SUITE" bin/omarchy-autostart-hypr-write \
-  's@mv -T -f -- "$STAGEFILE" "$TARGET"@mv -f -- "$STAGEFILE" "$TARGET"@'
+  's@"$MV" --exchange -T -- "$STAGEFILE" "$TARGET"@"$MV" --exchange -- "$STAGEFILE" "$TARGET"@'
 
 # The staged backup is a dotfile beside the user's Hyprland configuration, and
 # a write that fails between the copy and the rename must not leave it there.
 probe "backups: the staged backup is removed on the way out" "$SHELL_SUITE" bin/omarchy-autostart-hypr-write \
-  's@    \[\[ -n "${BACKUPTMP:-}" \]\] && rm -f -- "$BACKUPTMP"@    :@'
+  's@    \[\[ -n "${BACKUPTMP:-}" \]\] && "$RM" -f -- "$BACKUPTMP"@    :@'
 
 # BOTH GUARDS AT ONCE, and that is the honest shape here rather than laziness
 # -- the same reasoning as "a failed backup must still abort the write" above.
@@ -669,14 +669,14 @@ probe "writer: a candidate past the cap is refused" "$SHELL_SUITE" bin/omarchy-a
   's|^        err "too-large" "the candidate exceeds $MAX_BYTES bytes"$|        true|'
 
 probe "writer: the replacement is staged beside the destination" "$SHELL_SUITE" bin/omarchy-autostart-hypr-write \
-  's|mktemp "$HYPR_DIR/.autostart.lua.XXXXXX"|mktemp|'
+  's|"$MKTEMP" "$HYPR_DIR/.autostart.lua.XXXXXX"|"$MKTEMP"|'
 
 # The reference moved to the held descriptor with the fix for the check-then-use
 # finding, so the pattern follows it: the staged file must get the mode of the
 # file that was VALIDATED, and a probe whose pattern no longer matches proves
 # nothing -- which is exactly how the full gate caught this one.
 probe "writer: the staged file gets the original's permissions" "$SHELL_SUITE" bin/omarchy-autostart-hypr-write \
-  's|chmod --reference="$TARGET_FD_PATH" "$STAGEFILE"|true|'
+  's|"$CHMOD" --reference="$TARGET_FD_PATH" "$STAGEFILE"|true|'
 
 # --- the panel's one route to the file --------------------------------------
 # The substituted name is a script that does not exist, which is the point:
@@ -856,7 +856,7 @@ probe "windows: the control characters in a command line are squashed" "$SHELL_S
 # two rounds. The pid and the command line still travel to jq as one
 # tab-separated line, so the guard it points at is still real.
 probe "windows: a tab in a command line cannot shift a field" "$SHELL_SUITE" bin/omarchy-autostart-windows \
-  '/ tr /s|[\]t||'
+  '/"$TR" /s|[\]t||'
 
 # "#" as the delimiter, not "|": the line under mutation is a jq pipeline and
 # contains the character sed would otherwise read as the end of the pattern.
@@ -909,6 +909,126 @@ probe "guard: an assertion in the file that never runs" "$QML_SUITE" test/harnes
 # nothing" rather than proving the guard works.
 probe "guard: a test function that is defined but never invoked" "$SHELL_SUITE" test/run-tests.sh \
   '/^test_hypr_read_changes_nothing$/d'
+
+# --- THE OPEN, AND THE OBJECT IT LANDED ON (finding 1) ----------------------
+#
+# Each of these breaks exactly one of the checks validate_descriptor makes.
+# The identity comparison is the one no end-to-end test can reach, so its
+# probe is what stands behind the lifted-function assertions.
+
+probe "descriptor: the object opened must be the object the name named" "$SHELL_SUITE" bin/omarchy-autostart-hypr-write \
+  's|\[\[ "$ident" == "$path_ident" \]\]|[[ -n "$ident" ]]|'
+
+probe "descriptor: the whole validation cannot be skipped" "$SHELL_SUITE" bin/omarchy-autostart-hypr-write \
+  's@^    validate_descriptor "$path_ident" "$TARGET_FD_PATH"@    [[ -f "$TARGET_FD_PATH" ]] || err "not-a-file" "x"@'
+
+probe "descriptor: the mode must be asked of the descriptor" "$SHELL_SUITE" bin/omarchy-autostart-hypr-write \
+  's|(( 8#$mode \& 8#22 ))|(( 0 ))|'
+
+probe "descriptor: a second hard link must be refused" "$SHELL_SUITE" bin/omarchy-autostart-hypr-write \
+  's|\[\[ "$links" == "1" \]\]|[[ -n "$links" ]]|'
+
+probe "descriptor: the owner must be us" "$SHELL_SUITE" bin/omarchy-autostart-hypr-write \
+  's|\[\[ "$uid" == "$EUID" \]\]|[[ -n "$uid" ]]|'
+
+# The identity of the NAME is taken with lstat on purpose: with -L it would
+# resolve the link and then agree with the descriptor about a file the name
+# does not refer to, which is the comparison quietly answering "yes" always.
+probe "descriptor: the name's identity is taken without dereferencing" "$SHELL_SUITE" bin/omarchy-autostart-hypr-write \
+  's|path_ident="$("$STAT" -c .%d:%i. -- "$TARGET" 2>/dev/null)"|path_ident="$("$STAT" -L -c "%d:%i" -- "$TARGET" 2>/dev/null)"|'
+
+# --- A VERSION THAT APPEARS AFTER THE VALIDATION (finding 2) ----------------
+
+# The exchange is what makes the replaced object inspectable at all. Reverted
+# to the one-way rename this fix replaced, the intervening version becomes
+# unreachable again -- which is the finding.
+probe "publish: a one-way rename cannot preserve what it replaced" "$SHELL_SUITE" bin/omarchy-autostart-hypr-write \
+  's@if "$MV" --exchange -T -- "$STAGEFILE" "$TARGET" 2>/dev/null; then@if "$MV" -T -f -- "$STAGEFILE" "$TARGET" 2>/dev/null; then@'
+
+probe "publish: what was replaced must be looked at" "$SHELL_SUITE" bin/omarchy-autostart-hypr-write \
+  's|^        publish_check_replaced "$replaced" "$target_inode" "$current"|        :|'
+
+# The whole point: an intervening version is KEPT, not deleted. This is the
+# defect the old code had, written back in one line.
+probe "publish: an intervening version must never be deleted" "$SHELL_SUITE" bin/omarchy-autostart-hypr-write \
+  's@       \&\& "$MV" -T -- "$replaced" "$HYPR_DIR/$base"; then@       \&\& "$RM" -f -- "$replaced"; then@'
+
+# And it must be distinguished from the validated file by BOTH numbers: with
+# the mtime dropped, a replacement that happened to land on the same inode
+# number reads as "the file we validated" and is deleted as redundant.
+probe "publish: the replaced file is identified by inode AND mtime" "$SHELL_SUITE" bin/omarchy-autostart-hypr-write \
+  's|if \[\[ "$got" == "$want_inode $want_mtime" \]\]; then|if [[ "${got%% *}" == "$want_inode" ]]; then|'
+
+# A rescued file filed under our own backup author would be prunable, and
+# MAX_BACKUPS could then delete the only copy of a state nobody saved.
+probe "publish: a rescued file must not be filed among our backups" "$SHELL_SUITE" bin/omarchy-autostart-hypr-write \
+  's|^RESCUE_AUTHOR="smartalb-autostart-rescued"|RESCUE_AUTHOR="smartalb-autostart"|'
+
+# The answer has to CARRY the rescue, or nothing tells the user.
+probe "publish: the answer must name what was preserved" "$SHELL_SUITE" bin/omarchy-autostart-hypr-write \
+  's|--arg r "$RESCUED_PATH"|--arg r ""|'
+
+# The delay seam must stay a delay. A value that is not a single digit is
+# ignored rather than passed on, and dropping that check is what would turn a
+# test seam into an argument-injection point.
+probe "publish: the delay seam validates its own value" "$SHELL_SUITE" bin/omarchy-autostart-hypr-write \
+  's|\[\[ "$PUBLISH_DELAY" =~ \^\[0-9\]\$ \]\] \|\| return 0|:|'
+
+# --- THE EXECUTION BOUNDARY (finding 3) -------------------------------------
+
+# A bare tool name at a command position. With PATH emptied this fails at
+# runtime as well as failing the class-level assertion -- which is exactly the
+# pair of consequences the empty PATH was chosen for.
+probe "boundary: a tool resolved by bare name" "$SHELL_SUITE" bin/omarchy-autostart-hypr-write \
+  's|now_mtime="$("$STAT" -c %Y "$TARGET" 2>/dev/null)"|now_mtime="$(stat -c %Y "$TARGET" 2>/dev/null)"|'
+
+probe "boundary: a bare tool name in the reader too" "$SHELL_SUITE" bin/omarchy-autostart-hypr \
+  's|size="$("$WC" -c < "$dst")"|size="$(wc -c < "$dst")"|'
+
+probe "boundary: a bare tool name in the apps picker" "$SHELL_SUITE" bin/omarchy-autostart-apps \
+  's|} \| "$JQ" -R -s|} \| jq -R -s|'
+
+probe "boundary: a bare tool name in the window list" "$SHELL_SUITE" bin/omarchy-autostart-windows \
+  's|\| "$TR" .\\0\\n\\t\\r. .    .|\| tr "\\0\\n\\t\\r" "    "|'
+
+# The interpreter itself is a PATH lookup when it is spelled with env.
+probe "boundary: the interpreter named through env, not absolutely" "$SHELL_SUITE" bin/omarchy-autostart-hypr-write \
+  '1s|^#!/bin/bash$|#!/usr/bin/env bash|'
+
+probe "boundary: a minimal PATH instead of none" "$SHELL_SUITE" bin/omarchy-autostart-hypr-write \
+  's|^PATH=$|PATH=/usr/bin:/bin|'
+
+probe "boundary: a tool declared by a relative name" "$SHELL_SUITE" bin/omarchy-autostart-hypr-write \
+  's|^readonly STAT=/usr/bin/stat$|readonly STAT=stat|'
+
+# The two halves at the process boundary. Neither is sufficient alone, so each
+# is probed on its own.
+probe "boundary: a Process that inherits the environment" "$STRUCT_SUITE" Panel.qml \
+  's|^        clearEnvironment: true$|        clearEnvironment: false|'
+
+probe "boundary: a Process given no vetted environment" "$STRUCT_SUITE" Panel.qml \
+  's|^        environment: run.toolEnv$|        environment: ({})|'
+
+# BASH_ENV back on the allowlist is the finding itself, in one word.
+probe "boundary: BASH_ENV back on the allowlist" "$STRUCT_SUITE" Runners.qml \
+  's|readonly property var toolEnvPass: \["HOME"|readonly property var toolEnvPass: ["BASH_ENV", "HOME"|'
+
+# So is the seam that names a binary the window script executes.
+probe "boundary: the hyprctl seam back on the allowlist" "$STRUCT_SUITE" Runners.qml \
+  's|readonly property var toolEnvPass: \["HOME"|readonly property var toolEnvPass: ["HYPRCTL", "HOME"|'
+
+probe "boundary: an inherited PATH instead of a fixed one" "$STRUCT_SUITE" Runners.qml \
+  's|readonly property string toolPath: "/usr/bin:/bin"|readonly property string toolPath: ""|'
+
+probe "boundary: the producer limit's own tool resolved by name" "$STRUCT_SUITE" Runners.qml \
+  's|readonly property string binHead: "/usr/bin/head"|readonly property string binHead: "head"|'
+
+# --- THE SENTENCE THAT TELLS THE USER ---------------------------------------
+#
+# A preserved file nobody is told about is a file nobody looks at, so the
+# wording is part of the fix rather than decoration on it.
+probe "rescue wording: a preserved file that is never mentioned" "$QML_SUITE" Model.js \
+  's|^    if (p === "") return "";|    if (p !== "") return ""; return "";|'
 
 printf '\nmutation probes: total=%d failed=%d\n' "$run" "$failed"
 if (( skipped > 0 )); then

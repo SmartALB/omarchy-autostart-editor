@@ -171,6 +171,12 @@ Panel {
 
     Process {
         id: hyprProc
+        // The environment, CONSTRUCTED rather than inherited -- see the long
+        // comment on Runners.toolEnv. Both lines are needed and neither is
+        // sufficient alone: clearEnvironment empties it, environment fills in
+        // the named few the scripts actually need.
+        clearEnvironment: true
+        environment: run.toolEnv
         stdout: StdioCollector {
             waitForEnd: true
             onStreamFinished: {
@@ -419,6 +425,12 @@ Panel {
 
     Process {
         id: autostartWriteProc
+        // The environment, CONSTRUCTED rather than inherited -- see the long
+        // comment on Runners.toolEnv. Both lines are needed and neither is
+        // sufficient alone: clearEnvironment empties it, environment fills in
+        // the named few the scripts actually need.
+        clearEnvironment: true
+        environment: run.toolEnv
         // The new autostart.lua, waiting for the process to exist. It is
         // written to stdin in onStarted and dropped in the same handler: this
         // property is a hand-off, not a copy of the file the panel keeps.
@@ -453,7 +465,12 @@ Panel {
                     root.autostartError = Model.envelopeText(envelope.error, envelope.detail)
                     return
                 }
-                root.autostartMessage = Model.autostartWrittenText()
+                // The rescue notice, if there is one, is part of THIS
+                // sentence rather than a channel of its own: the write
+                // succeeded, so reporting it through autostartError would tell
+                // the user their change failed when it did not. Empty in the
+                // ordinary case -- see Model.rescuedText.
+                root.autostartMessage = Model.autostartWrittenText(envelope.rescued)
                 root.autostartNewCommand = ""
                 root.autostartAddOpen = false
                 root.autostartCloseEditor()
@@ -490,6 +507,12 @@ Panel {
 
     Process {
         id: windowsProc
+        // The environment, CONSTRUCTED rather than inherited -- see the long
+        // comment on Runners.toolEnv. Both lines are needed and neither is
+        // sufficient alone: clearEnvironment empties it, environment fills in
+        // the named few the scripts actually need.
+        clearEnvironment: true
+        environment: run.toolEnv
         stdout: StdioCollector {
             waitForEnd: true
             onStreamFinished: {
@@ -516,6 +539,12 @@ Panel {
 
     Process {
         id: appsProc
+        // The environment, CONSTRUCTED rather than inherited -- see the long
+        // comment on Runners.toolEnv. Both lines are needed and neither is
+        // sufficient alone: clearEnvironment empties it, environment fills in
+        // the named few the scripts actually need.
+        clearEnvironment: true
+        environment: run.toolEnv
         stdout: StdioCollector {
             waitForEnd: true
             onStreamFinished: {

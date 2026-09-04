@@ -114,8 +114,13 @@ QtObject {
             check("envelopeText: every code the bin/ helpers can emit has plain wording",
                   unwordedAmong(Model.envelopeCodes(),
                                 function(c) { return Model.envelopeText(c, ""); }), "");
+            // Thirteen, up from ten: the writer's open stopped trusting the
+            // pathname and gained three refusals of its own -- substituted,
+            // foreign-owner and multiply-linked. The number is spelled out
+            // rather than derived so that a list which quietly EMPTIES fails
+            // here; test/run-tests.sh is what proves the list is the scripts'.
             check("envelopeText: the list it checks is not empty",
-                  Model.envelopeCodes().length, 10);
+                  Model.envelopeCodes().length, 13);
 
             // THE EMPTY ENVELOPE. Empty stdout is what a missing script, a
             // timeout kill and a non-zero exit outside the script's own two
@@ -1015,6 +1020,40 @@ QtObject {
             check("autostart wording: and that nothing is started or reloaded",
                   Model.autostartWrittenText().indexOf("starts nothing and reloads nothing") >= 0,
                   true);
+
+            // --- THE ONE THING A SUCCESSFUL WRITE CAN STILL HAVE TO SAY ------
+            //
+            // The writer publishes by exchange, so it ends up holding whatever
+            // was actually replaced. When that is NOT the file it validated --
+            // something wrote autostart.lua inside the window between the last
+            // check and the exchange -- those bytes are preserved instead of
+            // discarded, and this is the sentence that tells the user. A
+            // preserved file nobody is told about is a file nobody looks at,
+            // which would make the whole fix pointless.
+            //
+            // THE EMPTY CASE IS THE ORDINARY ONE and is asserted first: every
+            // successful write reports rescued:"", and anything but "" here
+            // would put a scare sentence in front of the user on every save.
+            check("rescued wording: an ordinary write says nothing extra",
+                  Model.rescuedText(""), "");
+            check("rescued wording: and neither absent nor null invents a sentence",
+                  Model.rescuedText(undefined) + Model.rescuedText(null), "");
+            check("rescued wording: a rescued file is named in full",
+                  Model.rescuedText("/home/u/.config/hypr/x.bak")
+                      .indexOf("/home/u/.config/hypr/x.bak") >= 0, true);
+            check("rescued wording: it says the user's own change did land",
+                  Model.rescuedText("/x").indexOf("in place") >= 0, true);
+            check("rescued wording: and that the other version was kept",
+                  Model.rescuedText("/x").indexOf("not thrown away") >= 0, true);
+            // COMPOSED IN Model.js, NOT IN Panel.qml, which is the rule every
+            // other wording in this project follows: a sentence assembled in
+            // QML is a sentence no suite here can execute.
+            check("rescued wording: the write sentence carries it when there is one",
+                  Model.autostartWrittenText("/x").indexOf("next login") >= 0
+                      && Model.autostartWrittenText("/x").indexOf("not thrown away") >= 0,
+                  true);
+            check("rescued wording: and is untouched when there is not",
+                  Model.autostartWrittenText(""), Model.autostartWrittenText());
 
 
             // --- FROM A RUNNING PROGRAM TO AN AUTOSTART COMMAND --------------
