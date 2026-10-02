@@ -222,8 +222,10 @@ Panel {
 
     // The add field, and the row currently open for a change. -1 is none.
     property string autostartNewCommand: ""
+    property string autostartNewDelay: "0"
     property int autostartEditLine: -1
     property string autostartEditCommand: ""
+    property string autostartEditDelay: "0"
     property bool autostartAddOpen: false
 
     // "Add from a running program": the window list, and which window's
@@ -290,6 +292,9 @@ Panel {
         autostartWriteProc.command = run.toolArgv(
             "omarchy-autostart-hypr-write",
             ["write", "--expect-mtime", String(Number(section.mtime))])
+        // onStarted closes stdin after each candidate. Reopen it before
+        // every new process, otherwise subsequent saves cannot send input.
+        autostartWriteProc.stdinEnabled = true
         autostartWriteProc.running = true
     }
 
@@ -305,16 +310,17 @@ Panel {
     // hyprEntryText as the precedent; that local went with the line-number
     // prefix, and a citation of code that no longer exists is worse than no
     // citation.)
-    function autostartOperation(action, line, commandLine) {
+    function autostartOperation(action, line, commandLine, delay) {
         var op = { action: action }
         if (line !== undefined) op.line = line
         if (commandLine !== undefined) op["command"] = commandLine
+        if (delay !== undefined) op.delay = delay
         return op
     }
 
     function autostartAdd() {
         root.autostartWrite(
-            root.autostartOperation("add", undefined, root.autostartNewCommand))
+            root.autostartOperation("add", undefined, root.autostartNewCommand, root.autostartNewDelay))
     }
 
     // --- add from a running program ----------------------------------------
@@ -384,7 +390,7 @@ Panel {
 
     function autostartChange() {
         root.autostartWrite(root.autostartOperation("change", root.autostartEditLine,
-                                                    root.autostartEditCommand))
+                                                    root.autostartEditCommand, root.autostartEditDelay))
     }
 
     // Open the inline change editor on one row, closing whichever was open.
@@ -410,6 +416,7 @@ Panel {
         if (keyCatcher) keyCatcher.forceActiveFocus()
         root.autostartEditLine = -1
         root.autostartEditCommand = ""
+        root.autostartEditDelay = "0"
     }
 
     function autostartEdit(entry) {
@@ -421,6 +428,7 @@ Panel {
         }
         root.autostartEditLine = entry.line
         root.autostartEditCommand = String(entry.command || "")
+        root.autostartEditDelay = String(entry.delay || 0)
     }
 
     Process {
@@ -472,6 +480,7 @@ Panel {
                 // ordinary case -- see Model.rescuedText.
                 root.autostartMessage = Model.autostartWrittenText(envelope.rescued)
                 root.autostartNewCommand = ""
+                root.autostartNewDelay = "0"
                 root.autostartAddOpen = false
                 root.autostartCloseEditor()
                 // Read the file again rather than patching the list in place:
@@ -939,6 +948,37 @@ Panel {
                                         }
                                     }
 
+                                    Row {
+                                        width: body.width
+                                        spacing: Style.spacing.controlGap
+                                        visible: root.autostartWritable
+                                                 && hyprEntryRow.entry.kind === "autostart"
+                                                 && hyprEntryRow.entry.editable
+                                                 && root.autostartEditLine === hyprEntryRow.entry.line
+                                        Text {
+                                            text: "Start delay (seconds):"
+                                            color: root.fg
+                                            font.family: root.fontFam
+                                            font.pixelSize: Style.font.body
+                                            anchors.verticalCenter: parent.verticalCenter
+                                        }
+                                        TextField {
+                                            width: Style.space(85)
+                                            text: root.autostartEditDelay
+                                            foreground: root.fg
+                                            validator: IntValidator { bottom: 0; top: Model.MAX_START_DELAY }
+                                            onTextEdited: root.autostartEditDelay = text
+                                            onActiveFocusChanged: root.noteEditorFocus(activeFocus)
+                                        }
+                                        Text {
+                                            text: "0 = immediately"
+                                            color: root.fg
+                                            opacity: 0.65
+                                            font.pixelSize: Style.font.caption
+                                            anchors.verticalCenter: parent.verticalCenter
+                                        }
+                                    }
+
                                     // The mark, and the reason in English. A code is
                                     // never shown raw -- Model.hyprReasonText is the one
                                     // place these become sentences, and the harness
@@ -1040,6 +1080,33 @@ Panel {
                                         enabled: !root.autostartBusy
                                         anchors.verticalCenter: parent.verticalCenter
                                         onClicked: root.autostartAdd()
+                                    }
+                                }
+
+                                Row {
+                                    width: autostartAdd.width
+                                    spacing: Style.spacing.controlGap
+                                    Text {
+                                        text: "Start delay (seconds):"
+                                        color: root.fg
+                                        font.family: root.fontFam
+                                        font.pixelSize: Style.font.body
+                                        anchors.verticalCenter: parent.verticalCenter
+                                    }
+                                    TextField {
+                                        width: Style.space(85)
+                                        text: root.autostartNewDelay
+                                        foreground: root.fg
+                                        validator: IntValidator { bottom: 0; top: Model.MAX_START_DELAY }
+                                        onTextEdited: root.autostartNewDelay = text
+                                        onActiveFocusChanged: root.noteEditorFocus(activeFocus)
+                                    }
+                                    Text {
+                                        text: "0 = immediately"
+                                        color: root.fg
+                                        opacity: 0.65
+                                        font.pixelSize: Style.font.caption
+                                        anchors.verticalCenter: parent.verticalCenter
                                     }
                                 }
 

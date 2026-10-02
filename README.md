@@ -44,6 +44,11 @@ From the panel you can:
   applications. Picking one **fills the field**; it does not write. The line
   that goes into a file which runs at every login is one you have read first.
 - **change** one entry -- exactly the line you picked, no other.
+- **delay** a start by 0–3600 whole seconds using **Start delay (seconds)**
+  in the add or change form. Zero starts immediately. The delay is stored in
+  `autostart.lua`, not a separate file, and is shown in the entry list.
+  Delayed entries remain editable; their command and delay are shown separately.
+  Each delay runs independently and does not hold up other autostarts.
 - **remove** one entry -- exactly the line you picked, no other.
 
 A line that calls one of those helpers in a form the reader cannot take apart
@@ -58,7 +63,7 @@ removed: for those, edit the file by hand. That is a real limitation and it is
 named on screen rather than hidden. A line that calls none of those helpers is
 not an entry at all; it belongs to your file.
 
-The build is in the bottom right of the panel -- `v1.0.0` for this release --
+The build is in the bottom right of the panel -- `v1.1.0` for this release --
 so two machines running different builds can be told apart at a glance. It is
 not written into the panel: it comes from one constant that a test pins to
 `manifest.json` in both directions, so the number shown is the number the

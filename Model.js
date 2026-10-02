@@ -56,7 +56,7 @@
 // it: the installed manifest.json and the installed Model.js are now provably
 // from one source tree, asserted file-for-file by
 // test_install_removes_what_the_plugin_no_longer_ships.
-var VERSION        = "1.0.3";
+var VERSION        = "1.1.0";
 
 // THE RUNNING-PROGRAMS PICKER, OFF BY REQUEST. One flag, one place, read
 // exactly once in Panel.qml -- the shape Model.WRITE_PATH_ENABLED used for the
@@ -624,6 +624,7 @@ function parseAutostartLua(text, fileName) {
         var call = hyprCallOnLine(raw, AUTOSTART_CALLS);
         if (!call) continue;
         var entry = hyprEntry(name, n + 1, raw, call.name, "autostart");
+        entry.delay = 0;
         if (call.reason) { entry.reason = call.reason; entries.push(entry); continue; }
 
         var direct = luaStringWhole(call.args);
@@ -631,6 +632,12 @@ function parseAutostartLua(text, fileName) {
             entry.editable = true;
             entry.command = direct;
             entry.launcher = (call.name === "o.launch_on_start") ? "uwsm-app" : "shell";
+            var delayed = call.name === "o.exec_on_start" ? parseDelayedCommand(direct) : null;
+            if (delayed) {
+                entry.command = delayed.command;
+                entry.delay = delayed.delay;
+                entry.launcher = delayed.launcher;
+            }
             entries.push(entry);
             continue;
         }
@@ -825,7 +832,8 @@ function hyprEntryText(entry) {
     var e = entry || {};
     if (!e.editable) return String(e.raw === undefined ? "" : e.raw);
     if (e.kind === "autostart") {
-        return String(e.command) + (e.launcher === "uwsm-app" ? "" : "  (shell)");
+        return String(e.command) + (e.launcher === "uwsm-app" ? "" : "  (shell)")
+             + (e.delay > 0 ? "  (delay: " + e.delay + " s)" : "");
     }
     // A kind this function does not know falls through to the raw line, which
     // is the same answer a non-editable entry gets: the line as it stands,
@@ -913,13 +921,56 @@ function luaQuote(s) {
     return QUOTE + out + QUOTE;
 }
 
-// The one line shape this writer emits, in the style the file already uses:
-//   o.launch_on_start("<command>")
-// No indentation, no trailing semicolon, no comment -- exactly what
-// parseAutostartLua reads back as an editable entry with launcher
-// "uwsm-app". The round-trip assertion in the harness is what binds the two.
-function autostartLine(command) {
-    return "o.launch_on_start(" + luaQuote(command) + ")";
+// Immediate starts retain their shell/uwsm launcher. Delayed starts use a
+// tagged shell wrapper that the parser unwraps into command, delay and launcher.
+// The round-trip assertions in the harness bind the reader to the writer.
+var MAX_START_DELAY = 3600;
+
+// Undefined means the old API's immediate start. Empty/invalid UI input is
+// refused rather than silently converted to zero or inserted into shell code.
+function startDelay(value) {
+    if (value === undefined) return 0;
+    if (typeof value !== "number" && typeof value !== "string") return null;
+    if (!/^[0-9]+$/.test(String(value))) return null;
+    var n = Number(value);
+    return isFinite(n) && n <= MAX_START_DELAY ? n : null;
+}
+
+function parseDelayedCommand(value) {
+    var prefix = "/bin/sh -c ";
+    if (value.indexOf(prefix) !== 0) return null;
+    // The shell's $0 marker preserves the original launch mode, even for
+    // shell commands that themselves begin with "uwsm-app -- ".
+    var tagged = /^(.*) omarchy-autostart-(shell|uwsm-app)$/.exec(value.slice(prefix.length));
+    if (!tagged) return null;
+    var quoted = tagged[1];
+    if (quoted.charAt(0) !== "'" || quoted.charAt(quoted.length - 1) !== "'") return null;
+    var script = quoted.slice(1, -1).split("'\\''").join("'");
+    // Only accept the exact quoting and wrapper emitted by this editor.
+    if (shellQuote(script) !== quoted) return null;
+    var match = /^\/usr\/bin\/sleep ([1-9][0-9]*); ([\s\S]+)$/.exec(script);
+    if (!match || startDelay(match[1]) === null) return null;
+    var command = match[2];
+    var launcher = tagged[2];
+    if (launcher === "uwsm-app") {
+        if (command.indexOf("uwsm-app -- ") !== 0) return null;
+        command = command.slice("uwsm-app -- ".length);
+    }
+    if (autostartCommandRefusal(command)) return null;
+    return {command: command, delay: Number(match[1]), launcher: launcher};
+}
+
+function autostartLine(command, delay, launcher) {
+    var seconds = startDelay(delay);
+    if (seconds === null) throw new Error("invalid-delay");
+    var shell = launcher === "shell";
+    var value = command;
+    if (seconds > 0) {
+        var script = "/usr/bin/sleep " + seconds + "; " + (shell ? "" : "uwsm-app -- ") + command;
+        value = "/bin/sh -c " + shellQuote(script) + " omarchy-autostart-" + (shell ? "shell" : "uwsm-app");
+        shell = true;
+    }
+    return (shell ? "o.exec_on_start(" : "o.launch_on_start(") + luaQuote(value) + ")";
 }
 
 // Why an operation was refused. Codes, never shown raw -- see
@@ -927,6 +978,7 @@ function autostartLine(command) {
 // has: this list is what autostartApply() can return, and the harness proves
 // every one of them has wording.
 var AUTOSTART_WRITE_REASONS = [
+    "invalid-delay",         // whole seconds, 0 through MAX_START_DELAY
     "empty-command",         // nothing, or only spaces and tabs
     "command-too-long",      // past MAX_COMMAND
     "unwritable-character",  // see autostartCharRefused
@@ -943,6 +995,8 @@ function autostartWriteReasonText(code) {
         return "This change was refused, and no reason was recorded for it.";
     }
     switch (code) {
+    case "invalid-delay":
+        return "Start delay must be a whole number from 0 to " + MAX_START_DELAY + " seconds.";
     case "empty-command":
         return "A command line is needed -- this one is empty.";
     case "command-too-long":
@@ -1047,8 +1101,9 @@ function autostartApply(text, op) {
     if (action === "add") {
         var refusal = autostartCommandRefusal(operation.command);
         if (refusal) return { ok: false, error: refusal };
+        if (startDelay(operation.delay) === null) return { ok: false, error: "invalid-delay" };
         var appended = lines.slice();
-        appended.push(autostartLine(String(operation.command)));
+        appended.push(autostartLine(String(operation.command), operation.delay));
         return { ok: true, text: autostartJoinLines(appended) };
     }
 
@@ -1085,7 +1140,11 @@ function autostartApply(text, op) {
     }
     var changeRefusal = autostartCommandRefusal(operation.command);
     if (changeRefusal) return { ok: false, error: changeRefusal };
-    out[wanted - 1] = autostartLine(String(operation.command));
+    var delay = operation.delay === undefined ? found.delay : operation.delay;
+    if (startDelay(delay) === null) return { ok: false, error: "invalid-delay" };
+    if (String(operation.command) === found.command && startDelay(delay) === found.delay)
+        return { ok: true, text: source };
+    out[wanted - 1] = autostartLine(String(operation.command), delay, found.launcher);
     return { ok: true, text: autostartJoinLines(out) };
 }
 

@@ -57,6 +57,85 @@ QtObject {
             check("stripFieldCodes: nothing to strip",
                   Model.stripFieldCodes("modelbox"), "modelbox");
 
+            // --- PWA commands and start delays --------------------------------
+            var outlookCommand = "brave --app=https://outlook.office.com/mail/";
+            var outlookPicked = Model.commandFromApp({name: "Outlook (Brave)", exec: outlookCommand});
+            check("Outlook PWA: picker preserves app URL", outlookPicked, outlookCommand);
+            var outlookAdded = Model.autostartApply('o.launch_on_start("notes")\n',
+                                                    {action: "add", command: outlookPicked});
+            check("Outlook PWA: adding succeeds", outlookAdded.ok, true);
+            check("Outlook PWA: existing entry survives",
+                  Model.parseAutostartLua(outlookAdded.text)[0].command, "notes");
+            check("Outlook PWA: Lua roundtrip preserves app URL",
+                  Model.parseAutostartLua(outlookAdded.text)[1].command, outlookCommand);
+            var installedPwa = '/opt/brave-bin/brave --profile-directory="Profile 1" --app-id=test-app';
+            check("Brave PWA: profile and app ID survive Lua roundtrip",
+                  Model.parseAutostartLua(Model.autostartApply("", {action: "add",
+                      command: Model.commandFromApp({exec: installedPwa})}).text)[0].command,
+                  installedPwa);
+
+            var delayedOutlook = Model.autostartApply(outlookAdded.text,
+                {action: "change", line: 2, command: outlookCommand, delay: "10"});
+            check("delay: Outlook change succeeds", delayedOutlook.ok, true);
+            check("delay: only Outlook line changes",
+                  Model.oneLineDifference(outlookAdded.text, delayedOutlook.text), "changed:2");
+            var delayedEntry = Model.parseAutostartLua(delayedOutlook.text)[1];
+            check("delay: command is unwrapped", delayedEntry.command, outlookCommand);
+            check("delay: seconds survive", delayedEntry.delay, 10);
+            check("delay: launcher survives", delayedEntry.launcher, "uwsm-app");
+            check("delay: displayed next to command", Model.hyprEntryText(delayedEntry),
+                  outlookCommand + "  (delay: 10 s)");
+            check("delay: exact wrapper", Model.autostartLine("notes", 10),
+                  'o.exec_on_start("/bin/sh -c \'/usr/bin/sleep 10; uwsm-app -- notes\' omarchy-autostart-uwsm-app")');
+            check("delay: zero preserves old format", Model.autostartLine("notes", 0),
+                  Model.autostartLine("notes"));
+            check("delay: change back to immediate", Model.autostartApply(delayedOutlook.text,
+                  {action: "change", line: 2, command: outlookCommand, delay: 0}).text, outlookAdded.text);
+            check("delay: change seconds", Model.parseAutostartLua(Model.autostartApply(delayedOutlook.text,
+                  {action: "change", line: 2, command: outlookCommand, delay: 20}).text)[1].delay, 20);
+            check("delay: old API preserves delay", Model.parseAutostartLua(Model.autostartApply(delayedOutlook.text,
+                  {action: "change", line: 2, command: "notes"}).text)[1].delay, 10);
+            check("delay: removing entry works", Model.autostartApply(delayedOutlook.text,
+                  {action: "remove", line: 2}).text, 'o.launch_on_start("notes")\n');
+            var specialCommand = "app --name=\"O'Reilly\" --path='a\\b' $(date) ; next";
+            check("delay: quotes backslashes and shell syntax roundtrip",
+                  Model.parseAutostartLua(Model.autostartLine(specialCommand, 7))[0].command, specialCommand);
+            check("delay: installed PWA arguments roundtrip",
+                  Model.parseAutostartLua(Model.autostartLine(installedPwa, 10))[0].command, installedPwa);
+            check("delay: negative rejected", Model.startDelay(-1), null);
+            check("delay: fraction rejected", Model.startDelay(1.5), null);
+            check("delay: shell injection rejected", Model.startDelay("10; echo bad"), null);
+            check("delay: empty input rejected", Model.startDelay(""), null);
+            check("delay: null rejected", Model.startDelay(null), null);
+            check("delay: bool rejected", Model.startDelay(true), null);
+            check("delay: infinity rejected", Model.startDelay(Infinity), null);
+            check("delay: maximum allowed", Model.startDelay(3600), 3600);
+            check("delay: over maximum rejected", Model.startDelay(3601), null);
+            check("delay: invalid add refused", Model.autostartApply("",
+                  {action: "add", command: "notes", delay: "bad"}).error, "invalid-delay");
+            check("delay: invalid change produces no content", Model.autostartApply(outlookAdded.text,
+                  {action: "change", line: 2, command: outlookCommand, delay: -1}).text, undefined);
+            check("delay: arbitrary shell wrapper not unwrapped",
+                  Model.parseDelayedCommand("/bin/sh -c 'sleep 10; notes'"), null);
+            check("delay: trailing shell commands not unwrapped",
+                  Model.parseDelayedCommand("/bin/sh -c '/usr/bin/sleep 10; notes'; echo extra"), null);
+            var shellEntry = 'o.exec_on_start("gtk-launch WhatsApp")\n';
+            var delayedShell = Model.autostartApply(shellEntry,
+                {action: "change", line: 1, command: "gtk-launch WhatsApp", delay: 10});
+            check("delay: shell launcher preserved", Model.parseAutostartLua(delayedShell.text)[0].launcher, "shell");
+            var explicitUwsmShell = Model.parseAutostartLua(Model.autostartLine("uwsm-app -- notes", 10, "shell"))[0];
+            check("delay: explicit shell uwsm retains launcher", explicitUwsmShell.launcher, "shell");
+            check("delay: explicit shell uwsm retains command", explicitUwsmShell.command, "uwsm-app -- notes");
+            check("delay: shell command preserved", Model.parseAutostartLua(delayedShell.text)[0].command, "gtk-launch WhatsApp");
+            check("delay: removing shell delay restores original", Model.autostartApply(delayedShell.text,
+                  {action: "change", line: 1, command: "gtk-launch WhatsApp", delay: 0}).text, shellEntry);
+            check("delay: shell edit does not introduce uwsm", Model.autostartApply(shellEntry,
+                  {action: "change", line: 1, command: "gtk-launch other", delay: 0}).text,
+                  'o.exec_on_start("gtk-launch other")\n');
+            var unchangedIndented = '  o.exec_on_start(o.launch("notes"));\n';
+            check("delay: no-op preserves original formatting", Model.autostartApply(unchangedIndented,
+                  {action: "change", line: 1, command: "notes", delay: 0}).text, unchangedIndented);
+
             // --- appsProblem ---------------------------------------------------
             // Two facts, three outcomes. The point of the pair is that "too
             // long" and "broken" are not the same sentence: the first is
@@ -1009,7 +1088,7 @@ QtObject {
                   unwordedAmong(Model.autostartWriteReasons(),
                                 Model.autostartWriteReasonText), "");
             check("autostart wording: the list it checks is not empty",
-                  Model.autostartWriteReasons().length, 7);
+                  Model.autostartWriteReasons().length, 8);
             check("autostart wording: an absent code does not print undefined",
                   Model.autostartWriteReasonText(undefined).indexOf("undefined"), -1);
             check("autostart wording: an unknown code is named, not shown bare",

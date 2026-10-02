@@ -1684,6 +1684,16 @@ if [[ -z "$write_body" ]]; then
       "autostartWrite() is not in Panel.qml, so every check on it would be vacuous"
 else
   ok "autostart write: the write function was found at all"
+  if awk '
+      /autostartWriteProc\.stdinEnabled[[:space:]]*=[[:space:]]*true/ { reopened = 1 }
+      /autostartWriteProc\.running[[:space:]]*=[[:space:]]*true/ { started = 1; if (!reopened) invalid = 1 }
+      END { exit !(started && reopened && !invalid) }
+  ' <<<"$write_body"; then
+    ok "autostart write: stdin is reopened before every process start"
+  else
+    bad "autostart write: stdin is reopened before every process start" \
+        "onStarted closes stdin; subsequent saves must enable it again before running = true"
+  fi
   if grep -qE 'Model\.hyprSectionIsWritable\(' <<<"$write_body"; then
     ok "autostart write: it asks Model whether the section may be written"
   else
