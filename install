@@ -115,8 +115,26 @@ else
     # rather than plugin content. Neither belongs in the plugins directory.
     # Now that the directory is REPLACED rather than merged, this list is the
     # whole of what gets installed -- which is what makes it worth reading.
-    for item in manifest.json README.md LICENSE CHECKLIST.md preview.png \
-                BarWidget.qml Panel.qml Runners.qml Model.js bin; do
+    for item in manifest.json BarWidget.qml Panel.qml ApplicationPicker.qml \
+                Runners.qml Model.js; do
+        if [[ ! -f "$SOURCE/$item" ]]; then
+            echo "install: required plugin file is missing or not a file: $item" >&2
+            exit 1
+        fi
+    done
+    if [[ ! -d "$SOURCE/bin" ]]; then
+        echo "install: required plugin directory is missing or not a directory: bin" >&2
+        exit 1
+    fi
+    for item in omarchy-autostart-apps omarchy-autostart-windows \
+                omarchy-autostart-hypr omarchy-autostart-hypr-write; do
+        if [[ ! -f "$SOURCE/bin/$item" ]]; then
+            echo "install: required helper is missing or not a file: bin/$item" >&2
+            exit 1
+        fi
+    done
+    for item in manifest.json README.md LICENSE CHECKLIST.md preview.png screenshots \
+                BarWidget.qml Panel.qml ApplicationPicker.qml Runners.qml Model.js bin; do
         [[ -e "$SOURCE/$item" ]] || continue
         cp -r "$SOURCE/$item" "$STAGE/"
     done
@@ -141,14 +159,12 @@ fi
 
 cat <<NOTE
 
-Two things to know:
+Developer install complete. Two things to know:
 
-  1. Restart the shell so the widget appears:  omarchy-restart-shell
-  2. Add the widget to your bar in ~/.config/omarchy/shell.json
+  1. Restart the shell so it discovers the plugin:  omarchy restart shell
+  2. Enable and place the widget:  omarchy plugin enable smartalb.autostart
 
-Step 2 is not optional, and skipping it fails quietly: until the id is
-referenced from shell.json, Omarchy treats the plugin as disabled -- nothing
-in the bar, no error anywhere. Check it took with:
+Do not edit shell.json by hand. Check it took with:
 
   omarchy plugin list | grep smartalb.autostart
 
@@ -159,8 +175,8 @@ one you already own:
 
   ~/.config/hypr/autostart.lua
 
-It writes that file one line at a time, keeps the previous content in
-autostart.lua.bak, refuses to write anything that does not compile, and
-starts nothing and reloads nothing -- your entries take effect at your next
-login, as they always did.
+It writes that file one line at a time, keeps the newest five previous states
+as autostart.lua.smartalb-autostart.<timestamp>.bak, refuses to write anything
+that does not compile, and starts nothing and reloads nothing -- your entries
+take effect at your next login, as they always did.
 NOTE

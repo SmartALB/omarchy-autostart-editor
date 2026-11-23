@@ -77,6 +77,7 @@ Panel {
     // the first open), and a panel that read the file at shell start would run
     // four processes on every single QML reload for numbers nobody asked for.
     function open() {
+        root.keyboardActive = false
         root.reload()
         root.controller.show()
     }
@@ -93,7 +94,8 @@ Panel {
         root.editorsFocused = 0
         // A closed panel offers nothing: neither picker comes back open on the
         // next click with a stale list behind it.
-        root.autostartAddOpen = false
+        if (root.applicationPicker && root.applicationPicker.popupOpen)
+            root.applicationPicker.close()
         root.autostartFromWindowOpen = false
         root.controller.hide()
     }
@@ -165,6 +167,10 @@ Panel {
 
     function readHypr() {
         root.hyprError = ""
+        // A requested reload invalidates the old snapshot immediately. If the
+        // helper cannot start or answer, stale rows must not remain writable.
+        root.hyprSections = []
+        root.counted(0)
         hyprProc.command = run.tool("omarchy-autostart-hypr", "read")
         hyprProc.running = true
     }
@@ -183,10 +189,14 @@ Panel {
                 var envelope
                 try { envelope = JSON.parse(String(text || "{}")) }
                 catch (e) {
+                    root.hyprSections = []
+                    root.counted(0)
                     root.hyprError = "the Hyprland file reader gave an unreadable answer"
                     return
                 }
                 if (!envelope.ok) {
+                    root.hyprSections = []
+                    root.counted(0)
                     // Worded, never the bare code -- the same rule the
                     // configuration envelope follows.
                     root.hyprError = Model.envelopeText(envelope.error, envelope.detail)
@@ -200,6 +210,13 @@ Panel {
                 // execute, beside two counters in Model.js that already did
                 // the job and were unused.
                 root.counted(Model.hyprProgramCount(root.hyprSections))
+            }
+        }
+        onExited: function(exitCode, exitStatus) {
+            if (exitCode !== 0) {
+                root.hyprSections = []
+                root.counted(0)
+                root.hyprError = "the Hyprland file reader could not be started"
             }
         }
     }
@@ -226,7 +243,6 @@ Panel {
     property int autostartEditLine: -1
     property string autostartEditCommand: ""
     property string autostartEditDelay: "0"
-    property bool autostartAddOpen: false
 
     // "Add from a running program": the window list, and which window's
     // suggestions are unfolded. BY ROW rather than by class, and here that is
@@ -270,6 +286,10 @@ Panel {
             root.autostartError = Model.autostartWriteReasonText(result.error)
             return
         }
+        if (result.changed === false) {
+            root.autostartMessage = Model.autostartNoChangesText()
+            return
+        }
         root.autostartBusy = true
         // THE CONTENT NEVER ENTERS AN ARGV, and that is a stronger statement
         // than the one that stood here. What stood here said the content went
@@ -291,7 +311,9 @@ Panel {
         autostartWriteProc.pendingContent = result.text
         autostartWriteProc.command = run.toolArgv(
             "omarchy-autostart-hypr-write",
-            ["write", "--expect-mtime", String(Number(section.mtime))])
+            ["write",
+             "--expect-mtime", String(Number(section.mtime)),
+             "--expect-sha256", String(section.sha256)])
         // onStarted closes stdin after each candidate. Reopen it before
         // every new process, otherwise subsequent saves cannot send input.
         autostartWriteProc.stdinEnabled = true
@@ -345,7 +367,8 @@ Panel {
         root.autostartFromWindowOpen = !root.autostartFromWindowOpen
         root.autostartWindowRow = -1
         if (!root.autostartFromWindowOpen) return
-        root.autostartAddOpen = false
+        if (root.applicationPicker && root.applicationPicker.popupOpen)
+            root.applicationPicker.close()
         root.refreshWindows()
         root.startAppsRead()
     }
@@ -481,12 +504,23 @@ Panel {
                 root.autostartMessage = Model.autostartWrittenText(envelope.rescued)
                 root.autostartNewCommand = ""
                 root.autostartNewDelay = "0"
-                root.autostartAddOpen = false
+                if (root.applicationPicker && root.applicationPicker.popupOpen)
+                    root.applicationPicker.close()
                 root.autostartCloseEditor()
                 // Read the file again rather than patching the list in place:
                 // the mtime moved, and every later operation's freshness check
                 // is against the one on disk now.
                 root.readHypr()
+            }
+        }
+        onExited: function(exitCode, exitStatus) {
+            // Scripts report every expected outcome as a JSON envelope with
+            // status 0. A non-zero status therefore means timeout or start
+            // failure, either of which may produce no stream-finished signal.
+            if (exitCode !== 0 && root.autostartBusy) {
+                root.autostartBusy = false
+                autostartWriteProc.pendingContent = ""
+                root.autostartError = "the autostart writer could not be started"
             }
         }
     }
@@ -656,6 +690,182 @@ Panel {
     // focused.
     property int editorsFocused: 0
 
+    // Keyboard cursor. Entries have two actions (change/remove); the add row
+    // has three (command field/application picker/add). The cursor is separate
+    // from editor focus: once a TextField or picker owns the keys,
+    // PanelKeyCatcher is blocked and the control receives them directly.
+    property string keyboardSection: "entries"
+    property int keyboardIndex: 0
+    property int keyboardAction: 0
+    property bool keyboardActive: false
+    property int keyboardFocusEditLine: -1
+    property var applicationPicker: null
+    property var addCommandField: null
+    property var keyboardEditDelayField: null
+    property var keyboardAddDelayField: null
+    readonly property var keyboardEntries: {
+        var out = []
+        var entries = root.autostartEntriesNow || []
+        for (var i = 0; i < entries.length; i++) {
+            if (entries[i] && entries[i].editable === true) out.push(entries[i])
+        }
+        return out
+    }
+
+    function keyboardNormalize() {
+        if (root.keyboardEntries.length === 0) {
+            root.keyboardSection = "add"
+            root.keyboardIndex = 0
+        } else if (root.keyboardSection === "entries") {
+            root.keyboardIndex = Math.max(0, Math.min(root.keyboardIndex,
+                                                       root.keyboardEntries.length - 1))
+        }
+        var maxAction = root.keyboardSection === "entries"
+                      ? (root.keyboardSelectedEntryIsEditing() ? 3 : 1)
+                      : 3
+        root.keyboardAction = Math.max(0, Math.min(root.keyboardAction, maxAction))
+    }
+
+    function keyboardSelectedEntry() {
+        if (root.keyboardSection !== "entries"
+            || root.keyboardIndex < 0
+            || root.keyboardIndex >= root.keyboardEntries.length) return null
+        return root.keyboardEntries[root.keyboardIndex]
+    }
+
+    function keyboardSelectedEntryIsEditing() {
+        var entry = root.keyboardSelectedEntry()
+        return entry && Number(root.autostartEditLine) === Number(entry.line)
+    }
+
+    function keyboardMove(dx, dy) {
+        root.keyboardActive = true
+        root.keyboardNormalize()
+        if (dy !== 0) {
+            if (root.keyboardSection === "entries") {
+                var next = root.keyboardIndex + dy
+                if (next >= root.keyboardEntries.length) {
+                    root.keyboardSection = "add"
+                    root.keyboardAction = 0
+                } else {
+                    root.keyboardIndex = Math.max(0, next)
+                }
+            } else if (dy < 0 && root.keyboardEntries.length > 0) {
+                root.keyboardSection = "entries"
+                root.keyboardIndex = root.keyboardEntries.length - 1
+                root.keyboardAction = 0
+            }
+        }
+        if (dx !== 0) {
+            var count = root.keyboardSection === "entries"
+                      ? (root.keyboardSelectedEntryIsEditing() ? 4 : 2)
+                      : 4
+            root.keyboardAction = (root.keyboardAction + dx + count) % count
+        }
+    }
+
+    function keyboardActivate() {
+        if (!root.keyboardActive) {
+            root.keyboardActive = true
+            root.keyboardNormalize()
+            return
+        }
+        root.keyboardNormalize()
+        if (root.keyboardSection === "entries") {
+            var entry = root.keyboardSelectedEntry()
+            if (!entry) return
+            if (root.keyboardSelectedEntryIsEditing()) {
+                if (root.keyboardAction === 0) {
+                    root.autostartChange()
+                } else if (root.keyboardAction === 1) {
+                    root.autostartCloseEditor()
+                } else if (root.keyboardAction === 2) {
+                    root.autostartRemove(entry.line)
+                } else if (root.keyboardEditDelayField) {
+                    root.keyboardEditDelayField.forceActiveFocus()
+                }
+            } else if (root.keyboardAction === 0) {
+                root.keyboardFocusEditLine = entry.line
+                root.autostartEdit(entry)
+            } else {
+                root.autostartRemove(entry.line)
+            }
+            return
+        }
+        if (root.keyboardAction === 0) {
+            if (root.addCommandField) root.addCommandField.forceActiveFocus()
+        } else if (root.keyboardAction === 1) {
+            if (root.applicationPicker) root.applicationPicker.open()
+        } else if (root.keyboardAction === 2) {
+            root.autostartAdd()
+        } else if (root.keyboardAddDelayField) {
+            root.keyboardAddDelayField.forceActiveFocus()
+        }
+    }
+
+    function keyboardDelete() {
+        if (root.keyboardSection !== "entries") return
+        root.keyboardActive = true
+        // Deletion is never one keystroke. Move the cursor to the visible
+        // Remove action; Enter/Space is the explicit confirmation.
+        root.keyboardAction = root.keyboardSelectedEntryIsEditing() ? 2 : 1
+    }
+
+    function keyboardText(text) {
+        if (text === "a" || text === "A") {
+            root.keyboardSection = "add"
+            root.keyboardAction = 0
+            root.keyboardActive = true
+            if (root.addCommandField) root.addCommandField.forceActiveFocus()
+        } else if (text === "/") {
+            root.keyboardSection = "add"
+            root.keyboardAction = 1
+            root.keyboardActive = true
+            if (root.applicationPicker) root.applicationPicker.open()
+        } else if (text === "r" || text === "R") {
+            root.reload()
+        }
+    }
+
+    function keyboardEntrySelected(line, action) {
+        if (!root.keyboardActive
+            || root.keyboardSection !== "entries"
+            || root.keyboardAction !== action
+            || root.keyboardIndex < 0
+            || root.keyboardIndex >= root.keyboardEntries.length) return false
+        return Number(root.keyboardEntries[root.keyboardIndex].line) === Number(line)
+    }
+
+    function keyboardClose() {
+        if (root.autostartFromWindowOpen) {
+            root.autostartFromWindowOpen = false
+            root.autostartWindowRow = -1
+        } else if (root.autostartEditLine >= 0) {
+            root.autostartCloseEditor()
+        } else {
+            root.close()
+        }
+    }
+
+    function ensureKeyboardCursorVisible(item) {
+        if (!item || !scrollArea || !scrollArea.contentItem) return
+        var flick = scrollArea.contentItem
+        if (flick.contentY === undefined || !flick.contentItem) return
+        var point = item.mapToItem(flick.contentItem, 0, 0)
+        var margin = Style.spacing.md
+        var top = point.y
+        var bottom = top + item.height
+        var viewTop = flick.contentY
+        var viewBottom = viewTop + flick.height
+        var maxY = Math.max(0, flick.contentHeight - flick.height)
+        if (top < viewTop + margin) {
+            flick.contentY = Math.max(0, Math.min(maxY, top - margin))
+        } else if (bottom > viewBottom - margin) {
+            flick.contentY = Math.max(
+                0, Math.min(maxY, bottom + margin - flick.height))
+        }
+    }
+
     function noteEditorFocus(gained) {
         // Clamped rather than trusted. A delegate destroyed while its field
         // still holds focus never reports the loss, and an unclamped counter
@@ -683,8 +893,13 @@ Panel {
             id: keyCatcher
             anchors.fill: parent
             blocked: root.editorsFocused > 0
-            onCloseRequested: root.close()
+                     || (root.applicationPicker && root.applicationPicker.popupOpen)
+            onCloseRequested: root.keyboardClose()
             onTabRequested: function(direction) { root.switchPanel(direction) }
+            onMoveRequested: function(dx, dy) { root.keyboardMove(dx, dy) }
+            onActivateRequested: root.keyboardActivate()
+            onDeleteRequested: root.keyboardDelete()
+            onTextKey: function(text, modifiers) { root.keyboardText(text) }
 
             // The shipped idiom (audio/Panel.qml:694, monitor/Panel.qml:516):
             // a ScrollView's inner Flickable stays interactive even when the
@@ -893,6 +1108,16 @@ Panel {
                                             fontFamily: root.fontFam
                                             bordered: true
                                             enabled: !root.autostartBusy
+                                             hasCursor: root.keyboardEntrySelected(
+                                                            hyprEntryRow.entry.line,
+                                                            root.autostartEditLine
+                                                              === hyprEntryRow.entry.line
+                                                              ? 1 : 0)
+                                             onHasCursorChanged: {
+                                                 if (hasCursor) Qt.callLater(function() {
+                                                     root.ensureKeyboardCursorVisible(changeEntryButton)
+                                                 })
+                                             }
                                             anchors.verticalCenter: parent.verticalCenter
                                             onClicked: root.autostartEdit(hyprEntryRow.entry)
                                         }
@@ -905,6 +1130,16 @@ Panel {
                                             fontFamily: root.fontFam
                                             bordered: true
                                             enabled: !root.autostartBusy
+                                             hasCursor: root.keyboardEntrySelected(
+                                                            hyprEntryRow.entry.line,
+                                                            root.autostartEditLine
+                                                              === hyprEntryRow.entry.line
+                                                              ? 2 : 1)
+                                             onHasCursorChanged: {
+                                                 if (hasCursor) Qt.callLater(function() {
+                                                     root.ensureKeyboardCursorVisible(removeEntryButton)
+                                                 })
+                                             }
                                             anchors.verticalCenter: parent.verticalCenter
                                             onClicked: root.autostartRemove(hyprEntryRow.entry.line)
                                         }
@@ -920,6 +1155,7 @@ Panel {
                                                  && root.autostartEditLine === hyprEntryRow.entry.line
 
                                         TextField {
+                                            id: editCommandField
                                             width: Math.max(Style.space(80),
                                                             body.width
                                                             - saveEntryButton.implicitWidth
@@ -934,6 +1170,17 @@ Panel {
                                             // as the program rows below.
                                             onTextEdited: root.autostartEditCommand = text
                                             onActiveFocusChanged: root.noteEditorFocus(activeFocus)
+                                            Keys.onEscapePressed: function(event) {
+                                                keyCatcher.forceActiveFocus()
+                                                event.accepted = true
+                                            }
+                                            onVisibleChanged: {
+                                                if (visible
+                                                    && root.keyboardFocusEditLine === hyprEntryRow.entry.line) {
+                                                    root.keyboardFocusEditLine = -1
+                                                    Qt.callLater(editCommandField.forceActiveFocus)
+                                                }
+                                            }
                                         }
 
                                         Button {
@@ -941,9 +1188,16 @@ Panel {
                                             text: "Save"
                                             foreground: root.fg
                                             fontFamily: root.fontFam
-                                            bordered: true
-                                            enabled: !root.autostartBusy
-                                            anchors.verticalCenter: parent.verticalCenter
+                                             bordered: true
+                                             enabled: !root.autostartBusy
+                                             hasCursor: root.keyboardEntrySelected(
+                                                            hyprEntryRow.entry.line, 0)
+                                             onHasCursorChanged: {
+                                                 if (hasCursor) Qt.callLater(function() {
+                                                     root.ensureKeyboardCursorVisible(saveEntryButton)
+                                                 })
+                                             }
+                                             anchors.verticalCenter: parent.verticalCenter
                                             onClicked: root.autostartChange()
                                         }
                                     }
@@ -961,14 +1215,39 @@ Panel {
                                             font.family: root.fontFam
                                             font.pixelSize: Style.font.body
                                             anchors.verticalCenter: parent.verticalCenter
-                                        }
-                                        TextField {
-                                            width: Style.space(85)
+                                         }
+                                         TextField {
+                                             id: editDelayField
+                                             width: Style.space(85)
                                             text: root.autostartEditDelay
                                             foreground: root.fg
                                             validator: IntValidator { bottom: 0; top: Model.MAX_START_DELAY }
                                             onTextEdited: root.autostartEditDelay = text
-                                            onActiveFocusChanged: root.noteEditorFocus(activeFocus)
+                                             onActiveFocusChanged: root.noteEditorFocus(activeFocus)
+                                             hasCursor: root.keyboardEntrySelected(
+                                                            hyprEntryRow.entry.line, 3)
+                                                        && !activeFocus
+                                             onHasCursorChanged: {
+                                                 if (hasCursor) Qt.callLater(function() {
+                                                     root.ensureKeyboardCursorVisible(editDelayField)
+                                                 })
+                                             }
+                                             Keys.onEscapePressed: function(event) {
+                                                keyCatcher.forceActiveFocus()
+                                                 event.accepted = true
+                                             }
+                                             onVisibleChanged: {
+                                                 if (visible) root.keyboardEditDelayField = editDelayField
+                                                 else if (root.keyboardEditDelayField === editDelayField)
+                                                     root.keyboardEditDelayField = null
+                                             }
+                                             Component.onCompleted: {
+                                                 if (visible) root.keyboardEditDelayField = editDelayField
+                                             }
+                                             Component.onDestruction: {
+                                                 if (root.keyboardEditDelayField === editDelayField)
+                                                     root.keyboardEditDelayField = null
+                                             }
                                         }
                                         Text {
                                             text: "0 = immediately"
@@ -1017,6 +1296,7 @@ Panel {
                                     spacing: Style.spacing.controlGap
 
                                     TextField {
+                                        id: addCommandField
                                         // The running-programs button's width
                                         // and its gap come off only while it
                                         // is SHOWN: a Row lays out no
@@ -1029,7 +1309,7 @@ Panel {
                                         width: Math.max(Style.space(80),
                                                         autostartAdd.width
                                                         - autostartAddButton.implicitWidth
-                                                        - autostartPickButton.implicitWidth
+                                                        - applicationPicker.width
                                                         - (autostartWindowButton.visible
                                                            ? autostartWindowButton.implicitWidth
                                                              + parent.spacing : 0)
@@ -1039,23 +1319,51 @@ Panel {
                                         foreground: root.fg
                                         onTextEdited: root.autostartNewCommand = text
                                         onActiveFocusChanged: root.noteEditorFocus(activeFocus)
+                                        hasCursor: root.keyboardActive
+                                                   && root.keyboardSection === "add"
+                                                   && root.keyboardAction === 0
+                                                   && !activeFocus
+                                        onHasCursorChanged: {
+                                            if (hasCursor) Qt.callLater(function() {
+                                                root.ensureKeyboardCursorVisible(addCommandField)
+                                            })
+                                        }
+                                        Keys.onEscapePressed: function(event) {
+                                            keyCatcher.forceActiveFocus()
+                                            event.accepted = true
+                                        }
+                                        Component.onCompleted: root.addCommandField = addCommandField
+                                        Component.onDestruction: {
+                                            if (root.addCommandField === addCommandField)
+                                                root.addCommandField = null
+                                        }
                                     }
 
-                                    Button {
-                                        id: autostartPickButton
-                                        text: root.autostartAddOpen ? "Close list" : "Applications"
-                                        foreground: root.fg
-                                        fontFamily: root.fontFam
-                                        bordered: true
+                                    ApplicationPicker {
+                                        id: applicationPicker
+                                        width: Style.space(155)
+                                        applications: root.apps
+                                        pending: root.appsPending
+                                        hasCursor: root.keyboardActive
+                                                   && root.keyboardSection === "add"
+                                                   && root.keyboardAction === 1
+                                        onHasCursorChanged: {
+                                            if (hasCursor) Qt.callLater(function() {
+                                                root.ensureKeyboardCursorVisible(applicationPicker)
+                                            })
+                                        }
                                         anchors.verticalCenter: parent.verticalCenter
-                                        onClicked: {
-                                            root.autostartAddOpen = !root.autostartAddOpen
-                                            if (root.autostartAddOpen) {
-                                                // The two lists share the field and the
-                                                // application read; only one is open.
-                                                root.autostartFromWindowOpen = false
-                                                root.startAppsRead()
-                                            }
+                                        onOpening: {
+                                            root.autostartFromWindowOpen = false
+                                            root.startAppsRead()
+                                        }
+                                        onCommandPicked: function(command) {
+                                            root.autostartNewCommand = command
+                                        }
+                                        Component.onCompleted: root.applicationPicker = applicationPicker
+                                        Component.onDestruction: {
+                                            if (root.applicationPicker === applicationPicker)
+                                                root.applicationPicker = null
                                         }
                                     }
 
@@ -1078,6 +1386,14 @@ Panel {
                                         fontFamily: root.fontFam
                                         bordered: true
                                         enabled: !root.autostartBusy
+                                        hasCursor: root.keyboardActive
+                                                   && root.keyboardSection === "add"
+                                                   && root.keyboardAction === 2
+                                        onHasCursorChanged: {
+                                            if (hasCursor) Qt.callLater(function() {
+                                                root.ensureKeyboardCursorVisible(autostartAddButton)
+                                            })
+                                        }
                                         anchors.verticalCenter: parent.verticalCenter
                                         onClicked: root.autostartAdd()
                                     }
@@ -1093,13 +1409,33 @@ Panel {
                                         font.pixelSize: Style.font.body
                                         anchors.verticalCenter: parent.verticalCenter
                                     }
-                                    TextField {
-                                        width: Style.space(85)
+                                     TextField {
+                                         id: addDelayField
+                                         width: Style.space(85)
                                         text: root.autostartNewDelay
                                         foreground: root.fg
                                         validator: IntValidator { bottom: 0; top: Model.MAX_START_DELAY }
                                         onTextEdited: root.autostartNewDelay = text
-                                        onActiveFocusChanged: root.noteEditorFocus(activeFocus)
+                                         onActiveFocusChanged: root.noteEditorFocus(activeFocus)
+                                         hasCursor: root.keyboardActive
+                                                    && root.keyboardSection === "add"
+                                                    && root.keyboardAction === 3
+                                                    && !activeFocus
+                                         onHasCursorChanged: {
+                                             if (hasCursor) Qt.callLater(function() {
+                                                 root.ensureKeyboardCursorVisible(addDelayField)
+                                             })
+                                         }
+                                        Keys.onEscapePressed: function(event) {
+                                            keyCatcher.forceActiveFocus()
+                                             event.accepted = true
+                                         }
+                                         Component.onCompleted:
+                                             root.keyboardAddDelayField = addDelayField
+                                         Component.onDestruction: {
+                                             if (root.keyboardAddDelayField === addDelayField)
+                                                 root.keyboardAddDelayField = null
+                                         }
                                     }
                                     Text {
                                         text: "0 = immediately"
@@ -1107,77 +1443,6 @@ Panel {
                                         opacity: 0.65
                                         font.pixelSize: Style.font.caption
                                         anchors.verticalCenter: parent.verticalCenter
-                                    }
-                                }
-
-                                // The installed applications, the same list and the
-                                // same Process the old half's picker used. Picking one
-                                // FILLS THE FIELD rather than writing: the command it
-                                // derives from Exec= is a guess worth showing to the
-                                // user before it lands in a file that runs at login.
-                                Text {
-                                    textFormat: Text.PlainText
-                                    width: autostartAdd.width
-                                    visible: root.autostartAddOpen
-                                    text: root.appsPending
-                                          ? "Reading the installed applications..."
-                                          : "Pick one to fill the field, then press Add"
-                                    color: root.fg
-                                    opacity: 0.7
-                                    font.family: root.fontFam
-                                    font.pixelSize: Style.font.caption
-                                    wrapMode: Text.WordWrap
-                                }
-
-                                Text {
-                                    textFormat: Text.PlainText
-                                    width: autostartAdd.width
-                                    visible: root.autostartAddOpen && !root.appsPending
-                                             && root.apps.length === 0
-                                    text: "No installed applications were found."
-                                    color: root.fg
-                                    opacity: 0.7
-                                    font.family: root.fontFam
-                                    font.pixelSize: Style.font.caption
-                                    wrapMode: Text.WordWrap
-                                }
-
-                                Repeater {
-                                    model: root.autostartAddOpen ? root.apps : []
-
-                                    delegate: Row {
-                                        id: autostartAppEntry
-                                        required property var modelData
-                                        width: autostartAdd.width
-                                        spacing: Style.spacing.controlGap
-
-                                        Button {
-                                            text: String(autostartAppEntry.modelData.name
-                                                         || "(no name)")
-                                            foreground: root.fg
-                                            fontFamily: root.fontFam
-                                            leftAlign: true
-                                            width: Math.max(Style.space(80),
-                                                            autostartAdd.width - Style.space(180))
-                                            anchors.verticalCenter: parent.verticalCenter
-                                            onClicked: {
-                                                root.autostartNewCommand =
-                                                    Model.commandFromApp(autostartAppEntry.modelData)
-                                                root.autostartAddOpen = false
-                                            }
-                                        }
-
-                                        Text {
-                                            textFormat: Text.PlainText
-                                            text: Model.commandFromApp(autostartAppEntry.modelData)
-                                            color: root.fg
-                                            opacity: 0.6
-                                            font.family: root.fontFam
-                                            font.pixelSize: Style.font.caption
-                                            elide: Text.ElideRight
-                                            width: Style.space(170)
-                                            anchors.verticalCenter: parent.verticalCenter
-                                        }
                                     }
                                 }
 

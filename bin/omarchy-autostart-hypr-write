@@ -86,6 +86,7 @@ readonly MKTEMP=/usr/bin/mktemp
 readonly MV=/usr/bin/mv
 readonly RM=/usr/bin/rm
 readonly SED=/usr/bin/sed
+readonly SHA256SUM=/usr/bin/sha256sum
 readonly SLEEP=/usr/bin/sleep
 readonly SORT=/usr/bin/sort
 readonly STAT=/usr/bin/stat
@@ -514,6 +515,10 @@ publish_check_replaced() {
 # not be pruned is clutter, not damage. Refusing the write over it would be
 # the worse outcome.
 prune_our_backups() {
+    # A backup just taken may sort behind older names after a clock correction.
+    # The caller can protect it explicitly; it then occupies one of the five
+    # slots regardless of its timestamp.
+    local protected="${1:-}" keep="$MAX_BACKUPS"
     local f base names=() sorted=() i
     for f in "$HYPR_DIR/"$BACKUP_GLOB; do
         # An unmatched glob stays literal, so the existence test is what makes
@@ -521,13 +526,17 @@ prune_our_backups() {
         [[ -e "$f" ]] || continue
         base="${f##*/}"
         is_our_backup "$base" || continue
+        if [[ -n "$protected" && "$base" == "$protected" ]]; then
+            keep=$((MAX_BACKUPS - 1))
+            continue
+        fi
         names+=("$base")
     done
-    (( ${#names[@]} > MAX_BACKUPS )) || return 0
+    (( ${#names[@]} > keep )) || return 0
     # By NAME, newest first -- see the comment on BACKUP_AUTHOR for why not by
     # mtime.
     mapfile -t sorted < <(printf '%s\n' "${names[@]}" | "$SORT" -r)
-    for (( i = MAX_BACKUPS; i < ${#sorted[@]}; i++ )); do
+    for (( i = keep; i < ${#sorted[@]}; i++ )); do
         remove_our_backup "${sorted[$i]}" || true
     done
     return 0
@@ -599,7 +608,7 @@ read_bounded() {
 }
 
 cmd_write() {
-    local expect_mtime=""
+    local expect_mtime="" expect_sha256=""
     while (( $# )); do
         case "$1" in
             --expect-mtime)
@@ -611,16 +620,35 @@ cmd_write() {
                 expect_mtime="$2"
                 shift 2
                 ;;
+            --expect-sha256)
+                [[ $# -ge 2 ]] || { usage; exit 2; }
+                expect_sha256="$2"
+                shift 2
+                ;;
             *) usage; exit 2 ;;
         esac
     done
     [[ "$expect_mtime" =~ ^[0-9]+$ ]] || { usage; exit 2; }
+    # Older developer scripts called the writer with mtime alone. Keep that
+    # internal CLI compatible, while the panel always supplies the strong
+    # token produced by the reader. A supplied token is never optional in
+    # quality: malformed input is a usage error and a mismatch is stale.
+    [[ -z "$expect_sha256" || "$expect_sha256" =~ ^[0-9a-f]{64}$ ]] \
+        || { usage; exit 2; }
 
     local luac
     luac="$(resolve_luac)" \
         || err "no-lua-compiler" \
                "no working Lua compiler found (tried /usr/bin/luac5.1, /usr/bin/luac, /usr/bin/luac5.4); install lua51"
 
+    # Deliberate limitation: a symlink here makes every later pathname check
+    # answer about a directory reached through another name. Supporting that
+    # safely requires a held directory descriptor and openat-style operations,
+    # which bash cannot express. Reading remains supported; writing is refused
+    # with its own actionable reason rather than misreporting mode 777.
+    [[ ! -h "$HYPR_DIR" ]] \
+        || err "hypr-dir-symlink" \
+               "$HYPR_DIR is a symbolic link; this writer supports only a real Hyprland configuration directory -- edit autostart.lua by hand or replace the directory link with a real directory"
     check_permissions "$HYPR_DIR" "directory"
 
     # The file must ALREADY EXIST. This writer does line surgery against bytes
@@ -687,8 +715,9 @@ cmd_write() {
     validate_descriptor "$path_ident" "$TARGET_FD_PATH"
 
     # THE FRESHNESS CHECK. This is a file the user also maintains by hand: if
-    # its mtime is not the one the panel read, somebody has touched it since,
-    # and every line number the caller carries may now mean a different line.
+    # either its whole-second mtime or the SHA-256 of this opened descriptor is
+    # not what the panel's exact reader snapshot carried, somebody has changed
+    # it since, and every line number the caller carries may name another line.
     #
     # Through the descriptor, and the INODE is taken with it: the mtime alone
     # cannot tell "the same file, untouched" from "a different file with the
@@ -697,7 +726,8 @@ cmd_write() {
     # AND AT NANOSECOND PRECISION, WHICH IS A SEPARATE VALUE FOR A REASON.
     #
     # `%Y` is WHOLE SECONDS, and that is what the caller's --expect-mtime is
-    # in, so the freshness check against the panel has to stay in seconds.
+    # in, so the timestamp check against the panel has to stay in seconds. The
+    # fingerprint immediately below is what detects a same-second byte change.
     # But every comparison this script makes with ITSELF -- "is the file at
     # the name still the one I validated?" -- is too coarse in seconds, and
     # that is not theoretical: MEASURED on tmpfs, two writes to the same file
@@ -716,7 +746,7 @@ cmd_write() {
     # WHERE THE FILESYSTEM HAS NO SUB-SECOND TIMESTAMPS this is exactly as
     # strong as `%Y` was and no weaker. btrfs (the real target here) and tmpfs
     # (the sandbox) both store nanoseconds -- checked.
-    local current target_inode target_mtime_ns
+    local current current_sha256 target_inode target_mtime_ns
     current="$("$STAT" -L -c %Y "$TARGET_FD_PATH" 2>/dev/null)" \
         || err "not-a-file" "$TARGET disappeared before it could be checked"
     target_inode="$("$STAT" -L -c %i "$TARGET_FD_PATH" 2>/dev/null)" \
@@ -729,6 +759,14 @@ cmd_write() {
         || err "not-a-file" "implausible modification time for $TARGET"
     [[ "$current" == "$expect_mtime" ]] \
         || err "stale" "$TARGET changed on disk (mtime $current, caller expected $expect_mtime); reopen the panel so it reads the file again"
+    if [[ -n "$expect_sha256" ]]; then
+        current_sha256="$("$SHA256SUM" "$TARGET_FD_PATH" 2>/dev/null)"
+        current_sha256="${current_sha256%% *}"
+        [[ "$current_sha256" =~ ^[0-9a-f]{64}$ ]] \
+            || err "not-a-file" "$TARGET could not be fingerprinted after it was opened"
+        [[ "$current_sha256" == "$expect_sha256" ]] \
+            || err "stale" "$TARGET changed on disk since the panel read it (content fingerprint differs); reopen the panel so it reads the file again"
+    fi
 
     # Stage beside the destination so the publish is an atomic rename, and
     # give the staged file the ORIGINAL's mode before any content reaches it.
@@ -824,6 +862,10 @@ cmd_write() {
     # Named: the staged backup path no longer exists, so take it out of
     # cleanup's hands rather than have it remove the backup we just took.
     BACKUPTMP=""
+    # Bound the set immediately, not only after publish. Every refusal below
+    # intentionally keeps this validated state, so pruning only on success
+    # would let repeated exchange failures grow the directory without limit.
+    prune_our_backups "$backup_base"
 
     # THE RE-CHECK IMMEDIATELY BEFORE THE PUBLISH. It is the cheap half, and
     # what it is for is the COMMON case: anything slower than a rename that
@@ -958,10 +1000,9 @@ cmd_write() {
         || err "write-failed" "$TARGET vanished immediately after it was written"
     [[ "$mtime" =~ ^[0-9]+$ ]] || err "write-failed" "implausible modification time"
 
-    # AFTER the publish, never before: pruning is housekeeping over states that
-    # are already saved, and doing it first would remove a backup to make room
-    # for one that might then fail to be taken.
-    prune_our_backups
+    # Repeat after publish as a harmless belt. The first pass above is the one
+    # that also bounds backups retained by a later refusal.
+    prune_our_backups "$backup_base"
 
     # TWO FIELDS MORE THAN BEFORE, and both are answers to the second finding.
     # `publish` says which guarantee this write got -- "exchange" or the
@@ -974,7 +1015,7 @@ cmd_write() {
 }
 
 usage() {
-    echo "usage: ${0##*/} write --expect-mtime <int> < autostart.lua" >&2
+    echo "usage: ${0##*/} write --expect-mtime <int> [--expect-sha256 <hex>] < autostart.lua" >&2
 }
 
 case "${1:-}" in

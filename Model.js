@@ -100,7 +100,7 @@ var MAX_COMMAND    = 500;
 // second emitter and put them in front of the assertion.
 function envelopeCodes() {
     return ["does-not-compile", "foreign-owner", "insecure-permissions",
-            "internal", "is-a-symlink", "multiply-linked", "no-atomic-exchange",
+            "hypr-dir-symlink", "internal", "is-a-symlink", "multiply-linked", "no-atomic-exchange",
             "no-lua-compiler", "not-a-file", "stale", "substituted",
             "too-large", "unreadable", "write-failed"];
 }
@@ -138,6 +138,11 @@ function envelopeText(code, detail) {
         return "autostart.lua is a symlink, and this panel will not write through"
              + " one -- it would replace the link or the file at the other end of"
              + " it, and neither is what you asked for. Edit it by hand." + extra;
+    if (code === "hypr-dir-symlink")
+        return "Your Hyprland configuration directory is a symlink. This panel"
+             + " can read it, but deliberately does not write through a directory"
+             + " link. Edit autostart.lua by hand or use a real configuration"
+             + " directory." + extra;
     if (code === "does-not-compile")
         return "The changed file did not compile as Lua, so nothing was written."
              + " Your file is exactly as it was." + extra;
@@ -256,6 +261,32 @@ function stripFieldCodes(exec) {
 function commandFromApp(app) {
     var source = app || {};
     return stripFieldCodes(String(source.exec === undefined ? "" : source.exec));
+}
+
+// Shape consumed by qs.Ui.SearchableDropdown. Keeping it here makes command
+// cleanup and deterministic ordering testable without a live Quickshell.
+function applicationPickerOptions(apps) {
+    var out = [];
+    var list = apps || [];
+    for (var i = 0; i < list.length; i++) {
+        var app = list[i] || {};
+        var command = commandFromApp(app);
+        if (command === "") continue;
+        out.push({
+            value: command,
+            label: String(app.name || "(no name)"),
+            description: command
+        });
+    }
+    out.sort(function(a, b) {
+        var al = a.label.toLowerCase();
+        var bl = b.label.toLowerCase();
+        if (al < bl) return -1;
+        if (al > bl) return 1;
+        return a.description < b.description ? -1
+             : a.description > b.description ? 1 : 0;
+    });
+    return out;
 }
 
 // What to tell the user about an application list that did not arrive whole.
@@ -680,6 +711,10 @@ function parseHyprFiles(files) {
             present: present,
             truncated: f.truncated === true,
             mtime: Number(f.mtime || 0),
+            // Strong token for the exact bytes in `content`. The writer
+            // compares this with the descriptor it opens, closing the
+            // reader-to-writer gap that a whole-second mtime cannot detect.
+            sha256: present ? String(f.sha256 || "") : "",
             lineCount: present ? hyprLines(f.content).length : 0,
             // THE BYTES, carried through verbatim. autostartApply() needs the
             // text it is doing surgery on, and the only text it may use is the
@@ -729,6 +764,10 @@ function hyprSectionIsWritable(section) {
     if (String(s.name) !== "autostart.lua") return false;
     if (s.present !== true) return false;
     if (s.truncated === true) return false;
+    // The production write path must never silently fall back to the
+    // whole-second mtime check. Only a reader snapshot with its strong token
+    // is eligible to reach the writer.
+    if (!/^[0-9a-f]{64}$/.test(String(s.sha256 || ""))) return false;
     return true;
 }
 
@@ -1037,6 +1076,10 @@ function autostartWrittenText(rescuedPath) {
     return notice === "" ? base : base + " " + notice;
 }
 
+function autostartNoChangesText() {
+    return "No changes to save.";
+}
+
 // The content lines of a file. `hyprLines` splits on "\n", so a file that
 // ends with a newline -- as a hand-written Lua file does, and it is the
 // convention this writer keeps -- yields a trailing empty element that is
@@ -1077,7 +1120,8 @@ function autostartCommandRefusal(command) {
 //   { action: "change", line: <1-based>, command: "<command line>" }
 //   { action: "remove", line: <1-based> }
 //
-// Returns { ok: true, text: <new file text> } or { ok: false, error: <code> }.
+// Returns { ok: true, changed: <bool>, text: <new file text> } or
+// { ok: false, error: <code> }.
 //
 // Exactly one line changes. Add appends one as the LAST line -- no section
 // detection, nothing sorted into a "matching" comment block, because
@@ -1104,7 +1148,7 @@ function autostartApply(text, op) {
         if (startDelay(operation.delay) === null) return { ok: false, error: "invalid-delay" };
         var appended = lines.slice();
         appended.push(autostartLine(String(operation.command), operation.delay));
-        return { ok: true, text: autostartJoinLines(appended) };
+        return { ok: true, changed: true, text: autostartJoinLines(appended) };
     }
 
     if (action !== "change" && action !== "remove") {
@@ -1136,16 +1180,16 @@ function autostartApply(text, op) {
     var out = lines.slice();
     if (action === "remove") {
         out.splice(wanted - 1, 1);
-        return { ok: true, text: autostartJoinLines(out) };
+        return { ok: true, changed: true, text: autostartJoinLines(out) };
     }
     var changeRefusal = autostartCommandRefusal(operation.command);
     if (changeRefusal) return { ok: false, error: changeRefusal };
     var delay = operation.delay === undefined ? found.delay : operation.delay;
     if (startDelay(delay) === null) return { ok: false, error: "invalid-delay" };
     if (String(operation.command) === found.command && startDelay(delay) === found.delay)
-        return { ok: true, text: source };
+        return { ok: true, changed: false, text: source };
     out[wanted - 1] = autostartLine(String(operation.command), delay, found.launcher);
-    return { ok: true, text: autostartJoinLines(out) };
+    return { ok: true, changed: true, text: autostartJoinLines(out) };
 }
 
 // THE ONE-LINE ASSERTION, as a function rather than as a habit.

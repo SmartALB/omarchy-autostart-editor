@@ -1717,6 +1717,18 @@ else
     bad "autostart write: a refusal returns before the Process is armed" \
         "refusal at ${refusal_line:-none}, command assignment at ${assign_line:-none}"
   fi
+  no_op_line="$(grep -nE 'result\.changed[[:space:]]*===[[:space:]]*false' <<<"$write_body" \
+      | head -1 | cut -d: -f1)"
+  busy_line="$(grep -nE 'autostartBusy[[:space:]]*=[[:space:]]*true' <<<"$write_body" \
+      | head -1 | cut -d: -f1)"
+  if [[ -n "$no_op_line" && -n "$busy_line" && -n "$assign_line" ]] \
+      && (( no_op_line < busy_line && no_op_line < assign_line )) \
+      && grep -qE 'Model\.autostartNoChangesText\(' <<<"$write_body"; then
+    ok "autostart write: a no-op returns before the writer is armed"
+  else
+    bad "autostart write: a no-op returns before the writer is armed" \
+        "no-op at ${no_op_line:-none}, busy at ${busy_line:-none}, command at ${assign_line:-none}, or wording is inline"
+  fi
 fi
 
 # 35 -- the row controls are gated on the entry being editable AND on the
@@ -2001,6 +2013,66 @@ else
 fi
 [[ -z "$bare_index" ]] && ok "from window: and the unfold never compares against a bare index" \
                        || bad "from window: and the unfold never compares against a bare index" "$bare_index"
+
+# 45 -- keyboard requests consumed by PanelKeyCatcher must all reach real panel
+#       behaviour, and the application picker must use Omarchy's bounded,
+#       ListView-backed searchable control rather than constructing every app.
+for handler in onMoveRequested onActivateRequested onDeleteRequested onTextKey; do
+  if grep -qE "$handler[[:space:]]*:" <<<"$stripped_panel"; then
+    ok "keyboard: PanelKeyCatcher implements $handler"
+  else
+    bad "keyboard: PanelKeyCatcher implements $handler" \
+        "$handler is absent from the code of Panel.qml"
+  fi
+done
+if grep -qE 'applicationPicker\.popupOpen' <<<"$stripped_panel"; then
+  ok "keyboard: the panel catcher is blocked while application search owns keys"
+else
+  bad "keyboard: the panel catcher is blocked while application search owns keys" \
+      "Panel.qml never reads applicationPicker.popupOpen"
+fi
+stripped_picker="$(strip_comments ApplicationPicker.qml)"
+if grep -qE 'SearchableDropdown[[:space:]]*\{' <<<"$stripped_picker" \
+   && grep -qE 'Model\.applicationPickerOptions\(' <<<"$stripped_picker"; then
+  ok "application picker: searchable virtualized control uses Model options"
+else
+  bad "application picker: searchable virtualized control uses Model options" \
+      "ApplicationPicker.qml is not a SearchableDropdown using Model.applicationPickerOptions"
+fi
+if grep -qE 'model:.*root\.apps' <<<"$stripped_panel"; then
+  bad "application picker: the panel does not instantiate every installed application" \
+      "a Repeater over root.apps remains in Panel.qml"
+else
+  ok "application picker: the panel does not instantiate every installed application"
+fi
+
+# 46 -- failed process starts produce no collector answer. The reader must
+#       invalidate its old writable snapshot before starting, and the writer's
+#       onExited fallback must release both the busy gate and stdin hand-off.
+read_body="$(fn_body readHypr <<<"$stripped_panel")"
+clear_line="$(grep -nE 'root\.hyprSections[[:space:]]*=[[:space:]]*\[\]' <<<"$read_body" \
+    | head -1 | cut -d: -f1)"
+read_start_line="$(grep -nE 'hyprProc\.running[[:space:]]*=[[:space:]]*true' <<<"$read_body" \
+    | head -1 | cut -d: -f1)"
+if [[ -n "$clear_line" && -n "$read_start_line" ]] \
+   && (( clear_line < read_start_line )) \
+   && grep -qE 'root\.counted\(0\)' <<<"$read_body"; then
+  ok "failed start: a reader reload invalidates the old writable snapshot first"
+else
+  bad "failed start: a reader reload invalidates the old writable snapshot first" \
+      "snapshot clear at ${clear_line:-none}, process start at ${read_start_line:-none}, or counted(0) missing"
+fi
+writer_busy_clears="$(grep -cE 'root\.autostartBusy[[:space:]]*=[[:space:]]*false' \
+    <<<"$write_proc_block" || true)"
+writer_pending_clears="$(grep -cE 'autostartWriteProc\.pendingContent[[:space:]]*=[[:space:]]*""' \
+    <<<"$write_proc_block" || true)"
+if grep -qE 'onExited[[:space:]]*:' <<<"$write_proc_block" \
+   && (( writer_busy_clears >= 2 && writer_pending_clears >= 2 )); then
+  ok "failed start: the writer exit fallback releases busy state and pending content"
+else
+  bad "failed start: the writer exit fallback releases busy state and pending content" \
+      "onExited missing, busy clears=$writer_busy_clears, pending clears=$writer_pending_clears (both need normal and fallback paths)"
+fi
 
 printf '\nqml structure: total=%d failed=%d\n' "$run" "$failed"
 (( failed == 0 ))

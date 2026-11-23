@@ -64,10 +64,16 @@ fi
 
 cat <<NOTE
 
-Remove the widget from your bar in ~/.config/omarchy/shell.json, then run
-omarchy-restart-shell.
+If the widget was enabled, remove its bar entry with:
+
+  omarchy plugin disable smartalb.autostart
+
+Then reload the shell with:
+
+  omarchy restart shell
 
 Nothing else was touched. Your autostart entries are in your own
-~/.config/hypr/autostart.lua and keep working without this plugin; the last
-backup it took, if any, is beside it as autostart.lua.bak.
+~/.config/hypr/autostart.lua and keep working without this plugin; its newest
+five backups, if any, remain beside it as
+autostart.lua.smartalb-autostart.<timestamp>.bak.
 NOTE

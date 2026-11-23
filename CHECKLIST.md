@@ -91,12 +91,10 @@ plugin into a running session.
    ![The Autostart Editor panel](preview.png)
    ```
 
-   The README deliberately ships **without** that line, because a reference to
-   a file that does not exist renders as a broken image on the first page a
-   marketplace reviewer opens. The shell suite couples the two in both
-   directions: no file means no reference, and once the file exists the README
-   must show it. So step 5 is not optional -- omitting it turns the suite red,
-   which is the point.
+   This repository currently ships the preview and the README reference
+   together. The shell suite couples the two in both directions: no file means
+   no reference, and once the file exists the README must show it. Omitting one
+   side turns the suite red, which is the point.
 
 The shell suite has two assertions for this. The first holds in both states:
 it passes while `preview.png` is absent *and* named here as owed, and it passes
@@ -128,7 +126,7 @@ Two failure modes worth knowing rather than rediscovering, both measured:
   session.** Outside one they fail with `OMARCHY_PATH is not set`, so
   installing over SSH works but verifying it there does not.
 
-Verify, in a graphical session, after `omarchy-restart-shell`:
+Verify, in a graphical session, after `omarchy restart shell`:
 
 ```bash
 omarchy plugin list | grep smartalb.autostart
@@ -193,7 +191,9 @@ because a reviewer checked it:
 4. **No overwriting without consent.** The panel writes only when the user
    presses a control; it edits exactly one file; every write takes a dated
    backup first and is refused outright if the file changed on disk since the
-   panel read it. It touches no other configuration.
+   panel read it. The writer checks a SHA-256 fingerprint of the exact reader
+   snapshot as well as mtime, so same-second edits are stale too. It touches no
+   other configuration.
 5. **Listing, not a security review** -- which is precisely why the note below
    exists.
 
@@ -225,7 +225,7 @@ running compositor.
 
 ## Part B -- the walkthrough after an install
 
-Run `omarchy-restart-shell` first and wait about 8 seconds. The inotify watcher
+Run `omarchy restart shell` first and wait about 8 seconds. The inotify watcher
 reloads the shell after any change under the plugin directory and takes running
 `Process` objects with it; measuring before it has settled measures the reload.
 
@@ -240,8 +240,8 @@ five writes is five, and this list has more steps than that.
    at that point, not zero.
 2. A click opens the panel; a second click closes it. `Escape` closes it too.
    **And the build is in the bottom right of the panel**, quiet and
-   right-aligned, reading `v` and the version -- `v1.0.0` for this release.
-   Check it against the manifest on THAT machine:
+   right-aligned, reading `v` and the current version. Check it against the
+   manifest on THAT machine:
 
    ```bash
    jq -r .version ~/.config/omarchy/plugins/smartalb.autostart/manifest.json
@@ -305,8 +305,10 @@ five writes is five, and this list has more steps than that.
    grep -rl launch_on_start /proc/[0-9]*/cmdline 2>/dev/null
    ```
 7. **Add from your installed applications**: the picker lists real application
-   names, and choosing one **fills the field** with its command rather than
-   writing it. Nothing reaches the file until you press the add control.
+   names, filters by application name or command while you type, and choosing
+   one **fills the field** with its command rather than writing it. Nothing
+   reaches the file until you press the add control. With a large list, confirm
+   the bounded popup scrolls independently and remains responsive.
 8. **There must be no "Running programs" button.** The feature is hidden by
    request -- "das ist noch nicht so weit" -- behind
    `Model.RUNNING_PROGRAMS_ENABLED`, which is `false`. Two things to check,
@@ -335,8 +337,15 @@ five writes is five, and this list has more steps than that.
     closing it and confirm the panel still closes. (A hidden field that keeps
     focus swallows `Escape` for the rest of the session; that defect has been
     measured in this project before.)
+   Save again without changing command or delay: the panel must say there is
+   nothing to save, and neither the file mtime nor the backup count may change.
 10. **Remove** one entry: exactly that line is gone, and the comment above it
-    is still there.
+     is still there.
+    Test the keyboard path too: `j`/`k` changes rows, `h`/`l` changes actions,
+    Enter opens and saves the editor, `/` opens application search, and the
+    highlighted item remains visible while the panel scrolls. `x`/Delete must
+    only move the highlight to **Remove**; Enter is the separate destructive
+    confirmation.
 11. Nothing was started and nothing was reloaded. The message after a write
     says so; confirm no new window appeared and that your session is
     unchanged.
@@ -363,9 +372,10 @@ five writes is five, and this list has more steps than that.
             <(ls -1 ~/.config/omarchy/plugins/smartalb.autostart)
     ```
 
-    The plugin directory must hold twelve entries and nothing else: the four
-    documents, the four QML/JS files, and `bin/` with its four scripts. A
-    `Service.qml` there is the defect back.
+    The installed directory must match the source list in `install` exactly.
+    In particular, `ApplicationPicker.qml` and the neutral `screenshots/`
+    directory must be present, while `test/`, `Service.qml` and retired helper
+    scripts must not be present.
 17. `./uninstall`, then check: the plugin directory is gone and
     `~/.config/hypr/autostart.lua` is byte for byte what it was.
 
@@ -391,9 +401,9 @@ panel says so instead of showing an empty file.
 `run.tool("omarchy-autostart-apps")` is read through a `StdioCollector`, and
 nothing here can execute a file that imports `Quickshell.Io`.
 
-*If it stays on "Reading the installed applications...":* neither
-`onStreamFinished` nor `onExited` arrived. *If it says "No installed
-applications were found":* the script answered nothing -- run
+*If it stays on "Reading applications...":* neither `onStreamFinished` nor
+`onExited` arrived. *If it says "No matching applications" before a search
+term is entered:* the script answered nothing -- run
 `bin/omarchy-autostart-apps` by hand and compare. *If it says "Could not read
 the list of installed applications":* either the script failed or its JSON was
 cut off by `runnerOut`'s 256 KiB cap.
