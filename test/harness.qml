@@ -134,7 +134,11 @@ QtObject {
                   'o.exec_on_start("gtk-launch other")\n');
             var unchangedIndented = '  o.exec_on_start(o.launch("notes"));\n';
             check("delay: no-op preserves original formatting", Model.autostartApply(unchangedIndented,
-                  {action: "change", line: 1, command: "notes", delay: 0}).text, unchangedIndented);
+                   {action: "change", line: 1, command: "notes", delay: 0}).text, unchangedIndented);
+            check("delay: no-op is marked unchanged", Model.autostartApply(unchangedIndented,
+                  {action: "change", line: 1, command: "notes", delay: 0}).changed, false);
+            check("delay: no-op wording says no save is needed",
+                  Model.autostartNoChangesText(), "No changes to save.");
 
             // --- appsProblem ---------------------------------------------------
             // Two facts, three outcomes. The point of the pair is that "too
@@ -193,15 +197,16 @@ QtObject {
             check("envelopeText: every code the bin/ helpers can emit has plain wording",
                   unwordedAmong(Model.envelopeCodes(),
                                 function(c) { return Model.envelopeText(c, ""); }), "");
-            // Fourteen, up from ten. The writer's open stopped trusting the
+            // Fifteen, up from ten. The writer's open stopped trusting the
             // pathname and gained three refusals of its own -- substituted,
             // foreign-owner and multiply-linked -- and its publish gained a
             // fourth, no-atomic-exchange, for the system that cannot replace
-            // the file in one step. The number is spelled out rather than
+            // the file in one step; hypr-dir-symlink names the deliberate
+            // directory-link limitation. The number is spelled out rather than
             // derived so that a list which quietly EMPTIES fails here;
             // test/run-tests.sh is what proves the list is the scripts'.
             check("envelopeText: the list it checks is not empty",
-                  Model.envelopeCodes().length, 14);
+                  Model.envelopeCodes().length, 15);
 
             // THE EMPTY ENVELOPE. Empty stdout is what a missing script, a
             // timeout kill and a non-zero exit outside the script's own two
@@ -486,15 +491,20 @@ QtObject {
             // the reader did not find is a section that SAYS so rather than a
             // section that vanished, and a name the envelope carries that this
             // plugin does not read is ignored rather than shown.
+            var snapshotHash =
+                "0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef";
             var envelope = [
                 { name: "autostart.lua", path: "/h/autostart.lua", present: true,
-                  mtime: 11, truncated: false, content: AUTOSTART_TEXT }
+                  mtime: 11, sha256: snapshotHash,
+                  truncated: false, content: AUTOSTART_TEXT }
             ];
             var sections = Model.parseHyprFiles(envelope);
             check("hypr sections: exactly one", sections.length, 1);
             check("hypr sections: and it is autostart.lua", sections[0].name, "autostart.lua");
             check("hypr sections: the mtime is carried through",
                   sections[0].mtime, 11);
+            check("hypr sections: the snapshot fingerprint is carried through",
+                  sections[0].sha256, snapshotHash);
             // The absent and truncated envelopes, each in full, because both
             // are what hyprSectionIsWritable and hyprSectionNoteText below are
             // judged against and neither can be read off `sections`.
@@ -625,6 +635,24 @@ QtObject {
             check("commandFromApp: and what it gives round-trips into a line",
                   roundTrip(Model.commandFromApp(
                       { exec: "nimbus --app=https://x/ %U" })), "");
+            var pickerInput = [
+                { name: "Zulu", exec: "zulu %U" },
+                { name: "Alpha", exec: "alpha --flag %f" },
+                { name: "Broken" }
+            ];
+            var pickerOptions = Model.applicationPickerOptions(pickerInput);
+            check("application picker: unusable entries are dropped",
+                  pickerOptions.length, 2);
+            check("application picker: options are sorted by label",
+                  pickerOptions[0].label, "Alpha");
+            check("application picker: cleaned command is the value",
+                  pickerOptions[0].value, "alpha --flag");
+            check("application picker: command is searchable as description",
+                  pickerOptions[0].description, "alpha --flag");
+            check("application picker: input is not mutated",
+                  pickerInput[1].exec, "alpha --flag %f");
+            check("application picker: absent input is safe",
+                  Model.applicationPickerOptions(undefined).length, 0);
 
             // --- the bytes the surgery works on --------------------------------
             //
@@ -651,20 +679,33 @@ QtObject {
             check("hypr writable: autostart.lua is the one",
                   Model.hyprSectionIsWritable(sections[0]), true);
             check("hypr writable: a section identical but for its name is refused",
-                  Model.hyprSectionIsWritable({ name: "windowrules.lua", present: true,
-                                                truncated: false,
-                                                entries: sections[0].entries,
+                   Model.hyprSectionIsWritable({ name: "windowrules.lua", present: true,
+                                                 truncated: false,
+                                                 sha256: snapshotHash,
+                                                 entries: sections[0].entries,
                                                 content: sections[0].content }), false);
             check("hypr writable: and so is a second one, so it is not one special case",
-                  Model.hyprSectionIsWritable({ name: "workspaces.lua", present: true,
-                                                truncated: false,
-                                                entries: sections[0].entries,
+                   Model.hyprSectionIsWritable({ name: "workspaces.lua", present: true,
+                                                 truncated: false,
+                                                 sha256: snapshotHash,
+                                                 entries: sections[0].entries,
                                                 content: sections[0].content }), false);
             check("hypr writable: while the same section under the right name is writable",
+                   Model.hyprSectionIsWritable({ name: "autostart.lua", present: true,
+                                                 truncated: false,
+                                                 sha256: snapshotHash,
+                                                 entries: sections[0].entries,
+                                                 content: sections[0].content }), true);
+            check("hypr writable: a missing snapshot fingerprint is refused",
                   Model.hyprSectionIsWritable({ name: "autostart.lua", present: true,
-                                                truncated: false,
+                                                truncated: false, sha256: "",
                                                 entries: sections[0].entries,
-                                                content: sections[0].content }), true);
+                                                content: sections[0].content }), false);
+            check("hypr writable: a malformed snapshot fingerprint is refused",
+                  Model.hyprSectionIsWritable({ name: "autostart.lua", present: true,
+                                                truncated: false, sha256: "abc123",
+                                                entries: sections[0].entries,
+                                                content: sections[0].content }), false);
             check("hypr writable: an absent autostart.lua is not",
                   Model.hyprSectionIsWritable(absentSections[0]), false);
             check("hypr writable: a truncated autostart.lua is not",

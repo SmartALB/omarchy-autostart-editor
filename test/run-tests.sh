@@ -611,6 +611,8 @@ test_hypr_read_answers_even_when_the_file_does_not_exist() {
               "$(jq -r '.files[0].present' <<<"$out")" "false"
     assert_eq "hypr: an absent file has mtime 0" \
               "$(jq -r '.files[0].mtime' <<<"$out")" "0"
+    assert_eq "hypr: an absent file has no snapshot fingerprint" \
+              "$(jq -r '.files[0].sha256' <<<"$out")" ""
     assert_eq "hypr: an absent file has empty content" \
               "$(jq -r '.files[0].content' <<<"$out")" ""
     assert_eq "hypr: the directory it looked in is named" \
@@ -643,6 +645,9 @@ test_hypr_read_delivers_the_bytes_unchanged() {
               "$(jq -r '.files[0].content' <<<"$out" | grep -c 'chat\\\\\.example')" "1"
     assert_eq "hypr: the present file reports a real mtime" \
               "$(jq -r '[.files[] | select(.mtime > 0)] | length' <<<"$out")" "1"
+    assert_eq "hypr: the snapshot fingerprint describes the exact delivered bytes" \
+              "$(jq -r '.files[0].sha256' <<<"$out")" \
+              "$(sha256sum "$SANDBOX/autostart.lua.delivered" | awk '{print $1}')"
     teardown_sandbox
 }
 
@@ -716,6 +721,10 @@ test_hypr_read_caps_and_flags_an_oversized_file() {
               "$(jq -r '.files[0].truncated' <<<"$out")" "true"
     assert_eq "hypr: an oversized file is cut to exactly the cap" \
               "$(jq -r '.files[0].content' <<<"$out" | wc -c)" "65537"
+    jq -j '.files[0].content' <<<"$out" > "$SANDBOX/autostart.lua.delivered"
+    assert_eq "hypr: an oversized fingerprint covers only the delivered prefix" \
+              "$(jq -r '.files[0].sha256' <<<"$out")" \
+              "$(sha256sum "$SANDBOX/autostart.lua.delivered" | awk '{print $1}')"
     assert_eq "hypr: a file at the cap is NOT flagged" \
               "$(head -c 65536 /dev/zero | tr '\0' 'y' > "$(hypr_dir)/autostart.lua"; \
                  "$HYPR_BIN" read | jq -r '.files[0].truncated')" "false"
@@ -1254,6 +1263,50 @@ test_write_refuses_a_stale_expectation() {
     teardown_sandbox
 }
 
+test_write_refuses_same_second_content_change() {
+    setup_sandbox
+    write_autostart_fixture
+    local mtime old_sha out
+    mtime="$(autostart_mtime)"
+    old_sha="$(sha256sum "$(autostart_path)" | awk '{print $1}')"
+
+    # A hand edit with the same whole-second mtime is invisible to the legacy
+    # freshness token. The fingerprint must still distinguish the snapshot the
+    # panel parsed from the bytes now at the path.
+    printf '%s\n' 'o.launch_on_start("hand-edit")' > "$(autostart_path)"
+    touch -d "@$mtime" "$(autostart_path)"
+    cp -p "$(autostart_path)" "$SANDBOX/hand-edit.lua"
+
+    out="$(write_good_candidate | "$WRITE_BIN" write \
+        --expect-mtime "$mtime" --expect-sha256 "$old_sha")"
+    assert_eq "write: a same-second content change is stale" \
+              "$(jq -r .error <<<"$out")" "stale"
+    assert_eq "write: the same-second hand edit remains byte-identical" \
+              "$(cmp -s "$SANDBOX/hand-edit.lua" "$(autostart_path)" \
+                 && echo identical || echo CHANGED)" "identical"
+    assert_nothing_staged "write: no stage survives a fingerprint refusal"
+    teardown_sandbox
+}
+
+test_write_names_a_symlinked_hypr_directory() {
+    setup_sandbox
+    write_autostart_fixture
+    local real="$XDG_CONFIG_HOME/hypr-real"
+    mv "$(hypr_dir)" "$real"
+    ln -s "$real" "$(hypr_dir)"
+    local out
+    out="$(write_good_candidate | "$WRITE_BIN" write \
+        --expect-mtime "$(stat -c %Y "$real/autostart.lua")")"
+    assert_eq "write: a symlinked Hyprland directory is refused by name" \
+              "$(jq -r .error <<<"$out")" "hypr-dir-symlink"
+    assert_eq "write: the linked autostart file is untouched" \
+              "$(cmp -s "$SANDBOX/before.lua" "$real/autostart.lua" \
+                 && echo identical || echo CHANGED)" "identical"
+    rm "$(hypr_dir)"
+    mv "$real" "$(hypr_dir)"
+    teardown_sandbox
+}
+
 test_write_refuses_what_it_must_not_write_through() {
     setup_sandbox
     write_autostart_fixture
@@ -1361,6 +1414,12 @@ test_write_has_one_envelope_and_one_usage() {
     # instead of hanging the suite.
     assert_eq "write: a bare trailing --expect-mtime terminates rather than spinning" \
               "$(printf 'x' | timeout 10 "$WRITE_BIN" write --expect-mtime >/dev/null 2>&1; echo $?)" "2"
+    assert_eq "write: a malformed snapshot fingerprint is a usage error" \
+              "$(printf 'x' | "$WRITE_BIN" write --expect-mtime 1 \
+                    --expect-sha256 abc123 >/dev/null 2>&1; echo $?)" "2"
+    assert_eq "write: a bare trailing --expect-sha256 terminates rather than spinning" \
+              "$(printf 'x' | timeout 10 "$WRITE_BIN" write --expect-mtime 1 \
+                    --expect-sha256 >/dev/null 2>&1; echo $?)" "2"
     assert_original_untouched "write: no usage error touched the file"
     teardown_sandbox
 }
@@ -1853,6 +1912,8 @@ test_writing_never_touches_a_backup_that_is_not_ours
 test_write_refuses_a_candidate_that_does_not_compile
 test_write_never_executes_the_candidate
 test_write_refuses_a_stale_expectation
+test_write_refuses_same_second_content_change
+test_write_names_a_symlinked_hypr_directory
 test_write_refuses_what_it_must_not_write_through
 test_write_refuses_an_oversized_candidate
 test_write_has_one_envelope_and_one_usage
@@ -2133,7 +2194,9 @@ test_install_copies_the_plugin_into_the_sandbox() {
     local out; out="$("$root/install" 2>&1)"
     assert_eq "install: the target directory was created" \
               "$([[ -d "$target" ]] && echo yes || echo no)" "yes"
-    for f in manifest.json README.md LICENSE BarWidget.qml Panel.qml \
+    for f in manifest.json README.md LICENSE preview.png \
+             screenshots/overview.png screenshots/application-search.png \
+             screenshots/edit-entry.png BarWidget.qml Panel.qml ApplicationPicker.qml \
              Runners.qml Model.js bin/omarchy-autostart-apps \
              bin/omarchy-autostart-windows \
              bin/omarchy-autostart-hypr bin/omarchy-autostart-hypr-write; do
@@ -2158,7 +2221,56 @@ test_install_copies_the_plugin_into_the_sandbox() {
     assert_eq "install: the test directory is NOT copied into the plugin" \
               "$([[ -e "$target/test" ]] && echo copied || echo left-behind)" "left-behind"
     assert_contains "install: it says where it put things" "$out" "$target"
-    assert_contains "install: it names the restart the widget needs" "$out" "omarchy-restart-shell"
+    assert_contains "install: it names the restart the widget needs" "$out" "omarchy restart shell"
+    teardown_sandbox
+}
+
+test_install_refuses_an_incomplete_source_without_replacing_the_target() {
+    setup_sandbox
+    local root; root="$(cd "$PWD/.." && pwd)"
+    local target="$XDG_CONFIG_HOME/omarchy/plugins/smartalb.autostart"
+    "$root/install" >/dev/null 2>&1
+    printf '%s\n' 'known-good-install' > "$target/keep-marker"
+
+    local broken="$SANDBOX/incomplete-source"
+    mkdir -p "$broken"
+    local item
+    for item in install manifest.json README.md LICENSE CHECKLIST.md preview.png \
+                BarWidget.qml Panel.qml ApplicationPicker.qml Runners.qml Model.js bin; do
+        cp -r "$root/$item" "$broken/"
+    done
+    rm "$broken/ApplicationPicker.qml"
+
+    local status=0
+    "$broken/install" >/dev/null 2>&1 || status=$?
+    assert_eq "install: an incomplete source is refused" \
+              "$([[ $status -ne 0 ]] && echo refused || echo ACCEPTED)" "refused"
+    assert_eq "install: the previous target survives that refusal" \
+              "$(cat "$target/keep-marker" 2>/dev/null || echo MISSING)" \
+              "known-good-install"
+    assert_eq "install: no incomplete replacement reached the target" \
+              "$([[ -f "$target/ApplicationPicker.qml" ]] && echo complete || echo BROKEN)" \
+              "complete"
+
+    cp "$root/ApplicationPicker.qml" "$broken/ApplicationPicker.qml"
+    rm "$broken/bin/omarchy-autostart-hypr-write"
+    status=0
+    "$broken/install" >/dev/null 2>&1 || status=$?
+    assert_eq "install: a missing required helper is refused" \
+              "$([[ $status -ne 0 ]] && echo refused || echo ACCEPTED)" "refused"
+    assert_eq "install: the target survives a missing-helper refusal" \
+              "$(cat "$target/keep-marker" 2>/dev/null || echo MISSING)" \
+              "known-good-install"
+
+    rm -rf "$broken/bin"
+    printf '%s\n' 'not a directory' > "$broken/bin"
+    status=0
+    "$broken/install" >/dev/null 2>&1 || status=$?
+    assert_eq "install: a file in place of bin is refused" \
+              "$([[ $status -ne 0 ]] && echo refused || echo ACCEPTED)" "refused"
+    assert_eq "install: the target survives a wrong-type refusal" \
+              "$(cat "$target/keep-marker" 2>/dev/null || echo MISSING)" \
+              "known-good-install"
     teardown_sandbox
 }
 
@@ -2235,8 +2347,8 @@ test_install_removes_what_the_plugin_no_longer_ships() {
     local ref="$SANDBOX/reference"
     mkdir -p "$ref"
     local item
-    for item in manifest.json README.md LICENSE CHECKLIST.md preview.png \
-                BarWidget.qml Panel.qml Runners.qml Model.js bin; do
+    for item in manifest.json README.md LICENSE CHECKLIST.md preview.png screenshots \
+                BarWidget.qml Panel.qml ApplicationPicker.qml Runners.qml Model.js bin; do
         [[ -e "$root/$item" ]] || continue
         cp -r "$root/$item" "$ref/"
     done
@@ -2399,6 +2511,7 @@ test_the_preview_is_either_taken_or_still_owed
 test_nothing_privileged_anywhere
 test_install_is_executable_and_unprivileged
 test_install_copies_the_plugin_into_the_sandbox
+test_install_refuses_an_incomplete_source_without_replacing_the_target
 test_install_removes_what_the_plugin_no_longer_ships
 test_neither_script_deletes_a_path_it_has_not_placed
 test_uninstall_removes_the_plugin_and_touches_nothing_else
@@ -2875,6 +2988,56 @@ test_the_no_exchange_seam_can_only_push_towards_refusing() {
     teardown_sandbox
 }
 
+test_failed_publishes_keep_the_backup_set_bounded() {
+    setup_sandbox
+    write_autostart_fixture
+    local i stamp errors=""
+    for i in 1 2 3 4 5 6 7 8; do
+        stamp="$(printf '20260904-20%04d' "$i")"
+        local code
+        code="$(write_good_candidate \
+                | OMARCHY_AUTOSTART_STAMP="$stamp" \
+                  OMARCHY_AUTOSTART_NO_EXCHANGE=1 \
+                  "$WRITE_BIN" write --expect-mtime "$(autostart_mtime)" \
+                | jq -r .error)"
+        [[ "$code" == "no-atomic-exchange" ]] || errors="$errors $i:$code"
+    done
+    assert_eq "failed publish backups: every attempt reached the exchange refusal" \
+              "${errors:- none}" " none"
+    assert_eq "failed publish backups: repeated refusals still retain only five" \
+              "$(find "$(hypr_dir)" -maxdepth 1 -type f \
+                    -name 'autostart.lua.smartalb-autostart.*.bak' | wc -l)" "5"
+    assert_original_untouched "failed publish backups: the user file remains untouched"
+    teardown_sandbox
+}
+
+test_pruning_protects_the_backup_just_taken_after_a_clock_correction() {
+    setup_sandbox
+    write_autostart_fixture
+    local d; d="$(hypr_dir)"
+    local stamp
+    for stamp in 20300101-000001 20300101-000002 20300101-000003 \
+                 20300101-000004 20300101-000005; do
+        cp "$(autostart_path)" \
+           "$d/autostart.lua.smartalb-autostart.$stamp.bak"
+    done
+
+    local out
+    out="$(write_good_candidate \
+           | OMARCHY_AUTOSTART_STAMP=20200101-000001 \
+             OMARCHY_AUTOSTART_NO_EXCHANGE=1 \
+             "$WRITE_BIN" write --expect-mtime "$(autostart_mtime)")"
+    assert_eq "backup clock correction: the publish is refused at exchange" \
+              "$(jq -r .error <<<"$out")" "no-atomic-exchange"
+    assert_eq "backup clock correction: the newly taken older-named backup survives" \
+              "$([[ -f "$d/autostart.lua.smartalb-autostart.20200101-000001.bak" ]] \
+                 && echo protected || echo DELETED)" "protected"
+    assert_eq "backup clock correction: the protected set is still bounded" \
+              "$(find "$d" -maxdepth 1 -type f \
+                    -name 'autostart.lua.smartalb-autostart.*.bak' | wc -l)" "5"
+    teardown_sandbox
+}
+
 # AND THE SEAM IS REACHABLE FROM EXACTLY ONE PLACE IN THE SOURCE, which is
 # what makes the directional claim above checkable at all: a second reference
 # somewhere else could reach a different decision, and nothing in the
@@ -3117,6 +3280,8 @@ test_the_publish_delay_seam_ignores_a_value_it_cannot_trust
 test_a_system_that_cannot_exchange_is_refused
 test_the_no_exchange_seam_takes_only_the_one_value
 test_the_no_exchange_seam_can_only_push_towards_refusing
+test_failed_publishes_keep_the_backup_set_bounded
+test_pruning_protects_the_backup_just_taken_after_a_clock_correction
 test_the_no_exchange_seam_is_consulted_in_one_place_only
 test_an_ordinary_write_rescues_nothing
 test_a_rescued_file_can_never_be_pruned

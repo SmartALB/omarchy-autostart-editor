@@ -1062,6 +1062,41 @@ probe "boundary: an inherited PATH instead of a fixed one" "$STRUCT_SUITE" Runne
 probe "boundary: the producer limit's own tool resolved by name" "$STRUCT_SUITE" Runners.qml \
   's|readonly property string binHead: "/usr/bin/head"|readonly property string binHead: "head"|'
 
+# --- SNAPSHOT, NO-OP, PICKER AND INSTALLER IMPROVEMENTS --------------------
+
+probe "snapshot: the reader hashes the delivered copy, not the live path" "$SHELL_SUITE" bin/omarchy-autostart-hypr \
+  '/sha256=.*SHA256SUM/s/"\$TMPFILE"/"\$path"/'
+
+probe "snapshot: the model carries the reader fingerprint" "$QML_SUITE" Model.js \
+  's@sha256: present ? String(f.sha256 || "") : "",@sha256: "",@'
+
+probe "snapshot: the panel passes the fingerprint to the writer" "$ARGV_SUITE" Panel.qml \
+  's|"--expect-sha256", String(section.sha256)|String(section.sha256)|'
+
+probe "snapshot: the writer rejects a fingerprint mismatch" "$SHELL_SUITE" bin/omarchy-autostart-hypr-write \
+  's|\[\[ "$current_sha256" == "$expect_sha256" \]\]|[[ "$current_sha256" == "$current_sha256" ]]|'
+
+probe "no-op: unchanged edits are marked unchanged" "$QML_SUITE" Model.js \
+  's|return { ok: true, changed: false, text: source };|return { ok: true, changed: true, text: source };|'
+
+probe "picker: the application list stays searchable and virtualized" "$STRUCT_SUITE" ApplicationPicker.qml \
+  's|^SearchableDropdown {$|Item {|'
+
+probe "keyboard: movement requests stay connected" "$STRUCT_SUITE" Panel.qml \
+  's|onMoveRequested: function(dx, dy)|onMovementRequestRemoved: function(dx, dy)|'
+
+probe "backup bound: refusals cannot bypass pruning" "$SHELL_SUITE" bin/omarchy-autostart-hypr-write \
+  's|^    prune_our_backups.*$|    : # mutated prune|'
+
+probe "installer: required plugin files cannot be skipped" "$SHELL_SUITE" install \
+  's|if \[\[ ! -f "$SOURCE/$item" \]\]; then|if [[ -f "$SOURCE/$item" ]]; then|'
+
+probe "failed start: the reader invalidates its old snapshot" "$STRUCT_SUITE" Panel.qml \
+  's|^        root\.hyprSections = \[\]$|        root.hyprSections = root.hyprSections|'
+
+probe "failed start: the writer releases pending content" "$STRUCT_SUITE" Panel.qml \
+  's|^                autostartWriteProc\.pendingContent = ""$|                : // pending content left behind|'
+
 # --- THE SENTENCE THAT TELLS THE USER ---------------------------------------
 #
 # A preserved file nobody is told about is a file nobody looks at, so the

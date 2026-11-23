@@ -19,7 +19,7 @@
 # and let the real Qt6 engine evaluate them. A mutation at either place
 # changes what this probe executes.
 #
-# Usage: extract-write-argv.py <sentinel-content> <mtime> <bin-dir> <out.qml>
+# Usage: extract-write-argv.py <sentinel-content> <mtime> <sha256> <bin-dir> <out.qml>
 # The generated file prints one line, "ARGV_JSON:[...]", and exits.
 # On stderr with a non-zero exit: EXTRACT_FAILED, when the source no longer
 # has the shape this can read -- never a silent partial success.
@@ -54,11 +54,11 @@ def brace_block(src, start_index, opener="{", closer="}"):
 
 
 def main():
-    if len(sys.argv) != 5:
-        print("usage: extract-write-argv.py <sentinel> <mtime> <bin-dir> <out.qml>",
+    if len(sys.argv) != 6:
+        print("usage: extract-write-argv.py <sentinel> <mtime> <sha256> <bin-dir> <out.qml>",
               file=sys.stderr)
         return 2
-    sentinel, mtime, bin_dir, out_path = sys.argv[1:5]
+    sentinel, mtime, sha256, bin_dir, out_path = sys.argv[1:6]
 
     runners = read("Runners.qml")
     panel = read("Panel.qml")
@@ -127,7 +127,8 @@ QtObject {
         }
         var root = run
 %(funcs)s        var result = { ok: true, text: %(sentinel)s }
-        var section = { mtime: %(mtime)s, content: "", file: "autostart.lua" }
+        var section = { mtime: %(mtime)s, sha256: %(sha256)s,
+                        content: "", file: "autostart.lua" }
         var argv = %(expr)s
         console.log("ARGV_JSON:" + JSON.stringify(argv))
         Qt.exit(0)
@@ -139,6 +140,7 @@ QtObject {
         "funcs": funcs,
         "sentinel": json.dumps(sentinel),
         "mtime": json.dumps(mtime),
+        "sha256": json.dumps(sha256),
         "expr": expr,
     }
     with open(out_path, "w", encoding="utf-8") as f:

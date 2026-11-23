@@ -69,6 +69,7 @@ TOKEN="argv-sentinel-$$-${RANDOM}-do-not-leak"
 } > "$HYPR_DIR/autostart.lua"
 chmod 644 "$HYPR_DIR/autostart.lua"
 MTIME="$(stat -c %Y "$HYPR_DIR/autostart.lua")"
+SHA256="$(sha256sum "$HYPR_DIR/autostart.lua" | awk '{print $1}')"
 CONTENT="$(cat "$HYPR_DIR/autostart.lua"; printf '%s\n' "o.launch_on_start(\"$TOKEN\")")"
 
 # --- 1: the argv the panel's own source builds ------------------------------
@@ -77,7 +78,7 @@ CONTENT="$(cat "$HYPR_DIR/autostart.lua"; printf '%s\n' "o.launch_on_start(\"$TO
 # REAL one: a quoting call spliced into the command expression must resolve to
 # the function it names, not to a stub.
 cp -- Model.js "$WORK/Model.js"
-if ! python3 test/extract-write-argv.py "$CONTENT" "$MTIME" "$PWD/bin/" "$WORK/probe.qml"; then
+if ! python3 test/extract-write-argv.py "$CONTENT" "$MTIME" "$SHA256" "$PWD/bin/" "$WORK/probe.qml"; then
     bad "write argv: the command expression could be extracted from the source" \
         "extraction failed (see stderr above) -- Panel.qml or Runners.qml no longer has a shape this can read"
     finish; exit $?
@@ -102,9 +103,11 @@ mapfile -t ARGV < <(jq -r '.[]' <<<"$argv_json")
 # assertion below by being empty of everything.
 names_writer="no"
 carries_mtime="no"
+carries_sha256="no"
 for element in "${ARGV[@]}"; do
     [[ "$element" == *omarchy-autostart-hypr-write ]] && names_writer="yes"
     [[ "$element" == "--expect-mtime" ]] && carries_mtime="yes"
+    [[ "$element" == "--expect-sha256" ]] && carries_sha256="yes"
 done
 [[ "$names_writer" == "yes" ]] \
     && ok "write argv: it names the writer script" \
@@ -112,6 +115,17 @@ done
 [[ "$carries_mtime" == "yes" ]] \
     && ok "write argv: it carries the freshness expectation" \
     || bad "write argv: it carries the freshness expectation" "argv: $argv_json"
+[[ "$carries_sha256" == "yes" ]] \
+    && ok "write argv: it carries the snapshot fingerprint" \
+    || bad "write argv: it carries the snapshot fingerprint" "argv: $argv_json"
+sha_value=""
+for ((i = 0; i + 1 < ${#ARGV[@]}; i++)); do
+    [[ "${ARGV[i]}" == "--expect-sha256" ]] && sha_value="${ARGV[i + 1]}"
+done
+[[ "$sha_value" == "$SHA256" ]] \
+    && ok "write argv: the fingerprint value is the reader snapshot's value" \
+    || bad "write argv: the fingerprint value is the reader snapshot's value" \
+           "expected $SHA256, got ${sha_value:-<nothing>}"
 
 # THE ASSERTION. Every element, not the joined string: a content spliced in as
 # its own argument is the shape a well-meaning refactor would produce.

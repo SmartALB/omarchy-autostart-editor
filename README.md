@@ -5,6 +5,27 @@ decides which programs your session starts.
 
 ![The Autostart Editor panel, showing the entries of an autostart.lua](preview.png)
 
+## Screenshots
+
+These screenshots come from the installed plugin running in Omarchy. They use
+a temporary neutral `autostart.lua` fixture; no personal command lines or
+desktop content are included.
+
+### Search installed applications
+
+The application picker filters by both application name and the cleaned
+desktop-file command. Its result popup is bounded and virtualized, so opening
+it does not instantiate every installed application at once.
+
+![Searching installed applications from the add row](screenshots/application-search.png)
+
+### Edit a command and its delay
+
+Changing an entry opens its command and delay in place. **Save** is explicit;
+saving unchanged values is a no-op and never starts the writer.
+
+![Editing an existing autostart entry and its delay](screenshots/edit-entry.png)
+
 ## What it is
 
 One file, one panel:
@@ -41,8 +62,11 @@ thing.
 From the panel you can:
 
 - **add** a command -- typed by hand, or picked from your installed
-  applications. Picking one **fills the field**; it does not write. The line
-  that goes into a file which runs at every login is one you have read first.
+  applications. The application popup is searchable by name and command, and
+  its bounded `ListView` creates only visible rows even when the system has
+  thousands of desktop entries. Picking one **fills the field**; it does not
+  write. The line that goes into a file which runs at every login is one you
+  have read first.
 - **change** one entry -- exactly the line you picked, no other.
 - **delay** a start by 0–3600 whole seconds using **Start delay (seconds)**
   in the add or change form. Zero starts immediately. The delay is stored in
@@ -50,6 +74,13 @@ From the panel you can:
   Delayed entries remain editable; their command and delay are shown separately.
   Each delay runs independently and does not hold up other autostarts.
 - **remove** one entry -- exactly the line you picked, no other.
+
+The panel is keyboard-operable: `Up`/`Down` or `k`/`j` move between entries,
+`Left`/`Right` or `h`/`l` move between actions, and `Enter` or `Space`
+activates the highlighted control. `Delete`/`x` only highlights **Remove**;
+activation is still a separate confirmation. Press `/` to open application
+search, `a` to focus the add command, and `r` to reread the file. `Escape`
+backs out of a field, editor, or subview before closing the panel.
 
 A line that calls one of those helpers in a form the reader cannot take apart
 -- a nested helper such as
@@ -82,6 +113,10 @@ sorted into a "matching" comment section, because guessing which of your
 section comments a program belongs under is exactly the surprise this design
 avoids.
 
+Saving an entry without changing its command or delay is a no-op: the panel
+says there is nothing to save and does not start the writer, create a backup,
+or change the file's timestamp.
+
 Four things stand between a change and your next login:
 
 1. The new file content is produced by a **pure function** in `Model.js` -- old
@@ -105,9 +140,14 @@ Four things stand between a change and your next login:
    Omarchy's own `autostart.lua.pre-apply.*.bak` and from anything you keep
    there yourself -- and nothing but that exact pattern is ever pruned. If a
    backup cannot be taken, the write is refused rather than done without one.
-   If the file's modification time is not the one the panel read, the write is
-   refused too: you also edit this file by hand, and a line number from a
-   stale read means a different line.
+   The reader attaches a SHA-256 fingerprint of the exact bytes delivered to
+   the panel. The writer compares both that fingerprint and the modification
+   time with the file descriptor it opened, and refuses the write if either
+   differs. This catches hand edits even when they happen within the same
+   whole second: a line number from a stale read may name a different line.
+   The panel always supplies this fingerprint. The low-level writer CLI keeps
+   `--expect-sha256` optional only for compatibility with older developer test
+   calls; it is not the production panel contract.
 
 A change takes effect **at your next login.** The plugin starts nothing and
 reloads nothing.
@@ -130,8 +170,8 @@ reloads nothing.
   (The backup pruner refuses by a different route -- an anchored match on the
   file name -- and needs no external command for it.)
 - **`bash`, `timeout`, and the usual coreutils** -- `awk`, `chmod`, `cp`,
-  `date`, `env`, `find`, `grep`, `head`, `mktemp`, `mv`, `rm`, `sed`, `sleep`,
-  `sort`, `stat`, `tr`, `wc`. All present on any Omarchy install; none of them
+   `date`, `env`, `find`, `grep`, `head`, `mktemp`, `mv`, `rm`, `sed`, `sleep`,
+   `sha256sum`, `sort`, `stat`, `tr`, `wc`. All present on any Omarchy install; none of them
   is optional and none is fetched. Every one of them is invoked by an
   **absolute path** from a block at the top of each script, and each script
   runs with `PATH` set to nothing, so none of these is resolved through the
@@ -190,6 +230,12 @@ and the installed-applications picker to save you typing a command out.
 - A file larger than 64 KiB is shown as far as it was read, marked as cut
   short, and is not writable: line surgery against a partial read would target
   line numbers the file does not have.
+- A symlinked `~/.config/hypr` directory is readable but not writable from the
+  panel. Safely writing through a directory link would require descriptor-
+  relative filesystem operations that the Bash writer cannot provide. A
+  symlinked `autostart.lua` is refused separately for the same fail-closed
+  reason. Use a real Hyprland configuration directory or edit the linked file
+  by hand.
 
 ## Install
 
@@ -226,7 +272,7 @@ omarchy plugin remove smartalb.autostart
 After installing, restart the shell so the widget appears:
 
 ```bash
-omarchy-restart-shell
+omarchy restart shell
 ```
 
 To check it took:
@@ -246,7 +292,7 @@ you are changing the plugin, not what a user needs:
 git clone https://github.com/SmartALB/omarchy-autostart-editor.git
 cd omarchy-autostart-editor
 ./install
-omarchy-restart-shell
+omarchy restart shell
 ```
 
 `./install` puts the plugin at `~/.config/omarchy/plugins/smartalb.autostart/`
@@ -303,7 +349,7 @@ Two consequences, both deliberate:
 
 Three traps, each with the symptom you will recognise it by:
 
-- **Run `omarchy-restart-shell` after every QML change.** The develop guide
+- **Run `omarchy restart shell` after every QML change.** The develop guide
   says saved changes reload automatically; for bar widgets that is not true.
   *Symptom:* the journal writes `Local plugin changed, reloading`, and the
   widget still behaves like the previous version -- diagnostic output you just
